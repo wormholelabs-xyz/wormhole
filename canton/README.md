@@ -2145,7 +2145,7 @@ instead. Each is a JSON array of strings (program, then arguments), so no shell
 splits a key path (see the script's header for the full environment-variable contract).
 
 [`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
-runs the genesis of `wormhole-genesis` 0.2.1. A local operator party creates one
+runs the genesis of `wormhole-genesis` 0.2.2. A local operator party creates one
 `WormholeGenesisOffer`. `guardianGovernance`, `feeCustody` and `nttCustody`
 accept it in one prepared `AcceptGenesis` transaction; the owners sign its
 hash. `AcceptGenesis` creates `CoreState`, `EmitterRegistry`,

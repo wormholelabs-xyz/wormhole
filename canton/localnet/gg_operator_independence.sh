@@ -7,7 +7,8 @@
 #     3-4 gg_genesis.sh: LabsOperator offers genesis; gg, feeCustody and nttCustody accept once.
 #   Phase 2, app-provider disconnected. Local parties submit on sv or app-user, with disclosures read as gg on sv:
 #     5 disconnect app-provider    6 RegisterEmitter        7 PublishMessage at fee 0   8 watcher on sv observes it
-#     9 ClaimReplayRoot           10 VerifyAndConsumeVAA   11 the same VAA again fails  12 relay SetMessageFee 0
+#     9 ClaimReplayRoot           9a the same pair again fails
+#    10 VerifyAndConsumeVAA       11 the same VAA again fails                           12 relay SetMessageFee 0
 #    13 relay TransferFees        14 NTT RegisterManager   15 SetPeer                   16 Transfer (lock), observed
 #    17 Release                   18 relay GuardianSetUpgrade                           19 SetRegistrationFee cannot run
 #   Phase 3, controls:
@@ -94,6 +95,13 @@ check_sorted_parties_equal() {
 created_event() {
   jq -ec --arg suffix "$2" '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith($suffix))]
     | if length == 1 then .[0] else error("expected one created \($suffix), found \(length)") end' <<<"$1"
+}
+
+# created_replay_node_in <transaction-json> <namespace>: the one ReplayNode that the transaction created in that namespace.
+created_replay_node_in() {
+  jq -ec --arg namespace "$2" '[.events[] | .CreatedEvent? // empty
+      | select((.templateId | endswith(":Wormhole.Core.Replay:ReplayNode")) and .createArgument.namespace == $namespace)]
+    | if length == 1 then .[0] else error("expected one created ReplayNode in \($namespace), found \(length)") end' <<<"$1"
 }
 
 # last_created_event <transaction-json> <qualified-template-suffix>: the last created event of that template. A
@@ -266,15 +274,31 @@ pass 8 "chain 75, emitter $(jq -r .emitterAddress <<<"$observation") (Emitter.em
 step 9 "ClaimReplayRoot by CoreIntegrator"
 replay_namespace="$REPLAY_NAMESPACE_PREFIX-$run_label"
 replay_registry_cid="$(core_contract_id replayRootRegistry)"
-claim_transaction="$(submit_local sv "oi-claim-$run_label" "$(json_array "\"$core_integrator\"")" \
-  "$(exercise_command "$REPLAY_ROOT_REGISTRY_TEMPLATE" "$replay_registry_cid" ClaimReplayRoot "$(jq -n --arg party "$core_integrator" \
-    --arg gg "$GG_PARTY" --arg namespace "$replay_namespace" --arg threshold "$REPLAY_SPLIT_THRESHOLD" \
+# claim_replay_root_command <claimed-roots-node-cid>
+claim_replay_root_command() {
+  exercise_command "$REPLAY_ROOT_REGISTRY_TEMPLATE" "$replay_registry_cid" ClaimReplayRoot "$(jq -n --arg party "$core_integrator" \
+    --arg gg "$GG_PARTY" --arg namespace "$replay_namespace" --arg threshold "$REPLAY_SPLIT_THRESHOLD" --arg claimedRootsNode "$1" \
     '{consumer: $party, namespace: $namespace, splitThreshold: $threshold, payer: $party, coreStateCid: null, feeAllocation: null,
-      expectedGuardianGovernance: $gg}')")" \
-  "$(json_array "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_registry_cid")")")"
-replay_root_event="$(created_event "$claim_transaction" :Wormhole.Core.Replay:ReplayNode)"
+      expectedGuardianGovernance: $gg, claimedRootsNodeCid: $claimedRootsNode}')"
+}
+# claim_replay_root_disclosures <claimed-roots-node-cid>
+claim_replay_root_disclosures() {
+  json_array "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$1")"
+}
+claimed_roots_node_cid="$(claimed_roots_node_covering "$core_integrator" "$replay_namespace")"
+claim_transaction="$(submit_local sv "oi-claim-$run_label" "$(json_array "\"$core_integrator\"")" \
+  "$(claim_replay_root_command "$claimed_roots_node_cid")" "$(claim_replay_root_disclosures "$claimed_roots_node_cid")")"
+replay_root_event="$(created_replay_node_in "$claim_transaction" "$replay_namespace")"
 check_sorted_parties_equal "ReplayNode signatories" "$(jq -c .signatories <<<"$replay_root_event")" "$core_integrator" "$GG_PARTY"
-pass 9 "ReplayNode signatories [CoreIntegrator, gg], namespace $replay_namespace"
+check_sorted_parties_equal "claimed-roots ReplayNode successor signatories" \
+  "$(created_replay_node_in "$claim_transaction" "$CLAIMED_ROOTS_NAMESPACE" | jq -c .signatories)" "$GG_PARTY"
+pass 9 "ReplayNode signatories [CoreIntegrator, gg], namespace $replay_namespace; the claimed-roots tree recorded the pair"
+claimed_roots_node_cid="$(claimed_roots_node_covering "$core_integrator" "$replay_namespace")"
+submit_local_expect_rejection sv "oi-claim-again-$run_label" "$(json_array "\"$core_integrator\"")" \
+  "$(claim_replay_root_command "$claimed_roots_node_cid")" "$(claim_replay_root_disclosures "$claimed_roots_node_cid")" \
+  "digest already consumed"
+pass 9a "a second ClaimReplayRoot of (CoreIntegrator, $replay_namespace) is rejected: digest already consumed"
 
 step 10 "VerifyAndConsumeVAA with a devnet-signed app VAA"
 app_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" -signing-key-indices "$current_set_key_indices" -sequence "$run_label")"
@@ -348,12 +372,15 @@ registry_cid="$(core_contract_id emitterRegistry)"
 replay_registry_cid="$(core_contract_id replayRootRegistry)"
 core_state_cid="$(core_contract_id coreState)"
 ntt_admin_only="$(json_array "\"$ntt_admin\"")"
+claimed_roots_node_cid="$(registration_claimed_roots_node "$amulet_instrument" "$ntt_admin")"
 register_manager_transaction="$(submit_local "$NTT_WALLET_VALIDATOR" "oi-ntt-register-$run_label" "$ntt_admin_only" \
   "$(exercise_command "$NTT_GOVERNANCE_TEMPLATE" "$governance_cid" RegisterManager "$(jq -n \
     --arg admin "$ntt_admin" --arg emitterRegistry "$registry_cid" --arg replayRootRegistry "$replay_registry_cid" \
+    --arg claimedRootsNode "$claimed_roots_node_cid" \
     --argjson instrument "$amulet_instrument" --arg factory "$transfer_factory_cid" --arg coreState "$core_state_cid" \
     --arg decimals "$AMULET_DECIMALS" '{
       admin: $admin, chainId: "75", emitterRegistryCid: $emitterRegistry, replayRootRegistryCid: $replayRootRegistry,
+      claimedRootsNodeCid: $claimedRootsNode,
       instrumentId: $instrument, instrumentNonce: "0", tokenConfig: "LockUnlock", tokenDecimals: $decimals,
       factory: {tag: "TransferFactoryCid", value: $factory}, coreStateCid: $coreState, consistencyLevel: "0",
       emitterFeeAllocation: null, claimFeeAllocation: null, feeAllocation: null}')")" \
@@ -361,16 +388,19 @@ register_manager_transaction="$(submit_local "$NTT_WALLET_VALIDATOR" "oi-ntt-reg
     "$(gg_disclosure :Wormhole.Ntt.Governance:NttGovernance "$governance_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:EmitterRegistry "$registry_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$claimed_roots_node_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 manager_event="$(created_event "$register_manager_transaction" :Wormhole.Ntt.Manager:NttManager)"
 ledger_event="$(created_event "$register_manager_transaction" :Wormhole.Ntt.Ledger:LockedLedger)"
 transceiver_emitter_event="$(last_created_event "$register_manager_transaction" :Wormhole.Core.State:Emitter)"
-created_event "$register_manager_transaction" :Wormhole.Core.Replay:ReplayNode > /dev/null
 check_sorted_parties_equal "transceiver Emitter signatories" "$(jq -c .signatories <<<"$transceiver_emitter_event")" "$GG_PARTY"
 manager_cid="$(jq -r .contractId <<<"$manager_event")"
 ledger_cid="$(jq -r .contractId <<<"$ledger_event")"
 manager_address="$(byte_variant_hex NttManagerAddress "$(jq -c .createArgument.managerAddress <<<"$manager_event")")"
 manager_namespace="$(jq -r .createArgument.namespace <<<"$manager_event")"
+check_sorted_parties_equal "NTT replay root signatories" \
+  "$(created_replay_node_in "$register_manager_transaction" "$manager_namespace" | jq -c .signatories)" "$GG_PARTY"
+created_replay_node_in "$register_manager_transaction" "$CLAIMED_ROOTS_NAMESPACE" > /dev/null
 transceiver_emitter_address="$(byte_variant_hex EmitterAddress "$(jq -c .createArgument.emitterAddress <<<"$transceiver_emitter_event")")"
 pass 14 "NttManager ${manager_cid:0:16}, LockedLedger, transceiver Emitter (gg), ReplayNode created"
 

@@ -322,7 +322,8 @@ Keep the logs as the evidence of each run.
    Then two owner keys for each of `guardianGovernance`, `feeCustody` and `nttCustody` sign one `AcceptGenesis`.
    It creates `CoreState`, `EmitterRegistry`, `ReplayRootRegistry`, `NttGovernance` and the `guardianGovernance`
    `CoinFactory`, and archives the offer. `feeRecipient` is `feeCustody`.
-   The script writes the root contract IDs to `../localnet-state/core-contracts.json`.
+   It also creates the root `ReplayNode` of the `guardianGovernance` claimed-roots tree (`claimedRootsNodeCid`).
+   The script writes the root contract IDs to `../localnet-state/core-contracts.json` (key `claimedRootsNode` for that node).
    Then it creates the Ledger API user `wormhole-watcher` on each participant.
    This user has only the right `CanReadAs(guardianGovernance)`.
    `canton/tools/emitter_id_scan.sh` needs a token of this user on each participant that it reads.
@@ -356,11 +357,13 @@ The script prints `PASS step <n>` for each of 21 steps:
 | Step | Action | Expected |
 | - | - | - |
 | 1, 2 | `LabsOperator` is local to `app-provider` only. Each participant vets `wormhole-core`, `ntt`, `wormhole-genesis` and `token-cip0056`. | No `gg` ceremony. |
-| 3, 4 | `gg_genesis.sh`. | One `gg` ceremony. `AcceptGenesis` archives the offer. No root names `LabsOperator`. |
+| 3, 4 | `gg_genesis.sh`. | One `gg` ceremony. `AcceptGenesis` archives the offer. No root names `LabsOperator`. `AcceptGenesis` creates the root of the `gg` claimed-roots tree. |
 | 5 | Disconnect `app-provider`. | Disconnected. |
 | 6, 7 | `CorePublisher` registers an `Emitter`. Then it publishes at fee 0. | Signatories `CorePublisher` and `gg`. |
 | 8 | The watcher harness on `sv` reads as `gg`. | One observation with the `Emitter` address. |
-| 9 to 11 | `CoreIntegrator` claims a replay root and consumes a VAA, then the same VAA again. | Commit, commit, `digest already consumed`. |
+| 9 | `CoreIntegrator` claims a replay root. It gives the claimed-roots node that covers the pair. | Commit. The claimed-roots tree records the pair. |
+| 9a | `CoreIntegrator` claims the same replay root again. | `digest already consumed`. |
+| 10, 11 | `CoreIntegrator` consumes a VAA, then the same VAA again. | Commit, `digest already consumed`. |
 | 12, 13 | `GovernanceRelayer` relays `SetMessageFee` 0 and `TransferFees`. | `actingParties` is `GovernanceRelayer`. One `FeeWithdrawalAuthorization` with no observer. |
 | 14 to 17 | NTT on `app-user`: `RegisterManager` (lock/unlock of Canton Coin), `SetPeer`, `Transfer`, then `Release` by a relayer on `sv`. | Commit. The watcher observes the `Transfer` message. |
 | 18 | `GovernanceRelayer` relays `GuardianSetUpgrade`. Then it attaches the public key of each new guardian (`AttachGuardianPublicKeys`). | The next guardian set index. Each guardian of the new set has a key. |
@@ -728,10 +731,10 @@ after the `nttCustody` change.
 ## NTT end-to-end run
 
 These scripts run the Wormhole NTT layer on LocalNet.
-The NTT packages come from the NTT repository, branch `canton/migrate-ntt-layer`, commit `16ce38d`.
+The NTT packages come from the NTT repository, branch `canton/migrate-ntt-layer`, commit `b4d944e`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.12.3, `ntt` 0.6.1, `wormhole-genesis` 0.2.1 and `token-cip0056` 0.2.0.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.12.3, `ntt` 0.6.2, `wormhole-genesis` 0.2.2 and `token-cip0056` 0.2.0.
 The pinned `ntt` and `wormhole-genesis` DARs call `wormhole-core` 0.12.3.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
 `ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each `ntt` version.
@@ -899,7 +902,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 | --- | --- |
 | C1 | The proxy accepts the gateway client certificate. It refuses a request with no client certificate, and a certificate of a different CA, with HTTP 400. |
 | C2 | From `gateway-net`, a direct connection to the participant ports fails. A connection to the proxy succeeds. |
-| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow returns the four genesis roots of `guardianGovernance`: `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry` and `CoreState`, of the pinned packages. |
+| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow returns the four genesis roots of `guardianGovernance`: `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry` and `CoreState`, of the pinned packages. Without `namespace`, `missing` names `covering claimed-roots ReplayNode`. With the `namespace` of the next registration, the flow also returns that node: the node of the claimed-roots tree that covers the pair. The reserved namespace `wormhole-core:replay-roots` gets HTTP 400. |
 | C4 | The relayer sees no `NttManager`, `CoreState` or `LockedLedger`. |
 | C5 | The relayer submits `Mint` on the burn/mint deployment. |
 | C6 | A user on `app-user` locks Canton Coin with `Transfer` on the deployment of `ntt_lock_unlock_gg.sh`. |
