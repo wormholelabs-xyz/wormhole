@@ -97,7 +97,17 @@ log "building wormhole-core DAR"
 (cd "${REPO_ROOT}/canton" && env -u DPM_SDK_VERSION dpm build --all >/dev/null)
 CORE_VERSION="$(awk '/^version:/ {print $2}' "${REPO_ROOT}/canton/core/daml.yaml")"
 CORE_DAR="${REPO_ROOT}/canton/core/.daml/dist/wormhole-core-${CORE_VERSION}.dar"
-GENESIS_DAR="${NTT_REPO_DIR:-${REPO_ROOT}/../ntt}/canton/genesis/.daml/dist/wormhole-genesis-0.1.0.dar"
+# pinned_value_in_ntt_lib <readonly-name>: the value of that pin in canton/localnet/ntt_lib.sh.
+pinned_value_in_ntt_lib() {
+  sed -nE "s/^readonly $1=\"([^\"]+)\"\$/\1/p" "${REPO_ROOT}/canton/localnet/ntt_lib.sh"
+}
+GENESIS_VERSION="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_VERSION)"
+GENESIS_PINNED_PACKAGE_ID="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_PACKAGE_ID)"
+if [[ ! "${GENESIS_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "${GENESIS_PINNED_PACKAGE_ID}" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "ntt_lib.sh has no single wormhole-genesis version and package id pin"
+  exit 1
+fi
+GENESIS_DAR="${NTT_REPO_DIR:-${REPO_ROOT}/../ntt}/canton/genesis/.daml/dist/wormhole-genesis-${GENESIS_VERSION}.dar"
 if [ ! -f "${GENESIS_DAR}" ]; then
   fail "${GENESIS_DAR} is absent; set NTT_REPO_DIR to an NTT checkout with built DARs"
   exit 1
@@ -126,6 +136,11 @@ if [ -z "${GG_CORE_PACKAGE_ID}" ]; then
   exit 1
 fi
 log "uploaded wormhole-core ${GG_CORE_PACKAGE_ID} and wormhole-genesis ${GG_GENESIS_PACKAGE_ID}"
+if [ "${GG_GENESIS_PACKAGE_ID}" != "${GENESIS_PINNED_PACKAGE_ID}" ]; then
+  fail "wormhole-genesis ${GG_GENESIS_PACKAGE_ID} is not the pinned ${GENESIS_PINNED_PACKAGE_ID}"
+  exit 1
+fi
+pass "wormhole-genesis ${GENESIS_VERSION} is the pinned package ${GENESIS_PINNED_PACKAGE_ID}"
 
 # --- Rejected setups: each case must fail before the first topology load. ---
 # expect_setup_rejected <case> <expected-message> <NAME=value>...: runs setup_guardian_governance.sh with

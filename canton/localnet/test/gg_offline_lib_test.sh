@@ -105,8 +105,7 @@ check_case "first genesis: exact parameters JSON" 0 "$(jq -cn --arg gg "$GG" --a
     governanceContract: {tag: "EmitterAddress", value: "0000000000000000000000000000000000000000000000000000000000000004"},
     initialMessageFee: "0", feeInstrument: {admin: $dso, id: "Amulet"}, registrationFee: "0", replayRootClaimFee: "0",
     firstEmitterId: "0", firstNttManagerId: "0",
-    coreGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
-    nttGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
+    coreGovernanceReplayRecord: {consumedGovernance: []}, nttGovernanceReplayRecord: {consumedGovernance: []},
     genesisKind: {tag: "FirstGenesis", value: {}}}')" - echo "$PARAMETERS"
 check_case "first genesis: no 0.1.0 consumed digest list" 0 false - \
   jq -c 'has("consumedCoreGovernanceDigests") or has("consumedNttGovernanceDigests")' <<<"$PARAMETERS"
@@ -137,6 +136,7 @@ readonly ACCEPT_GENESIS_CASES=(
   "mismatched onboarding fee admin|$OFFER|$(jq -c --arg admin "$RELAYER" '.onboardingFeeAdmin = $admin' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched first emitter id|$OFFER|$(jq -c '.firstEmitterId = "7"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched core replay record digests|$OFFER|$(jq -c '.coreGovernanceReplayRecord.consumedGovernance = [[{tag: "VaaDigest", value: "'"$(printf 'ab%.0s' $(seq 1 32))"'"}, "1"]]' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
+  "agreed parameters with an explicit null floor|$OFFER|$(jq -c '.coreGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds = null' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched NTT replay record floor|$OFFER|$(jq -c '.nttGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds = "1"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched genesis kind|$OFFER|$(jq -c '.genesisKind.tag = "ReGenesisReplacing"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "agreed parameters with an extra key|$OFFER|$(jq -c '. + {operator: "x"}' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
