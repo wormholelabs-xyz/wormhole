@@ -1,0 +1,236 @@
+-- | One replay root per (consumer, namespace): 'ClaimReplayRoot' consumes
+-- 'claimedRootDigest' in the claimed-roots tree of guardianGovernance.
+module Test.TestClaimedReplayRoots where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.List (unique)
+import DA.Optional (fromSome)
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import Wormhole.Core.Bytes
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Test.TestCore (claimedRootsNodeCovering, setup)
+import Test.TestRedTeamCore (checkAttackFailedWith)
+
+partyOfText : Text -> Party
+partyOfText partyText = fromSome (partyFromText partyText)
+
+-- | keccak256 of utf8("wormhole-core:replay-root-claim") ‖ lp("GoldenConsumer") ‖ lp("golden-namespace"),
+-- computed with @cast keccak@.
+goldenClaimedRootDigest : VaaDigest
+goldenClaimedRootDigest = parseHexTextOrAbort "58d4dc29f0852dca5f0f626ac31c93ace1028ca0a41ba3ef972c0d681a841b4b"
+
+testClaimedRootDigestGolden : Script ()
+testClaimedRootDigestGolden = do
+  let digest = claimedRootDigest (partyOfText "GoldenConsumer") "golden-namespace"
+  checkHexValueIsWellFormed digest === True
+  digest === goldenClaimedRootDigest
+
+-- | Distinct pairs give distinct digests, including the pairs that a plain
+-- concatenation of consumer and namespace makes equal.
+testClaimedRootDigestIsInjectiveOnPairs : Script ()
+testClaimedRootDigestIsInjectiveOnPairs = do
+  let pairs =
+        [ ("ab", "c")
+        , ("a", "bc")
+        , ("ab", "cd")
+        , ("abc", "d")
+        , ("a", "c")
+        , ("c", "a")
+        ]
+      digests = map (\(partyText, namespace) -> claimedRootDigest (partyOfText partyText) namespace) pairs
+  forA_ digests \digest -> checkHexValueIsWellFormed digest === True
+  length digests === length pairs
+  unique digests === True
+
+data ClaimantRole = ClaimByIntegrator | ClaimByGuardianGovernance
+  deriving (Eq, Show)
+
+data ClaimedRootsNodeChoice
+  = CoveringClaimedRootsNode
+  | GuardianGovernanceRootOfNamespace Text
+  | IntegratorNodeInReservedNamespace
+  | ClaimedRootsNodeOfRogueGuardianGovernance
+  deriving (Eq, Show)
+
+data ClaimRootCase = ClaimRootCase with
+    caseName         : Text
+    claimant         : ClaimantRole
+    namespace        : Text
+    nodeChoice       : ClaimedRootsNodeChoice
+    expectedFailure  : Optional Text
+
+data ClaimFixture = ClaimFixture with
+    guardianGovernance : Party
+    integrator         : Party
+    rogueGovernance    : Party
+
+tryClaimReplayRootWithNode : Party -> Party -> Text -> (ContractId ReplayNode, Disclosure) -> Script (Either SubmitError (ContractId ReplayNode))
+tryClaimReplayRootWithNode guardianGovernance consumer namespace (claimedRootsNodeCid, claimedRootsNodeDisclosure) = do
+  [(registryCid, _)] <- query @ReplayRootRegistry guardianGovernance
+  registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance registryCid
+  trySubmit (actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
+    exerciseCmd registryCid ClaimReplayRoot with
+      consumer
+      namespace
+      splitThreshold = defaultSplitThreshold
+      payer = consumer
+      coreStateCid = None
+      feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid
+
+tryClaimReplayRoot : Party -> Party -> Text -> Script (Either SubmitError (ContractId ReplayNode))
+tryClaimReplayRoot guardianGovernance consumer namespace =
+  claimedRootsNodeCovering guardianGovernance consumer namespace
+    >>= tryClaimReplayRootWithNode guardianGovernance consumer namespace
+
+disclosedNodeOf : Party -> ContractId ReplayNode -> Script (ContractId ReplayNode, Disclosure)
+disclosedNodeOf reader nodeCid = do
+  nodeDisclosure <- fromSome <$> queryDisclosure reader nodeCid
+  pure (nodeCid, nodeDisclosure)
+
+claimedRootsNodeOfChoice : ClaimFixture -> Party -> Text -> ClaimedRootsNodeChoice -> Script (ContractId ReplayNode, Disclosure)
+claimedRootsNodeOfChoice fixture consumer namespace nodeChoice = case nodeChoice of
+  CoveringClaimedRootsNode -> claimedRootsNodeCovering fixture.guardianGovernance consumer namespace
+  GuardianGovernanceRootOfNamespace rootNamespace -> do
+    nodes <- query @ReplayNode fixture.guardianGovernance
+    case filter (\(_, node) -> node.consumer == fixture.guardianGovernance && node.namespace == rootNamespace) nodes of
+      [(nodeCid, _)] -> disclosedNodeOf fixture.guardianGovernance nodeCid
+      _ -> abort ("expected one root of namespace " <> rootNamespace)
+  IntegratorNodeInReservedNamespace -> do
+    nodes <- query @ReplayNode fixture.integrator
+    case filter (\(_, node) -> node.consumer == fixture.integrator && node.namespace == claimedRootsNamespace) nodes of
+      [(nodeCid, _)] -> disclosedNodeOf fixture.integrator nodeCid
+      _ -> abort "expected one integrator node in the reserved namespace"
+  ClaimedRootsNodeOfRogueGuardianGovernance -> do
+    [(nodeCid, _)] <- query @ReplayNode fixture.rogueGovernance
+    disclosedNodeOf fixture.rogueGovernance nodeCid
+
+checkClaimedRootsTreeRecordsPair : Party -> Party -> Text -> Script ()
+checkClaimedRootsTreeRecordsPair guardianGovernance consumer namespace = do
+  (nodeCid, _) <- claimedRootsNodeCovering guardianGovernance consumer namespace
+  Some node <- queryContractId guardianGovernance nodeCid
+  checkReplayNodeRecordsDigest node (claimedRootDigest consumer namespace) === True
+
+-- | Plan table. Rows run in order on one bridge. Each integrator claim submits
+-- as the integrator alone: the gg authority of the registry body consumes in
+-- the claimed-roots tree.
+claimRootCases : [ClaimRootCase]
+claimRootCases =
+  [ ClaimRootCase "first claim by a plain integrator" ClaimByIntegrator "app" CoveringClaimedRootsNode None
+  , ClaimRootCase "second claim, same integrator and namespace" ClaimByIntegrator "app" CoveringClaimedRootsNode
+      (Some "digest already consumed")
+  , ClaimRootCase "same integrator, other namespace" ClaimByIntegrator "app-2" CoveringClaimedRootsNode None
+  , ClaimRootCase "first claim by gg (NTT shape)" ClaimByGuardianGovernance "ntt-manager" CoveringClaimedRootsNode None
+  , ClaimRootCase "second claim by gg, same namespace" ClaimByGuardianGovernance "ntt-manager" CoveringClaimedRootsNode
+      (Some "digest already consumed")
+  , ClaimRootCase "claim of the reserved namespace by gg" ClaimByGuardianGovernance claimedRootsNamespace CoveringClaimedRootsNode
+      (Some "replay namespace is reserved for the core")
+  , ClaimRootCase "claim of the reserved namespace by an integrator" ClaimByIntegrator claimedRootsNamespace CoveringClaimedRootsNode
+      (Some "replay namespace is reserved for the core")
+  , ClaimRootCase "gg root of another namespace as the claimed-roots node" ClaimByIntegrator "app-3"
+      (GuardianGovernanceRootOfNamespace "ntt-manager") (Some "claimed roots node namespace mismatch")
+  , ClaimRootCase "integrator node in the reserved namespace as the claimed-roots node" ClaimByIntegrator "app-3"
+      IntegratorNodeInReservedNamespace (Some "claimed roots node consumer mismatch")
+  , ClaimRootCase "claimed-roots node of a rogue gg" ClaimByIntegrator "app-3"
+      ClaimedRootsNodeOfRogueGuardianGovernance (Some "claimed roots node guardianGovernance mismatch")
+  , ClaimRootCase "pair of the failed claims commits" ClaimByIntegrator "app-3" CoveringClaimedRootsNode None
+  ]
+
+testClaimReplayRootOncePerPair : Script ()
+testClaimReplayRootOncePerPair = do
+  (guardianGovernance, _) <- setup
+  integrator <- allocateParty "ClaimIntegrator"
+  rogueGovernance <- allocateParty "ClaimRogueGovernance"
+  _ <- submit (actAs integrator <> actAs guardianGovernance) do
+    createCmd ReplayNode with
+      consumer = integrator, guardianGovernance, namespace = claimedRootsNamespace
+      prefix = parseHexTextOrAbort "", splitThreshold = defaultSplitThreshold, consumed = Set.empty
+  _ <- submit rogueGovernance do createCmd (mkInitialClaimedRootsNode rogueGovernance)
+  let fixture = ClaimFixture with guardianGovernance, integrator, rogueGovernance
+  forA_ claimRootCases \claimCase -> do
+    let consumer = case claimCase.claimant of
+          ClaimByIntegrator -> integrator
+          ClaimByGuardianGovernance -> guardianGovernance
+    claimedRootsNode <- claimedRootsNodeOfChoice fixture consumer claimCase.namespace claimCase.nodeChoice
+    claimResult <- tryClaimReplayRootWithNode guardianGovernance consumer claimCase.namespace claimedRootsNode
+    case (claimCase.expectedFailure, claimResult) of
+      (Some failureText, _) -> checkAttackFailedWith claimCase.caseName failureText claimResult
+      (None, Left submitError) -> abort (claimCase.caseName <> ": claim failed: " <> show submitError)
+      (None, Right rootCid) -> do
+        Some root <- queryContractId consumer rootCid
+        root.consumer === consumer
+        root.namespace === claimCase.namespace
+        root.guardianGovernance === guardianGovernance
+        Set.size root.consumed === 0
+        checkClaimedRootsTreeRecordsPair guardianGovernance consumer claimCase.namespace
+
+-- | A claimed-roots tree that splits: each first claim commits, each repeat
+-- fails, and a node that does not cover the pair is rejected.
+testClaimReplayRootAfterClaimedRootsTreeSplits : Script ()
+testClaimReplayRootAfterClaimedRootsTreeSplits = do
+  (guardianGovernance, _) <- setup
+  integrator <- allocateParty "SplitClaimIntegrator"
+  (genesisNodeCid, _) <- claimedRootsNodeCovering guardianGovernance integrator "split-0"
+  submit guardianGovernance do archiveCmd genesisNodeCid
+  _ <- submit guardianGovernance do
+    createCmd (mkInitialClaimedRootsNode guardianGovernance) with splitThreshold = 1
+  let namespaces = map (\position -> "split-" <> show position) [0 .. 5]
+  forA_ namespaces \namespace -> do
+    claimResult <- tryClaimReplayRoot guardianGovernance integrator namespace
+    case claimResult of
+      Left submitError -> abort ("first claim of " <> namespace <> " failed: " <> show submitError)
+      Right _ -> checkClaimedRootsTreeRecordsPair guardianGovernance integrator namespace
+  nodes <- query @ReplayNode guardianGovernance
+  let claimedRootsNodes = filter (\(_, node) -> node.consumer == guardianGovernance && node.namespace == claimedRootsNamespace) nodes
+  assertMsg "claimed-roots tree did not split" (length claimedRootsNodes > 1)
+  forA_ namespaces \namespace -> do
+    repeatResult <- tryClaimReplayRoot guardianGovernance integrator namespace
+    checkAttackFailedWith ("repeat claim of " <> namespace) "digest already consumed" repeatResult
+  let unclaimedNamespace = "split-unclaimed"
+      unclaimedDigestHex = hexTextOf (claimedRootDigest integrator unclaimedNamespace)
+  case filter (\(_, node) -> not (hexTextOf node.prefix `T.isPrefixOf` unclaimedDigestHex)) claimedRootsNodes of
+    [] -> abort "every claimed-roots node covers the unclaimed pair"
+    (nonCoveringNodeCid, _) :: _ -> do
+      nonCoveringNode <- disclosedNodeOf guardianGovernance nonCoveringNodeCid
+      nonCoveringResult <- tryClaimReplayRootWithNode guardianGovernance integrator unclaimedNamespace nonCoveringNode
+      checkAttackFailedWith "claimed-roots node that does not cover the pair" "replay node does not cover digest" nonCoveringResult
+
+-- | A same-gg re-genesis keeps the claimed-roots tree of the first genesis:
+-- claims consume in it, so a pair claimed before the re-genesis stays claimed.
+testSameGuardianGovernanceRegenesisReusesClaimedRootsTree : Script ()
+testSameGuardianGovernanceRegenesisReusesClaimedRootsTree = do
+  (guardianGovernance, firstCoreStateCid) <- setup
+  integrator <- allocateParty "RegenesisClaimIntegrator"
+  firstClaim <- tryClaimReplayRoot guardianGovernance integrator "app"
+  case firstClaim of
+    Left submitError -> abort ("claim before re-genesis failed: " <> show submitError)
+    Right _ -> pure ()
+  Some firstCoreState <- queryContractId guardianGovernance firstCoreStateCid
+  [(firstRegistryCid, firstRegistry)] <- query @ReplayRootRegistry guardianGovernance
+  let replayRecord = governanceReplayRecordForRegenesis [firstCoreState]
+      regenesisSets = guardianSetsForRegenesis [firstCoreState]
+  submit (actAs guardianGovernance <> actAs firstCoreState.feeRecipient) do archiveCmd firstCoreStateCid
+  submit guardianGovernance do archiveCmd firstRegistryCid
+  _ <- submit (actAs guardianGovernance <> actAs firstCoreState.feeRecipient) do
+    createCmd firstCoreState with
+      guardianSetIndex = regenesisSets.guardianSetIndex
+      guardianSets = regenesisSets.guardianSets
+      consumedGovernance = replayRecord.consumedGovernance
+      evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
+  _ <- submit guardianGovernance do
+    createCmd (mkInitialReplayRootRegistry
+      (RegistryParties with guardianGovernance, onboardingFeeAdmin = firstRegistry.onboardingFeeAdmin) 0)
+  nodes <- query @ReplayNode guardianGovernance
+  length (filter (\(_, node) -> node.consumer == guardianGovernance && node.namespace == claimedRootsNamespace) nodes) === 1
+  repeatClaim <- tryClaimReplayRoot guardianGovernance integrator "app"
+  checkAttackFailedWith "claim of a pair claimed before the re-genesis" "digest already consumed" repeatClaim
+  newPairClaim <- tryClaimReplayRoot guardianGovernance integrator "app-after-regenesis"
+  case newPairClaim of
+    Left submitError -> abort ("new pair after re-genesis failed: " <> show submitError)
+    Right _ -> checkClaimedRootsTreeRecordsPair guardianGovernance integrator "app-after-regenesis"
