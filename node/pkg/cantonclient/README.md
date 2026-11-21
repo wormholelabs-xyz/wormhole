@@ -70,8 +70,8 @@ make generate-canton-proto      # builds tools/bin/buf, then `buf generate --pat
 ```
 
 (or directly: `cd proto && buf generate --path com/daml/ledger/api/v2`).
-Use the Go version of the CI `node-lint` job (1.25.10, for example
-`GOTOOLCHAIN=go1.25.10`). `protoc-gen-go` formats its output with the `go/format`
+Use the Go version of the CI `node-lint` job (1.26.10, for example
+`GOTOOLCHAIN=go1.26.10`). `protoc-gen-go` formats its output with the `go/format`
 package of the Go version that builds it, so another Go version changes the comments. It is
 also part of `make generate`. CI (`.github/workflows/build.yml`, the `node-lint`
 job) re-runs `make generate-canton-proto` and fails on `git diff` — exactly like
