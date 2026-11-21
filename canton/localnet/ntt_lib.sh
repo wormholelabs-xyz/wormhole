@@ -10,16 +10,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
 readonly WORMHOLE_CORE_VERSION="0.12.3"
 readonly WORMHOLE_CORE_PACKAGE_ID="32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371"
 # NTT_PIN_VERSION selects one entry of ntt_pinned_package_id.
-readonly NTT_VERSION="${NTT_PIN_VERSION:-0.5.0}"
+readonly NTT_VERSION="${NTT_PIN_VERSION:-0.6.1}"
 NTT_PACKAGE_ID="$(ntt_pinned_package_id "$NTT_VERSION")" || exit 1
 readonly NTT_PACKAGE_ID
 # token-cip0056 0.2.0: its CoinFactory template is the canonical burn/mint factory.
 readonly TOKEN_CIP0056_PACKAGE_ID="0a624d6a07264860159e881ca7ff6b349f58e95f393c8861529089f9cd8ba474"
 readonly NTT_CANTON_DIR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton"
 readonly NTT_DAR="$NTT_CANTON_DIR/ntt/.daml/dist/ntt-$NTT_VERSION.dar"
-# wormhole-genesis 0.1.0 on ntt 0.5.0 and core 0.9.0: NTT branch canton/migrate-ntt-layer, commit b2c355d.
-readonly WORMHOLE_GENESIS_VERSION="0.1.0"
-readonly WORMHOLE_GENESIS_PACKAGE_ID="7e9ca47aadda9bb3828d37a2844b1ee57ae77fa3151f3aecb84d66267e6c44d4"
+# wormhole-genesis 0.2.1 on ntt 0.6.1 and core 0.12.2: NTT branch canton/migrate-ntt-layer, commit 16ce38d.
+readonly WORMHOLE_GENESIS_VERSION="0.2.1"
+readonly WORMHOLE_GENESIS_PACKAGE_ID="8af94ec56cd660812074f23437bbd798e1c13c6be18f512437a413bd9775096c"
 readonly WORMHOLE_GENESIS_DAR="$NTT_CANTON_DIR/genesis/.daml/dist/wormhole-genesis-$WORMHOLE_GENESIS_VERSION.dar"
 
 NTT_CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"

@@ -46,7 +46,8 @@ exercise_command() {
 # first_genesis_parameters <guardian-governance> <fee-custody> <ntt-custody> <onboarding-fee-admin>
 # <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardians: address:public-key, comma-separated>
 # Genesis requires each guardian public key. The core checks that each key derives its address.
-# The GenesisParameters JSON of a first genesis: zero fees, id floors 0, empty consumed governance digest lists.
+# The GenesisParameters JSON (wormhole-genesis 0.2.x) of a first genesis: zero fees, id floors 0, empty governance
+# replay records without an eviction floor.
 first_genesis_parameters() {
   if [[ $# -ne 8 ]]; then
     echo "usage: first_genesis_parameters <gg> <fee-custody> <ntt-custody> <onboarding-fee-admin> <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardians>" >&2
@@ -114,12 +115,15 @@ first_genesis_parameters() {
     --arg instrumentAdmin "$instrument_admin" --arg instrumentId "$instrument_id" --arg index "$guardian_set_index" \
     --arg chain "$GOVERNANCE_CHAIN_ID" --arg contract "$GOVERNANCE_CONTRACT" \
     --argjson guardians "$(paste -d: <(printf '%s\n' "${guardian_addresses[@]}") <(printf '%s\n' "${guardian_public_keys[@]}") \
-      | jq -Rsc 'split("\n") | map(select(length > 0) | split(":") | {address: .[0], publicKey: .[1]})')" '{
+      | jq -Rsc 'split("\n") | map(select(length > 0) | split(":")
+          | {address: {tag: "GuardianAddress", value: .[0]}, publicKey: {tag: "GuardianPublicKey", value: .[1]}})')" '{
       guardianGovernance: $gg, feeCustody: $feeCustody, nttCustody: $nttCustody, onboardingFeeAdmin: $feeAdmin,
       genesisGuardianSet: {guardianSetIndex: $index, guardians: $guardians},
-      governanceChainId: $chain, governanceContract: $contract, initialMessageFee: "0",
+      governanceChainId: $chain, governanceContract: {tag: "EmitterAddress", value: $contract}, initialMessageFee: "0",
       feeInstrument: {admin: $instrumentAdmin, id: $instrumentId}, registrationFee: "0", replayRootClaimFee: "0",
-      firstEmitterId: "0", firstNttManagerId: "0", consumedCoreGovernanceDigests: [], consumedNttGovernanceDigests: [],
+      firstEmitterId: "0", firstNttManagerId: "0",
+      coreGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
+      nttGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
       genesisKind: {tag: "FirstGenesis", value: {}}}'
 }
 
