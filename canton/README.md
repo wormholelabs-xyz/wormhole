@@ -732,20 +732,13 @@ Properties:
   `ReplaceReplayRootRegistryFeeAdmin`. Claiming a root for a
   consumer requires **that consumer's authority**, so nobody can fork another
   app's replay scope (the namespace is a free-form sub-scope _under_ that
-  authority, not a claim anyone else can contest). There is deliberately _no_
-  one-root-per-scope enforcement: maintaining a single trie per scope is the
-  consumer's own responsibility (its disclosure service defines which trie its
-  consumes resolve into, and detects forks — more than one covering node — for
-  free). This is EVM
-  parity: nobody grants replay storage there either; every integrator owns
-  its mapping. A consumer minting parallel roots, like a consumer whose key
-  is stolen, only harms itself — and a stolen consumer key defeats the app
-  more directly anyway. (If key-compromise resilience is ever wanted, the
-  hardening is trie-identity pinning: thread the original root's cid through
-  successors via `self` and pin it in the app contract — documented, not
-  built.) Spam claims cost the spammer synchronizer traffic per transaction
-  and the guardian participants ~300 B of storage per worthless root; no shared contract
-  grows, nothing bricks.
+  authority, not a claim anyone else can contest). Spam claims cost the
+  spammer synchronizer traffic per transaction, the claim fee, about 300 B of
+  guardian participant storage per root, and one suffix in the claimed-roots tree.
+- **One root per scope.** `ClaimReplayRoot` refuses a second root for one
+  (consumer, namespace) pair. The rule applies to each consumer, and also to code
+  that runs with the inherited `guardianGovernance` authority (for example NTT).
+  See "The claimed-roots tree" below.
 - **Scoping and contention.** Tries are per (consumer, namespace): different
   apps — or one consumer party under different namespaces — consume the same
   VAA independently. Consumes racing on the _same node_
@@ -765,6 +758,44 @@ Properties:
 - **Privacy.** Nodes are integrator-private safety state, outside the guardian
   view (§4.1): target-chain consumption is the integrator's concern, and the
   attestation surface is `CoreState` and `Emitter`.
+
+**The claimed-roots tree.** Genesis creates one more replay tree, the claimed-roots tree.
+Its consumer is `guardianGovernance` and its namespace is `claimedRootsNamespace` (`wormhole-core:replay-roots`).
+`ClaimReplayRoot` takes the covering node of this tree as `claimedRootsNodeCid`.
+The choice computes `claimedRootDigest consumer namespace` and exercises `ConsumeDigest` with it on that node.
+A repeated pair fails with "digest already consumed".
+The registry body has the authority of `guardianGovernance`, which is the `ConsumeDigest` controller of the tree.
+Thus the consumer and the payer need no more authority.
+The choice checks the node before the consume:
+
+| Check | Failure text |
+| --- | --- |
+| The namespace of the claim is not `claimedRootsNamespace`. | `replay namespace is reserved for the core` |
+| The `guardianGovernance` of the node is the registry `guardianGovernance`. | `claimed roots node guardianGovernance mismatch` |
+| The consumer of the node is the registry `guardianGovernance`. | `claimed roots node consumer mismatch` |
+| The namespace of the node is `claimedRootsNamespace`. | `claimed roots node namespace mismatch` |
+
+The digest is `keccak256(utf8(tag) ‖ lp(utf8(consumer)) ‖ lp(utf8(namespace)))`.
+The tag is `wormhole-core:replay-root-claim`, and `lp` is the 4-byte big-endian length prefix of `Bytes.daml`.
+The length prefixes make the encoding injective, so two different pairs cannot have the same preimage.
+The tree splits like each replay tree.
+Concurrent claims under one node conflict, and one of them commits.
+The disclosure service finds the covering node of the claimed-roots tree as it finds each other covering node.
+
+**The claimed-roots tree and re-genesis.** The claimed-roots tree belongs to the `guardianGovernance` party, not to one genesis.
+`ClaimReplayRoot` accepts each node of that party in namespace `claimedRootsNamespace`: its consumer and its `guardianGovernance` are the registry `guardianGovernance`.
+The rules are:
+
+1. The first genesis for a `guardianGovernance` party creates the tree with `mkInitialClaimedRootsNode`.
+2. A re-genesis with the same `guardianGovernance` party keeps the tree. It creates no claimed-roots node and archives no node of the tree.
+3. After that re-genesis, claims consume in the same tree. Thus each pair that a consumer claimed before the re-genesis stays claimed.
+4. A re-genesis with a new `guardianGovernance` party creates a new tree for that party.
+5. A root of the old party fails against the new `CoreState` with "replay node guardianGovernance mismatch".
+
+Daml 3 has no contract keys, thus the ledger cannot prove that a party has no claimed-roots tree.
+One first genesis for each `guardianGovernance` party stays a guardian procedure.
+The other first-genesis contracts use the same procedure.
+`Test.TestClaimedReplayRoots` runs a same-party re-genesis and shows that a repeated claim of an earlier pair fails.
 
 **The disclosure service.** Submitters locate the covering node off-ledger: a
 service indexes the active nodes by (consumer, namespace, prefix) (following
@@ -814,7 +845,7 @@ disclosure blob) for X". The complete inventory it must serve:
 | Contract                                 | Index                              | Needed by                                                              | Disclosure attachment?                                                            | Churn                                                      |
 | ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
-| `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem             | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
+| `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem; `ClaimReplayRoot` (claimed-roots tree) | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
 | `EmitterRegistry`                        | guardianGovernance                 | `RegisterEmitter`, `SetRegistrationFee`                                | yes — the requester or the onboarding fee admin submits                           | per emitter registration and per fee or admin change       |
 | `ReplayRootRegistry`                     | guardianGovernance                 | `ClaimReplayRoot`, `SetClaimFee`                                       | yes — the consumer or the onboarding fee admin submits (cacheable blob)           | only on fee or admin change                                |
 | `Emitter`                                | (guardianGovernance, owner, emitterId) | `PublishMessage`                                                   | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
@@ -1989,6 +2020,7 @@ canton/
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
     daml/Test/TestGuardianVisibility.daml ← guardianGovernance visibility/authority tests
     daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
+    daml/Test/TestClaimedReplayRoots.daml ← one replay root per (consumer, namespace) (§4.6)
     daml/Test/MockToken.daml     ← minimal CIP-0056 mock instrument for fee tests
     daml/Test/TestFees.daml      ← fee-payment tests (§4.2)
     daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
