@@ -793,7 +793,8 @@ Check the offer:
 8. Make sure that `initialMessageFee`, `registrationFee` and `replayRootClaimFee` are 0 (Section 7.8).
 9. For a first genesis, make sure that `genesisKind` is `FirstGenesis`.
 10. For a first genesis, make sure that `firstEmitterId` and `firstNttManagerId` are 0.
-11. For a first genesis, make sure that both lists of consumed governance digests are empty.
+11. For a first genesis, make sure that `coreGovernanceReplayRecord` and `nttGovernanceReplayRecord` are empty.
+    Each `consumedGovernance` map has no entry. No record has `evictedGovernanceMaxTimestampSeconds`.
     The `CoreState` precondition requires a key for each guardian only without governance history.
 
 Check the prepared transaction:
@@ -814,6 +815,7 @@ After genesis:
 3. Make sure that your participant shows exactly one `ReplayRootRegistry`. Its only signatory is `gg`.
 4. Make sure that your participant shows exactly one `NttGovernance`. Its signatories are `gg` and `nttCustody`.
 5. Make sure that your participant shows exactly one `CoinFactory` with the admin `gg`.
+   Record the `rootIdentity` of the `NttGovernance`. Compare it with the value that each other guardian records.
 6. Make sure that the operator is a signatory or an observer of none of these contracts.
 7. Run [`emitter_id_scan.sh`](../canton/tools/emitter_id_scan.sh) with begin offset 0 and `EXPECT_ACTIVE_REGISTRIES=1`.
    Set `EXPECTED_CORE_PACKAGE_ID` to the agreed `wormhole-core` package ID.
@@ -825,7 +827,8 @@ If `AcceptGenesis` fails, no root exists and the offer stays active. Do the cere
 If the parameters are incorrect, ask the operator to withdraw the offer (`WithdrawGenesisOffer`) and to make a new offer.
 
 A re-genesis replaces the roots of an earlier genesis (`genesisKind` `ReGenesisReplacing`).
-Its parameters carry the earlier consumed governance digests and the earlier next IDs.
+Its parameters carry the earlier governance replay records and the earlier next IDs.
+The new `NttGovernance` keeps the `rootIdentity` of the earlier root.
 Use the genesis procedure of the NTT repository (`canton/README.md`) for a re-genesis.
 
 An emitter ID is an integer from 0 to 2^53 - 1 (`maxEmitterId`).
@@ -1226,6 +1229,30 @@ A stale disclosure fails the transaction. It cannot make a wrong transaction com
 LocalNet rehearsal: [`gg_operator_independence.sh`](../canton/localnet/gg_operator_independence.sh).
 With `app-provider` (the operator participant) disconnected, local parties on `sv` and `app-user` submit each Wormhole function.
 They use disclosures that `sv` reads as `gg`.
+
+### 7.11 Registration VAA of a `gg`-minted NTT deployment
+
+`RegisterManagerByVaa` registers a burn/mint deployment of a `gg`-minted token.
+It needs a governance VAA with the action `RegisterBurnMintManager`. The guardians sign this VAA.
+The VAA holds a registration binding (`wormhole:ntt-registration:v2`, `ntt` 0.6.0 and later).
+The binding holds the `rootIdentity` of one `NttGovernance` root.
+Thus a root with another identity rejects the VAA.
+
+A first genesis sets `rootIdentity` from `gg` and the ledger time of `AcceptGenesis`.
+Two first geneses at one ledger time make two roots with one identity. Each root then accepts the VAAs of the other root.
+One root for each `gg` is a guardian rule.
+
+Before you sign a registration VAA:
+
+1. Read the active `NttGovernance` of `gg` on your own participant. Use a user that has only `CanReadAs` for `gg`.
+2. Make sure that your participant shows exactly one `NttGovernance` of `gg`.
+3. Make sure that its `rootIdentity` is equal to the value that you recorded at genesis (Section 7.2).
+4. Calculate the binding yourself: `keccak256(tag ‖ rootIdentity ‖ lp(utf8(gg)) ‖ lp(utf8(admin)) ‖ uint64(instrumentNonce))`.
+   The tag is the UTF-8 text `wormhole:ntt-registration:v2`. `lp` is a 4-byte big-endian length prefix. `uint64` is big-endian.
+   The NTT repository has the reference function `nttRegistrationBindingFor` (`canton/ntt/daml/Wormhole/Ntt/Manager.daml`).
+5. Compare your binding with the binding in the VAA payload. Sign the VAA only if the two values are equal.
+
+Do not copy `rootIdentity` from the request. Read it from your own participant.
 
 ## 8. Watcher configuration
 
