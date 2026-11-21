@@ -450,6 +450,8 @@ func buildPayload(request vaaRequest) (vaa.ChainID, vaa.Address, []byte, error) 
 		return vaa.ChainIDEthereum, emitterAddress, []byte("canton localnet rehearsal message"), nil
 	case vaaKindNttTransfer:
 		return request.nttEmitterChain, request.nttEmitterAddress, encodeWormholeTransceiverMessage(request.nttTransfer), nil
+	case vaaKindNttInstrumentID, vaaKindClaimedRootDigest, vaaKindNttNamespace:
+		return 0, vaa.Address{}, nil, fmt.Errorf("kind %q has no VAA payload", request.kind)
 	default:
 		return 0, vaa.Address{}, nil, fmt.Errorf("unknown kind %q", request.kind)
 	}
