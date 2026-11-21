@@ -158,7 +158,7 @@ done
 manager_address="$(ntt_contract burnMint | jq -er .managerAddress)"
 burn_mint_managers="$(active_contracts app-provider "$GG_PARTY" ":Wormhole.Ntt.Manager:NttManager" \
   | jq -c --arg gg "$GG_PARTY" '[.[].createArgument | select(.tokenConfig == "BurnMint" and .instrumentId.admin == $gg)]')"
-instrument_id="$(jq -er --arg address "$manager_address" '[.[] | select(.managerAddress == $address) | .instrumentId.id]
+instrument_id="$(jq -er --arg address "$manager_address" '[.[] | select(.managerAddress.value == $address) | .instrumentId.id]
   | if length == 1 then .[0] else error("expected one burn/mint manager \($address)") end' <<<"$burn_mint_managers")"
 echo "burn/mint deployment $manager_address instrument $instrument_id; gg burn/mint managers $(jq length <<<"$burn_mint_managers")"
 jq -n --argjson managers "$burn_mint_managers" --arg id "$instrument_id" \
@@ -228,7 +228,7 @@ submit_local app-user "registry-mint-$run_label" "$(jq -cn --arg relayer "$relay
     --arg coreState "$(flow_cid CoreState)" --arg replayNode "$(flow_cid "covering ReplayNode")" \
     --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --arg user "$party_a" \
     --arg preapproval "$(flow_cid DepositPreapproval)" --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
       recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')")" \
   "$(jq -c '[.disclosures[] | {templateId, contractId, createdEventBlob, synchronizerId}]' <<<"$mint_flow")" > /dev/null
 [[ "$(party_coin_units "$party_a")" == "$(decimal_text_to_units "$MINT_AMOUNT")" ]] || fail "A holds $(party_coin_units "$party_a") units after the mint"

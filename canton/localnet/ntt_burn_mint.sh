@@ -63,13 +63,13 @@ register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governa
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 init_message="$(jq -c ._5 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
-manager_address="$(jq -r .managerAddress <<<"$manager_json")"
+manager_address="$(byte_variant_hex NttManagerAddress "$(jq -c .managerAddress <<<"$manager_json")")"
 manager_namespace="$(jq -r .namespace <<<"$manager_json")"
 emitter_id="$(jq -r .transceiverEmitterId <<<"$manager_json")"
-emitter_address="$(current_emitter "$emitter_id" | jq -r .createArgument.emitterAddress)"
+emitter_address="$(byte_variant_hex EmitterAddress "$(current_emitter "$emitter_id" | jq -c .createArgument.emitterAddress)")"
 echo "manager $manager_cid address $manager_address emitterId $emitter_id emitterAddress $emitter_address"
 echo "TransceiverInit message $(message_summary "$init_message")"
-if [[ "$(jq -r .payload[0:8] <<<"$init_message")" != "9c23bd3b" ]]; then
+if [[ "$(byte_variant_hex MessagePayload "$(jq -c .payload <<<"$init_message")" | cut -c1-8)" != "9c23bd3b" ]]; then
   echo "RegisterManager did not publish TransceiverInit" >&2
   exit 1
 fi
@@ -78,7 +78,8 @@ echo "== 3. SetPeer chain $PEER_CHAIN_ID (admin)"
 emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
 set_peer_transaction="$(submit_interactive "ntt-burn-mint-set-peer-$run_label" "$(jq -n --arg admin "$admin_party" '[$admin]')" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" SetPeer "$(jq -n --arg chain "$PEER_CHAIN_ID" \
-    --arg manager "$PEER_MANAGER_ADDRESS" --arg transceiver "$PEER_TRANSCEIVER_ADDRESS" --arg emitter "$emitter_cid" \
+    --argjson manager "$(byte_variant_json NttManagerAddress "$PEER_MANAGER_ADDRESS")" \
+    --argjson transceiver "$(byte_variant_json EmitterAddress "$PEER_TRANSCEIVER_ADDRESS")" --arg emitter "$emitter_cid" \
     --arg coreState "$core_state_cid" --arg admin "$admin_party" '{
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
@@ -115,7 +116,7 @@ mint_command() {
     --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
     --arg user "$user_party" --arg preapproval "$preapproval_cid" \
     --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
       recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')"
 }
 relayer_only="$(jq -n --arg relayer "$relayer_party" '[$relayer]')"
@@ -172,7 +173,7 @@ emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
 burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Transfer "$(jq -n --arg user "$user_party" \
     --arg emitter "$emitter_cid" --arg coreState "$core_state_cid" --arg chain "$PEER_CHAIN_ID" \
-    --arg recipient "$PEER_RECIPIENT_ADDRESS" --arg rawAmount "$BURN_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
+    --argjson recipient "$(byte_variant_json UniversalAddress "$PEER_RECIPIENT_ADDRESS")" --arg rawAmount "$BURN_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
     --argjson inputs "$(jq -c '[.[].contractId]' <<<"$user_coins")" --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
       user: $user, transceiverEmitterCid: $emitter, coreStateCid: $coreState, ledgerCid: null,
       recipientChain: $chain, recipientAddress: $recipient, rawAmount: $rawAmount, nonce: $nonce, consistencyLevel: "0",
@@ -184,7 +185,7 @@ burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
 burn_message="$(exercise_result "$burn_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .updateId <<<"$burn_transaction")"
-echo "payload $(jq -r .payload <<<"$burn_message")"
+echo "payload $(byte_variant_hex MessagePayload "$(jq -c .payload <<<"$burn_message")")"
 user_change_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument]')"
 user_change="$(jq -c 'map(.amount)' <<<"$user_change_coins")"
 echo "user coins after burn: $user_change"

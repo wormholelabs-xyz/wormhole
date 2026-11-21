@@ -405,7 +405,7 @@ check_mint_through_service() {
         --arg coreState "$(flow_role_cid "$flow" CoreState)" --arg replayNode "$(flow_role_cid "$flow" "covering ReplayNode")" \
         --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --arg user "$user_party" \
         --arg preapproval "$(flow_role_cid "$flow" DepositPreapproval)" --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-          executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+          executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
           recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')")" \
       "$(flow_disclosed_contracts "$flow")")"; then
     coins_after="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
@@ -432,7 +432,7 @@ amulet_units() {
 locked_ledger_balance_units() {
   local balance
   balance="$(active_contracts app-provider "$GG_PARTY" ":Wormhole.Ntt.Ledger:LockedLedger" \
-    | jq -er --arg address "$lock_unlock_manager_address" '[.[] | select(.createArgument.managerAddress == $address)]
+    | jq -er --arg address "$lock_unlock_manager_address" '[.[] | select(.createArgument.managerAddress.value == $address)]
         | if length == 1 then .[0].createArgument.balance else error("expected one LockedLedger") end')"
   decimal_to_units "$balance" "$DAML_DECIMAL_FRACTION_DIGITS"
 }
@@ -456,7 +456,7 @@ check_transfer_through_service() {
       "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$(flow_role_cid "$flow" NttManager)" Transfer "$(jq -n \
         --arg user "$locker_party" --arg emitter "$(flow_role_cid "$flow" "transceiver Emitter")" \
         --arg coreState "$(flow_role_cid "$flow" CoreState)" --arg ledger "$(flow_role_cid "$flow" LockedLedger)" \
-        --arg chain "$(ntt_contract lockUnlockGg | jq -er .peerChainId)" --arg recipient "$PEER_RECIPIENT_ADDRESS" \
+        --arg chain "$(ntt_contract lockUnlockGg | jq -er .peerChainId)" --argjson recipient "$(byte_variant_json UniversalAddress "$PEER_RECIPIENT_ADDRESS")" \
         --arg rawAmount "$LOCK_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" --argjson inputs "$locker_inputs" \
         --argjson extraArgs "$(registry_extra_args "$registry")" '{
           user: $user, transceiverEmitterCid: $emitter, coreStateCid: $coreState, ledgerCid: $ledger,
@@ -494,7 +494,7 @@ submit_release_response() {
       --arg replayNode "$(flow_role_cid "$flow" "covering ReplayNode")" --arg vaa "$(jq -r .vaaHex <<<"$vaa")" \
       --arg recipient "$recipient_party" \
       --arg ledger "$(flow_role_cid "$flow" LockedLedger)" --argjson extraArgs "$(registry_extra_args "$registry")" '{
-        executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+        executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
         recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')")" \
     "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$registry")" <<<"$(flow_disclosed_contracts "$flow")")"
 }
