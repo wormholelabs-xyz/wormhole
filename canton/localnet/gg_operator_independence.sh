@@ -455,7 +455,14 @@ upgrade_transaction="$(relay 18 guardian-set-upgrade "$upgrade_vaa")"
 check_relay_acting_parties 18 "$upgrade_transaction"
 [[ "$(created_event "$upgrade_transaction" :Wormhole.Core.State:CoreState | jq -r .createArgument.guardianSetIndex)" == "$((current_set_index + 1))" ]] \
   || fail "step 18: guardianSetIndex is not $((current_set_index + 1))"
-pass 18 "guardianSetIndex $((current_set_index + 1))"
+# Hint-free verification (core 0.12) needs the key of each guardian of the new set.
+attach_transaction="$(attach_guardian_public_keys "oi-attach-guardian-public-keys-$run_label" "$((current_set_index + 1))" \
+  "$(jq -c .newGuardianPublicKeys <<<"$upgrade_vaa")")"
+jq -e --arg index "$((current_set_index + 1))" \
+  '[.createArgument.guardianSets[] | select(.[0] == $index) | .[1].members[] | select(.publicKey == null)] | length == 0' \
+  <<<"$(created_event "$attach_transaction" :Wormhole.Core.State:CoreState)" > /dev/null \
+  || fail "step 18: a guardian of set $((current_set_index + 1)) has no public key"
+pass 18 "guardianSetIndex $((current_set_index + 1)); AttachGuardianPublicKeys by GovernanceRelayer: each guardian has a key"
 
 step 19 "SetRegistrationFee by the onboarding fee admin LabsOperator"
 registry_cid="$(core_contract_id emitterRegistry)"

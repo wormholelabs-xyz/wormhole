@@ -363,7 +363,7 @@ The script prints `PASS step <n>` for each of 21 steps:
 | 9 to 11 | `CoreIntegrator` claims a replay root and consumes a VAA, then the same VAA again. | Commit, commit, `digest already consumed`. |
 | 12, 13 | `GovernanceRelayer` relays `SetMessageFee` 0 and `TransferFees`. | `actingParties` is `GovernanceRelayer`. One `FeeWithdrawalAuthorization` with no observer. |
 | 14 to 17 | NTT on `app-user`: `RegisterManager` (lock/unlock of Canton Coin), `SetPeer`, `Transfer`, then `Release` by a relayer on `sv`. | Commit. The watcher observes the `Transfer` message. |
-| 18 | `GovernanceRelayer` relays `GuardianSetUpgrade`. | The next guardian set index. |
+| 18 | `GovernanceRelayer` relays `GuardianSetUpgrade`. Then it attaches the public key of each new guardian (`AttachGuardianPublicKeys`). | The next guardian set index. Each guardian of the new set has a key. |
 | 19 | `LabsOperator` submits `SetRegistrationFee`. | No commit: its participant is offline. The fee stays. |
 | 20 | Reconnect `app-provider`. Disconnect `sv` and `app-user`. Publish from `app-provider`. | `MEDIATOR_SAYS_TX_TIMED_OUT`. The unresponsive parties are exactly `guardianGovernance` and `feeCustody`. |
 | 21 | Count the `gg` submissions since step 1 in two ways. (a) The ceremony log. (b) The transactions on `sv` that show a command ID to `gg`. | (a) 1, (b) 1: the `AcceptGenesis` transaction. |
