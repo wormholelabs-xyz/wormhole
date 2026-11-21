@@ -47,6 +47,20 @@ testClaimedRootDigestIsInjectiveOnPairs = do
   length digests === length pairs
   unique digests === True
 
+-- | Genesis creates one empty claimed-roots root for guardianGovernance.
+testGenesisCreatesOneClaimedRootsNode : Script ()
+testGenesisCreatesOneClaimedRootsNode = do
+  (guardianGovernance, _) <- setup
+  nodes <- query @ReplayNode guardianGovernance
+  case filter (\(_, node) -> node.namespace == claimedRootsNamespace) nodes of
+    [(_, claimedRootsNode)] -> do
+      claimedRootsNode === mkInitialClaimedRootsNode guardianGovernance
+      claimedRootsNode.consumer === guardianGovernance
+      hexTextOf claimedRootsNode.prefix === ""
+      Set.size claimedRootsNode.consumed === 0
+      claimedRootsNode.splitThreshold === defaultSplitThreshold
+    claimedRootsNodes -> abort ("expected one claimed-roots node, found " <> show (length claimedRootsNodes))
+
 data ClaimantRole = ClaimByIntegrator | ClaimByGuardianGovernance
   deriving (Eq, Show)
 
@@ -55,6 +69,7 @@ data ClaimedRootsNodeChoice
   | GuardianGovernanceRootOfNamespace Text
   | IntegratorNodeInReservedNamespace
   | ClaimedRootsNodeOfRogueGuardianGovernance
+  | GuardianGovernanceNodeUnderRogueAnchor
   deriving (Eq, Show)
 
 data ClaimRootCase = ClaimRootCase with
@@ -107,9 +122,14 @@ claimedRootsNodeOfChoice fixture consumer namespace nodeChoice = case nodeChoice
     case filter (\(_, node) -> node.consumer == fixture.integrator && node.namespace == claimedRootsNamespace) nodes of
       [(nodeCid, _)] -> disclosedNodeOf fixture.integrator nodeCid
       _ -> abort "expected one integrator node in the reserved namespace"
-  ClaimedRootsNodeOfRogueGuardianGovernance -> do
-    [(nodeCid, _)] <- query @ReplayNode fixture.rogueGovernance
-    disclosedNodeOf fixture.rogueGovernance nodeCid
+  ClaimedRootsNodeOfRogueGuardianGovernance -> rogueNodeOfConsumer fixture.rogueGovernance
+  GuardianGovernanceNodeUnderRogueAnchor -> rogueNodeOfConsumer fixture.guardianGovernance
+  where
+    rogueNodeOfConsumer nodeConsumer = do
+      nodes <- query @ReplayNode fixture.rogueGovernance
+      case filter (\(_, node) -> node.consumer == nodeConsumer && node.guardianGovernance == fixture.rogueGovernance) nodes of
+        [(nodeCid, _)] -> disclosedNodeOf fixture.rogueGovernance nodeCid
+        _ -> abort "expected one rogue-anchored node of the consumer"
 
 checkClaimedRootsTreeRecordsPair : Party -> Party -> Text -> Script ()
 checkClaimedRootsTreeRecordsPair guardianGovernance consumer namespace = do
@@ -137,8 +157,10 @@ claimRootCases =
       (GuardianGovernanceRootOfNamespace "ntt-manager") (Some "claimed roots node namespace mismatch")
   , ClaimRootCase "integrator node in the reserved namespace as the claimed-roots node" ClaimByIntegrator "app-3"
       IntegratorNodeInReservedNamespace (Some "claimed roots node consumer mismatch")
-  , ClaimRootCase "claimed-roots node of a rogue gg" ClaimByIntegrator "app-3"
-      ClaimedRootsNodeOfRogueGuardianGovernance (Some "claimed roots node guardianGovernance mismatch")
+  , ClaimRootCase "claimed-roots tree of a rogue gg" ClaimByIntegrator "app-3"
+      ClaimedRootsNodeOfRogueGuardianGovernance (Some "Authorization failure")
+  , ClaimRootCase "node of consumer gg under a rogue anchor" ClaimByIntegrator "app-3"
+      GuardianGovernanceNodeUnderRogueAnchor (Some "claimed roots node guardianGovernance mismatch")
   , ClaimRootCase "pair of the failed claims commits" ClaimByIntegrator "app-3" CoveringClaimedRootsNode None
   ]
 
@@ -152,6 +174,8 @@ testClaimReplayRootOncePerPair = do
       consumer = integrator, guardianGovernance, namespace = claimedRootsNamespace
       prefix = parseHexTextOrAbort "", splitThreshold = defaultSplitThreshold, consumed = Set.empty
   _ <- submit rogueGovernance do createCmd (mkInitialClaimedRootsNode rogueGovernance)
+  _ <- submit (actAs guardianGovernance <> actAs rogueGovernance) do
+    createCmd (mkInitialClaimedRootsNode guardianGovernance) with guardianGovernance = rogueGovernance
   let fixture = ClaimFixture with guardianGovernance, integrator, rogueGovernance
   forA_ claimRootCases \claimCase -> do
     let consumer = case claimCase.claimant of

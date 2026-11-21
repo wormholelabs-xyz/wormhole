@@ -27,7 +27,7 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (VAA)
 import Test.MockToken
-import Test.TestCore (setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGenesisGuardian)
+import Test.TestCore (claimedRootsNodeCovering, setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGenesisGuardian)
 
 ----------------------------------------------------------------------
 -- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
@@ -236,11 +236,12 @@ testRedTeamA1FeeCannotBeSkipped = do
   feeRootRegistryCid <- submit guardianGovernance do
     createCmd (mkInitialReplayRootRegistry registryParties 300)
   feeRootRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeRootRegistryCid
-  claimResult <- trySubmit (actAs registrant <> disclose feeRootRegistryDisclosure) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance registrant "redteam"
+  claimResult <- trySubmit (actAs registrant <> disclose feeRootRegistryDisclosure <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd feeRootRegistryCid ClaimReplayRoot with
       consumer = registrant, namespace = "redteam", splitThreshold = 4
       payer = registrant, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = guardianGovernance
+      expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
   checkAttackFailedWith "A1 ClaimReplayRoot without CoreState" "claim fee due" claimResult
 
   feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA
@@ -825,11 +826,12 @@ submitPaidCharge bridge chargePoint payer feeAllocation extraDisclosures = do
           expectedGuardianGovernance = bridge.guardianGovernance
     ChargeOnClaimReplayRoot -> do
       registryDisclosure <- queryDisclosure bridge.guardianGovernance bridge.feeReplayRootRegistryCid
-      void <$> trySubmit (submitOptions (coreStateDisclosure :: optionalToList registryDisclosure)) do
+      (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering bridge.guardianGovernance bridge.publisher "f1-core"
+      void <$> trySubmit (submitOptions (coreStateDisclosure :: claimedRootsNodeDisclosure :: optionalToList registryDisclosure)) do
         exerciseCmd bridge.feeReplayRootRegistryCid ClaimReplayRoot with
           consumer = bridge.publisher, namespace = "f1-core", splitThreshold = 4
           payer, coreStateCid = Some bridge.coreStateCid, feeAllocation = Some feeAllocation
-          expectedGuardianGovernance = bridge.guardianGovernance
+          expectedGuardianGovernance = bridge.guardianGovernance, claimedRootsNodeCid
 
 -- | 'checkAttackFailedWith' as a value: 'Some' description when the outcome is
 -- not a failure that contains @expectedSubstring@.
@@ -1031,6 +1033,7 @@ testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
       guardianGovernanceEmitterCid <- registerEmitter guardianGovernance guardianGovernance
       replayRootRegistryCid <- submit guardianGovernance do
         createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+      claimedRootsNodeCid <- submit guardianGovernance do createCmd (mkInitialClaimedRootsNode guardianGovernance)
       forgedPublishAllocation <- allocateWithFeeRegistryAttack guardianGovernance unrelatedPayer feeCustody
         guardianGovernanceInstrument (feeToDecimal (feeDueAtChargePoint ChargeOnClaimReplayRoot))
         PublishOnEmitter with
@@ -1040,11 +1043,13 @@ testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
       coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
       registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance replayRootRegistryCid
       emitterDisclosure <- fromSome <$> queryDisclosure guardianGovernance guardianGovernanceEmitterCid
-      attackResult <- trySubmit (actAs unrelatedPayer <> discloseMany [coreStateDisclosure, registryDisclosure, emitterDisclosure]) do
+      claimedRootsNodeDisclosure <- fromSome <$> queryDisclosure guardianGovernance claimedRootsNodeCid
+      attackResult <- trySubmit (actAs unrelatedPayer
+          <> discloseMany [coreStateDisclosure, registryDisclosure, emitterDisclosure, claimedRootsNodeDisclosure]) do
         exerciseCmd replayRootRegistryCid ClaimReplayRoot with
           consumer = unrelatedPayer, namespace = "b1", splitThreshold = 4
           payer = unrelatedPayer, coreStateCid = Some coreStateCid, feeAllocation = Some forgedPublishAllocation
-          expectedGuardianGovernance = guardianGovernance
+          expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
       checkNoAttackAccepted "B1 forged publish on the guardianGovernance emitter"
         (optionalToList (describeUnexpectedOutcome "paid ClaimReplayRoot"
           "fee instrument admin must not be guardianGovernance" attackResult))

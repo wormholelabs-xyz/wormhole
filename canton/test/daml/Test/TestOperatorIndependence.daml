@@ -102,10 +102,11 @@ claimReplayRootAs : CoreBridge -> Party -> Text -> Int -> Script (ContractId Rep
 claimReplayRootAs bridge consumer namespace splitThreshold = do
   [(registryCid, _)] <- query @ReplayRootRegistry bridge.guardianGovernance
   registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
-  submit (actAs consumer <> disclose registryDisclosure) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering bridge.guardianGovernance consumer namespace
+  submit (actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd registryCid ClaimReplayRoot with
       consumer, namespace, splitThreshold, payer = consumer, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = bridge.guardianGovernance
+      expectedGuardianGovernance = bridge.guardianGovernance, claimedRootsNodeCid
 
 -- | Amount and recipient of 'govTransferFeesVAA'.
 transferFeesRecipient : UniversalAddress
@@ -199,10 +200,11 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
 
   -- ClaimReplayRoot: consumer only.
   replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
-  rootCid <- submit (actAs consumer <> disclose replayRegistryDisclosure) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering gg consumer "caller-only"
+  rootCid <- submit (actAs consumer <> disclose replayRegistryDisclosure <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd bridge.replayRegistryCid ClaimReplayRoot with
       consumer, namespace = "caller-only", splitThreshold = defaultSplitThreshold, payer = consumer
-      coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+      coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg, claimedRootsNodeCid
   Some root <- queryContractId consumer rootCid
   sort (signatory root) === sort [consumer, gg]
 
@@ -472,10 +474,13 @@ testShadowAnchorsAreRejected = do
       requester = owner, payer = owner, coreStateCid = Some shadowCoreStateCid
       feeAllocation = Some registrationPayment, expectedGuardianGovernance = gg
   checkAttackFailedWith "RegisterEmitter on a shadow CoreState" "core state guardianGovernance mismatch" registrationResult
-  claimResult <- discardResult $ trySubmit (actAs consumer <> disclose paidReplayRegistryDisclosure <> disclose shadowCoreStateDisclosure) do
+  (shadowClaimNodeCid, shadowClaimNodeDisclosure) <- claimedRootsNodeCovering gg consumer "shadow"
+  claimResult <- discardResult $ trySubmit
+    (actAs consumer <> disclose paidReplayRegistryDisclosure <> disclose shadowCoreStateDisclosure <> disclose shadowClaimNodeDisclosure) do
     exerciseCmd paidReplayRegistryCid ClaimReplayRoot with
       consumer, namespace = "shadow", splitThreshold = defaultSplitThreshold, payer = consumer
       coreStateCid = Some shadowCoreStateCid, feeAllocation = Some claimPayment, expectedGuardianGovernance = gg
+      claimedRootsNodeCid = shadowClaimNodeCid
   checkAttackFailedWith "ClaimReplayRoot on a shadow CoreState" "core state guardianGovernance mismatch" claimResult
   consumeResult <- discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
     exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
@@ -486,10 +491,12 @@ testShadowAnchorsAreRejected = do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = owner, payer = owner, coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
   checkAttackFailedWith "RegisterEmitter on a shadow EmitterRegistry" "registry guardianGovernance mismatch" rogueRegistrationResult
-  rogueClaimResult <- discardResult $ trySubmit (actAs consumer <> disclose rogueReplayRegistryDisclosure) do
+  rogueClaimResult <- discardResult $ trySubmit
+    (actAs consumer <> disclose rogueReplayRegistryDisclosure <> disclose shadowClaimNodeDisclosure) do
     exerciseCmd rogueReplayRegistryCid ClaimReplayRoot with
       consumer, namespace = "shadow", splitThreshold = defaultSplitThreshold, payer = consumer
       coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+      claimedRootsNodeCid = shadowClaimNodeCid
   checkAttackFailedWith "ClaimReplayRoot on a shadow ReplayRootRegistry" "replay root registry guardianGovernance mismatch" rogueClaimResult
 
 ----------------------------------------------------------------------
@@ -685,6 +692,7 @@ testCompromisedFeeAdminStopsOnlyOnboarding = do
   pricedOutReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge pricedOutReplayRegistryCid
   coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
   emitterDisclosure <- discloseAsGuardianGovernance bridge emitterCid
+  (newcomerNodeCid, newcomerNodeDisclosure) <- claimedRootsNodeCovering gg newcomer "newcomer"
 
   let cases =
         [ CompromisedFeeAdminCase "new registration without a fee"
@@ -694,10 +702,11 @@ testCompromisedFeeAdminStopsOnlyOnboarding = do
                 expectedGuardianGovernance = gg)
             (StepFailsWithText "registration fee due")
         , CompromisedFeeAdminCase "new replay root claim without a fee"
-            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutReplayRegistryDisclosure) do
+            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutReplayRegistryDisclosure <> disclose newcomerNodeDisclosure) do
               exerciseCmd pricedOutReplayRegistryCid ClaimReplayRoot with
                 consumer = newcomer, namespace = "newcomer", splitThreshold = defaultSplitThreshold, payer = newcomer
-                coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg)
+                coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+                claimedRootsNodeCid = newcomerNodeCid)
             (StepFailsWithText "claim fee due")
         , CompromisedFeeAdminCase "admin archives an existing emitter"
             (discardResult $ trySubmit (actAs feeAdmin <> disclose emitterDisclosure) do archiveCmd emitterCid)
