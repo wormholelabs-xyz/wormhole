@@ -341,9 +341,7 @@ ecrecover
 keccak
 ledgerapi
 splice
-chainlock
 goroutine
-goroutines
 nonconsuming
 obvs
 suiclient
