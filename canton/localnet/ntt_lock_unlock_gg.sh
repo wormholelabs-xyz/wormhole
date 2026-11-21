@@ -58,12 +58,15 @@ emitter_registry_cid="$(current_emitter_registry)"
 replay_root_registry_cid="$(core_contract_id replayRootRegistry)"
 core_state_cid="$(core_contract_id coreState)"
 amulet_instrument="$(jq -n --arg dso "$dso" '{admin: $dso, id: "Amulet"}')"
+claimed_roots_node_cid="$(registration_claimed_roots_node "$amulet_instrument" "$GG_PARTY")"
 register_transaction="$(submit_guardian_ceremony "ntt-register-lock-unlock-gg-$run_label" "$gg_only" \
   "$(exercise_command "$NTT_GOVERNANCE_TEMPLATE" "$governance_cid" RegisterManager "$(jq -n \
     --arg admin "$GG_PARTY" --arg emitterRegistry "$emitter_registry_cid" --arg replayRootRegistry "$replay_root_registry_cid" \
+    --arg claimedRootsNode "$claimed_roots_node_cid" \
     --argjson instrument "$amulet_instrument" --arg factory "$transfer_factory_cid" --arg coreState "$core_state_cid" \
     --arg decimals "$AMULET_DECIMALS" '{
       admin: $admin, chainId: "75", emitterRegistryCid: $emitterRegistry, replayRootRegistryCid: $replayRootRegistry,
+      claimedRootsNodeCid: $claimedRootsNode,
       instrumentId: $instrument, instrumentNonce: "0", tokenConfig: "LockUnlock", tokenDecimals: $decimals,
       factory: {tag: "TransferFactoryCid", value: $factory}, coreStateCid: $coreState, consistencyLevel: "0",
       emitterFeeAllocation: null, claimFeeAllocation: null, feeAllocation: null}')")" \
@@ -71,6 +74,7 @@ register_transaction="$(submit_guardian_ceremony "ntt-register-lock-unlock-gg-$r
   "$(json_array \
     "$(gg_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$claimed_roots_node_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -er ._2 <<<"$register_result")"

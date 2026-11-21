@@ -44,13 +44,16 @@ emitter_registry_cid="$(current_emitter_registry)"
 replay_root_registry_cid="$(core_contract_id replayRootRegistry)"
 core_state_cid="$(core_contract_id coreState)"
 coin_factory_cid="$(ntt_contract coinFactory)"
+claimed_roots_node_cid="$(registration_claimed_roots_node "$instrument_json" "$admin_party")"
 register_transaction="$(submit_guardian_ceremony "ntt-register-burn-mint-$run_label" \
   "$(jq -n --arg admin "$admin_party" --arg gg "$GG_PARTY" '[$admin, $gg]')" \
   "$(exercise_command "$NTT_GOVERNANCE_TEMPLATE" "$governance_cid" RegisterManager "$(jq -n \
     --arg admin "$admin_party" --arg emitterRegistry "$emitter_registry_cid" --arg replayRootRegistry "$replay_root_registry_cid" \
+    --arg claimedRootsNode "$claimed_roots_node_cid" \
     --argjson instrument "$instrument_json" --arg factory "$coin_factory_cid" --arg coreState "$core_state_cid" \
     --arg decimals "$TOKEN_DECIMALS" '{
       admin: $admin, chainId: "75", emitterRegistryCid: $emitterRegistry, replayRootRegistryCid: $replayRootRegistry,
+      claimedRootsNodeCid: $claimedRootsNode,
       instrumentId: $instrument, instrumentNonce: "0", tokenConfig: "BurnMint", tokenDecimals: $decimals,
       factory: {tag: "BurnMintFactoryCid", value: $factory}, coreStateCid: $coreState, consistencyLevel: "0",
       emitterFeeAllocation: null, claimFeeAllocation: null, feeAllocation: null}')")" \
@@ -58,6 +61,7 @@ register_transaction="$(submit_guardian_ceremony "ntt-register-burn-mint-$run_la
   "$(json_array \
     "$(gg_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$claimed_roots_node_cid")" \
     "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -r ._2 <<<"$register_result")"
