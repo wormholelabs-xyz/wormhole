@@ -13,6 +13,9 @@
 //	  -emitter-address <peer transceiver> -source-manager <peer manager> -recipient-manager <canton manager> \
 //	  -source-token <peer token> -recipient-party <party id> -trimmed-decimals 8 -trimmed-amount 250000000
 //	go run ./hack/canton_localnet_vaa -kind ntt-instrument-id -admin-party <party id> -instrument-nonce 0
+//	go run ./hack/canton_localnet_vaa -kind claimed-root-digest -consumer-party <party id> -namespace <namespace>
+//	go run ./hack/canton_localnet_vaa -kind ntt-namespace -namespace-instrument-admin <party id> -namespace-instrument-id <id> \
+//	  -namespace-admin-party <party id> -namespace-manager-id <NttGovernance nextId>
 package main
 
 import (
@@ -46,6 +49,8 @@ const (
 	vaaKindMessage            vaaKind = "message"
 	vaaKindNttTransfer        vaaKind = "ntt-transfer"
 	vaaKindNttInstrumentID    vaaKind = "ntt-instrument-id"
+	vaaKindClaimedRootDigest  vaaKind = "claimed-root-digest"
+	vaaKindNttNamespace       vaaKind = "ntt-namespace"
 )
 
 // Length of the key table in node/pkg/devnet.InsecureDeterministicEcdsaKeyByIndex.
@@ -58,25 +63,31 @@ type kindSpecificFlag struct {
 
 // Flags that only one kind reads.
 var kindSpecificFlags = map[string]kindSpecificFlag{
-	"fee":                {ownerKind: vaaKindSetMessageFee, required: true},
-	"new-set-index":      {ownerKind: vaaKindGuardianSetUpgrade, required: true},
-	"new-key-indices":    {ownerKind: vaaKindGuardianSetUpgrade, required: true},
-	"transfer-amount":    {ownerKind: vaaKindTransferFees, required: true},
-	"transfer-recipient": {ownerKind: vaaKindTransferFees, required: true},
-	"new-contract":       {ownerKind: vaaKindContractUpgrade, required: true},
-	"emitter-chain":      {ownerKind: vaaKindNttTransfer},
-	"emitter-address":    {ownerKind: vaaKindNttTransfer, required: true},
-	"source-manager":     {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-manager":  {ownerKind: vaaKindNttTransfer, required: true},
-	"ntt-sender":         {ownerKind: vaaKindNttTransfer},
-	"ntt-message-id":     {ownerKind: vaaKindNttTransfer},
-	"trimmed-decimals":   {ownerKind: vaaKindNttTransfer},
-	"trimmed-amount":     {ownerKind: vaaKindNttTransfer, required: true},
-	"source-token":       {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-party":    {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-chain":    {ownerKind: vaaKindNttTransfer},
-	"admin-party":        {ownerKind: vaaKindNttInstrumentID, required: true},
-	"instrument-nonce":   {ownerKind: vaaKindNttInstrumentID, required: true},
+	"fee":                        {ownerKind: vaaKindSetMessageFee, required: true},
+	"new-set-index":              {ownerKind: vaaKindGuardianSetUpgrade, required: true},
+	"new-key-indices":            {ownerKind: vaaKindGuardianSetUpgrade, required: true},
+	"transfer-amount":            {ownerKind: vaaKindTransferFees, required: true},
+	"transfer-recipient":         {ownerKind: vaaKindTransferFees, required: true},
+	"new-contract":               {ownerKind: vaaKindContractUpgrade, required: true},
+	"emitter-chain":              {ownerKind: vaaKindNttTransfer},
+	"emitter-address":            {ownerKind: vaaKindNttTransfer, required: true},
+	"source-manager":             {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-manager":          {ownerKind: vaaKindNttTransfer, required: true},
+	"ntt-sender":                 {ownerKind: vaaKindNttTransfer},
+	"ntt-message-id":             {ownerKind: vaaKindNttTransfer},
+	"trimmed-decimals":           {ownerKind: vaaKindNttTransfer},
+	"trimmed-amount":             {ownerKind: vaaKindNttTransfer, required: true},
+	"source-token":               {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-party":            {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-chain":            {ownerKind: vaaKindNttTransfer},
+	"admin-party":                {ownerKind: vaaKindNttInstrumentID, required: true},
+	"instrument-nonce":           {ownerKind: vaaKindNttInstrumentID, required: true},
+	"consumer-party":             {ownerKind: vaaKindClaimedRootDigest, required: true},
+	"namespace":                  {ownerKind: vaaKindClaimedRootDigest, required: true},
+	"namespace-instrument-admin": {ownerKind: vaaKindNttNamespace, required: true},
+	"namespace-instrument-id":    {ownerKind: vaaKindNttNamespace, required: true},
+	"namespace-admin-party":      {ownerKind: vaaKindNttNamespace, required: true},
+	"namespace-manager-id":       {ownerKind: vaaKindNttNamespace, required: true},
 }
 
 type vaaRequest struct {
@@ -100,6 +111,14 @@ type vaaRequest struct {
 	// ntt-instrument-id only.
 	nttAdminParty      string
 	nttInstrumentNonce uint64
+	// claimed-root-digest only.
+	claimedRootConsumerParty string
+	claimedRootNamespace     string
+	// ntt-namespace only.
+	nttNamespaceInstrumentAdmin string
+	nttNamespaceInstrumentID    string
+	nttNamespaceAdminParty      string
+	nttNamespaceManagerID       uint64
 }
 
 type signedVAAOutput struct {
@@ -112,11 +131,12 @@ type signedVAAOutput struct {
 func parseVAAKind(kindText string) (vaaKind, error) {
 	switch kind := vaaKind(kindText); kind {
 	case vaaKindGuardianSetUpgrade, vaaKindSetMessageFee, vaaKindTransferFees, vaaKindContractUpgrade,
-		vaaKindMessage, vaaKindNttTransfer, vaaKindNttInstrumentID:
+		vaaKindMessage, vaaKindNttTransfer, vaaKindNttInstrumentID, vaaKindClaimedRootDigest,
+		vaaKindNttNamespace:
 		return kind, nil
 	default:
 		return "", fmt.Errorf("unknown kind %q (use guardian-set-upgrade, set-message-fee, transfer-fees, contract-upgrade, "+
-			"message, ntt-transfer or ntt-instrument-id)", kindText)
+			"message, ntt-transfer, ntt-instrument-id, claimed-root-digest or ntt-namespace)", kindText)
 	}
 }
 
@@ -264,7 +284,7 @@ func parseSignerPositions(flagValue string, setSize int) ([]uint8, error) {
 func parseVAARequest(commandLine []string) (vaaRequest, error) {
 	flagSet := flag.NewFlagSet("canton_localnet_vaa", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
-	kindText := flagSet.String("kind", "", "guardian-set-upgrade, set-message-fee, transfer-fees, contract-upgrade, message, ntt-transfer or ntt-instrument-id")
+	kindText := flagSet.String("kind", "", "guardian-set-upgrade, set-message-fee, transfer-fees, contract-upgrade, message, ntt-transfer, ntt-instrument-id, claimed-root-digest or ntt-namespace")
 	messageFee := flagSet.Uint64("fee", 0, "set-message-fee only, required: the new fee in 10^-10 fee-instrument units")
 	signingSetIndexText := flagSet.String("signing-set-index", "0", "guardian set index the VAA names")
 	signingKeyIndicesText := flagSet.String("signing-key-indices", "0", "deterministic key indices of the signing set, in guardian order")
@@ -278,6 +298,12 @@ func parseVAARequest(commandLine []string) (vaaRequest, error) {
 	transferFlags := registerNttTransferFlags(flagSet)
 	adminParty := flagSet.String("admin-party", "", "ntt-instrument-id only, required: registering admin party id")
 	instrumentNonce := flagSet.Uint64("instrument-nonce", 0, "ntt-instrument-id only, required: instrument nonce")
+	consumerParty := flagSet.String("consumer-party", "", "claimed-root-digest only, required: ClaimReplayRoot consumer party id")
+	replayNamespace := flagSet.String("namespace", "", "claimed-root-digest only, required: ClaimReplayRoot namespace")
+	namespaceInstrumentAdmin := flagSet.String("namespace-instrument-admin", "", "ntt-namespace only, required: instrument admin party id")
+	namespaceInstrumentID := flagSet.String("namespace-instrument-id", "", "ntt-namespace only, required: instrument id")
+	namespaceAdminParty := flagSet.String("namespace-admin-party", "", "ntt-namespace only, required: registering admin party id")
+	namespaceManagerID := flagSet.Uint64("namespace-manager-id", 0, "ntt-namespace only, required: NttGovernance nextId at registration")
 	if err := flagSet.Parse(commandLine); err != nil {
 		return vaaRequest{}, err
 	}
@@ -346,6 +372,31 @@ func parseVAARequest(commandLine []string) (vaaRequest, error) {
 		request.nttAdminParty = *adminParty
 		request.nttInstrumentNonce = *instrumentNonce
 	}
+	if kind == vaaKindClaimedRootDigest {
+		if *consumerParty == "" {
+			return vaaRequest{}, fmt.Errorf("-consumer-party must not be empty")
+		}
+		if err := checkReplayNamespace(*replayNamespace); err != nil {
+			return vaaRequest{}, err
+		}
+		request.claimedRootConsumerParty = *consumerParty
+		request.claimedRootNamespace = *replayNamespace
+	}
+	if kind == vaaKindNttNamespace {
+		for flagName, flagValue := range map[string]string{"namespace-instrument-admin": *namespaceInstrumentAdmin,
+			"namespace-instrument-id": *namespaceInstrumentID, "namespace-admin-party": *namespaceAdminParty} {
+			if flagValue == "" {
+				return vaaRequest{}, fmt.Errorf("-%s must not be empty", flagName)
+			}
+		}
+		if *namespaceManagerID > maxNttManagerID {
+			return vaaRequest{}, fmt.Errorf("-namespace-manager-id exceeds %d", maxNttManagerID)
+		}
+		request.nttNamespaceInstrumentAdmin = *namespaceInstrumentAdmin
+		request.nttNamespaceInstrumentID = *namespaceInstrumentID
+		request.nttNamespaceAdminParty = *namespaceAdminParty
+		request.nttNamespaceManagerID = *namespaceManagerID
+	}
 	return request, nil
 }
 
@@ -411,6 +462,14 @@ func run() error {
 	}
 	if request.kind == vaaKindNttInstrumentID {
 		return json.NewEncoder(os.Stdout).Encode(map[string]string{"instrumentId": nttInstrumentIDForAdminText(request.nttAdminParty, request.nttInstrumentNonce)})
+	}
+	if request.kind == vaaKindClaimedRootDigest {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"digestHex": claimedRootDigestHex(request.claimedRootConsumerParty, request.claimedRootNamespace)})
+	}
+	if request.kind == vaaKindNttNamespace {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{"namespace": nttNamespaceForTexts(request.nttNamespaceInstrumentAdmin,
+			request.nttNamespaceInstrumentID, request.nttNamespaceAdminParty, request.nttNamespaceManagerID)})
 	}
 	emitterChain, emitterAddress, payload, err := buildPayload(request)
 	if err != nil {
