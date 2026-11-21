@@ -75,7 +75,7 @@ register_transaction="$(submit_guardian_ceremony "ntt-register-lock-unlock-gg-$r
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -er ._2 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
-manager_address="$(jq -er .managerAddress <<<"$manager_json")"
+manager_address="$(byte_variant_hex NttManagerAddress "$(jq -c .managerAddress <<<"$manager_json")")"
 emitter_id="$(jq -er .transceiverEmitterId <<<"$manager_json")"
 [[ "$(jq -r .admin <<<"$manager_json")" == "$GG_PARTY" ]] || fail "manager admin is not guardianGovernance"
 [[ "$(jq -r .reserveCustodian <<<"$manager_json")" == "$NTT_CUSTODY_PARTY" ]] || fail "manager reserveCustodian is not nttCustody"
@@ -85,7 +85,8 @@ echo "== 3. SetPeer chain $PEER_CHAIN_ID (guardianGovernance)"
 emitter_cid="$(current_emitter "$emitter_id" | jq -er .contractId)"
 set_peer_transaction="$(submit_guardian_ceremony "ntt-lock-unlock-gg-set-peer-$run_label" "$gg_only" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" SetPeer "$(jq -n --arg chain "$PEER_CHAIN_ID" \
-    --arg manager "$PEER_MANAGER_ADDRESS" --arg transceiver "$PEER_TRANSCEIVER_ADDRESS" --arg emitter "$emitter_cid" \
+    --argjson manager "$(byte_variant_json NttManagerAddress "$PEER_MANAGER_ADDRESS")" \
+    --argjson transceiver "$(byte_variant_json EmitterAddress "$PEER_TRANSCEIVER_ADDRESS")" --arg emitter "$emitter_cid" \
     --arg coreState "$core_state_cid" --arg gg "$GG_PARTY" '{
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $gg, feeAllocation: null}')")" \

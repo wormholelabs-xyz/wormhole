@@ -44,7 +44,7 @@ check_deployment() {
     | ($observed | map(select(.sequence == ($message.sequence | tonumber)))) as $transfer
     | if ($transfer | length) != 1 then error("expected one observation of sequence \($message.sequence), found \($transfer | length)")
       elif $transfer[0].emitterChain != 75 then error("emitter chain \($transfer[0].emitterChain), expected 75")
-      elif $transfer[0].payloadHex != $message.payload then error("observed payload differs from the WormholeMessage")
+      elif $transfer[0].payloadHex != $message.payload.value then error("observed payload differs from the WormholeMessage")
       elif $transfer[0].nonce != ($message.nonce | tonumber) then error("observed nonce differs")
       elif ($reobserved | not) and ([$observed[].payloadHex[0:8]] | sort) != ["18fc67c2", "9945ff10", "9c23bd3b"]
         then error("live payload prefixes \([$observed[].payloadHex[0:8]]), expected init, registration and transfer")

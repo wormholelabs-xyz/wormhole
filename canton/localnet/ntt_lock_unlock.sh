@@ -99,10 +99,10 @@ register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governa
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 ledger_cid="$(jq -r ._4 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
-manager_address="$(jq -r .managerAddress <<<"$manager_json")"
+manager_address="$(byte_variant_hex NttManagerAddress "$(jq -c .managerAddress <<<"$manager_json")")"
 manager_namespace="$(jq -r .namespace <<<"$manager_json")"
 emitter_id="$(jq -r .transceiverEmitterId <<<"$manager_json")"
-emitter_address="$(current_emitter "$emitter_id" | jq -r .createArgument.emitterAddress)"
+emitter_address="$(byte_variant_hex EmitterAddress "$(current_emitter "$emitter_id" | jq -c .createArgument.emitterAddress)")"
 echo "manager ${manager_cid:0:16} address $manager_address emitterId $emitter_id emitterAddress $emitter_address"
 echo "LockedLedger ${ledger_cid:0:16} $(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Ledger:LockedLedger" | jq -c '{admin: .admin[0:24], balance}')"
 echo "TransceiverInit message $(message_summary "$(jq -c ._5 <<<"$register_result")")"
@@ -111,7 +111,8 @@ echo "== 3. SetPeer chain $PEER_CHAIN_ID (custodian)"
 emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
 set_peer_transaction="$(submit_local app-provider "ntt-lock-unlock-set-peer-$run_label" "$custodian_only" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" SetPeer "$(jq -n --arg chain "$PEER_CHAIN_ID" \
-    --arg manager "$PEER_MANAGER_ADDRESS" --arg transceiver "$PEER_TRANSCEIVER_ADDRESS" --arg emitter "$emitter_cid" \
+    --argjson manager "$(byte_variant_json NttManagerAddress "$PEER_MANAGER_ADDRESS")" \
+    --argjson transceiver "$(byte_variant_json EmitterAddress "$PEER_TRANSCEIVER_ADDRESS")" --arg emitter "$emitter_cid" \
     --arg coreState "$core_state_cid" --arg admin "$custodian_party" '{
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
@@ -131,7 +132,7 @@ emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
 lock_transaction="$(submit_local app-user "ntt-lock-$run_label" "$(jq -n --arg party "$locker_party" '[$party]')" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Transfer "$(jq -n --arg user "$locker_party" \
     --arg emitter "$emitter_cid" --arg coreState "$core_state_cid" --arg ledger "$ledger_cid" --arg chain "$PEER_CHAIN_ID" \
-    --arg recipient "$PEER_RECIPIENT_ADDRESS" --arg rawAmount "$LOCK_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
+    --argjson recipient "$(byte_variant_json UniversalAddress "$PEER_RECIPIENT_ADDRESS")" --arg rawAmount "$LOCK_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
     --argjson inputs "$locker_inputs" --argjson extraArgs "$(registry_extra_args "$lock_registry")" '{
       user: $user, transceiverEmitterCid: $emitter, coreStateCid: $coreState, ledgerCid: $ledger,
       recipientChain: $chain, recipientAddress: $recipient, rawAmount: $rawAmount, nonce: $nonce, consistencyLevel: "0",
@@ -190,7 +191,7 @@ release_command() {
     --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
     --arg recipient "$recipient_party" --arg ledger "$3" \
     --argjson extraArgs "$(registry_extra_args "$4")" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
       recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')"
 }
 # release_disclosures <replay-node-cid> <ledger-cid> <custody-pot-cid> <registry-json>
