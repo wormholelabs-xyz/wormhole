@@ -132,14 +132,27 @@ if jq -e --arg operator "$LABS_OPERATOR_PARTY" \
     '[.events[] | .CreatedEvent? // empty | (.signatories[], (.observers // [])[])] | index($operator)' <<<"$accept_transaction" > /dev/null; then
   fail "a contract that AcceptGenesis created names LabsOperator as a stakeholder"
 fi
+# A first genesis creates the root of the gg claimed-roots tree (wormhole-genesis 0.2.2) and returns its cid.
+genesis_claimed_roots_node_cid="$(jq -er --arg cid "$offer_cid" '[.events[] | .ExercisedEvent? // empty
+    | select(.contractId == $cid and .choice == "AcceptGenesis") | .exerciseResult.claimedRootsNodeCid]
+  | if length == 1 and (.[0] | type == "string") then .[0] else error("AcceptGenesis returned no claimedRootsNodeCid") end' \
+  <<<"$accept_transaction")" || fail "AcceptGenesis of a first genesis returned no claimedRootsNodeCid"
+jq -e --arg cid "$genesis_claimed_roots_node_cid" --arg gg "$GG_PARTY" --arg namespace "$CLAIMED_ROOTS_NAMESPACE" \
+  '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith(":Wormhole.Core.Replay:ReplayNode"))]
+   | length == 1 and .[0].contractId == $cid and .[0].signatories == [$gg] and (.[0].observers // []) == []
+     and .[0].createArgument.consumer == $gg and .[0].createArgument.namespace == $namespace
+     and .[0].createArgument.prefix.value == ""' <<<"$accept_transaction" > /dev/null \
+  || fail "the claimed-roots ReplayNode of AcceptGenesis is not the root of guardianGovernance in $CLAIMED_ROOTS_NAMESPACE"
 jq -n --arg coreState "$(created_contract_id "$accept_transaction" ":Wormhole.Core.State:CoreState")" \
+  --arg claimedRootsNode "$genesis_claimed_roots_node_cid" \
   --arg emitterRegistry "$(created_contract_id "$accept_transaction" ":Wormhole.Core.State:EmitterRegistry")" \
   --arg replayRootRegistry "$(created_contract_id "$accept_transaction" ":Wormhole.Core.State:ReplayRootRegistry")" \
   --arg nttGovernance "$(created_contract_id "$accept_transaction" ":Wormhole.Ntt.Governance:NttGovernance")" \
   --arg coinFactory "$(created_contract_id "$accept_transaction" ":Token.CIP0056.CoinFactory:CoinFactory")" \
   --arg updateId "$(jq -r .updateId <<<"$accept_transaction")" --arg commandId "$accept_command_id" \
   '{coreState: $coreState, emitterRegistry: $emitterRegistry, replayRootRegistry: $replayRootRegistry,
-    nttGovernance: $nttGovernance, coinFactory: $coinFactory, genesisUpdateId: $updateId, genesisCommandId: $commandId}' \
+    nttGovernance: $nttGovernance, coinFactory: $coinFactory, claimedRootsNode: $claimedRootsNode,
+    genesisUpdateId: $updateId, genesisCommandId: $commandId}' \
   > "$CORE_CONTRACTS"
 echo "Genesis roots (update $(jq -r .updateId <<<"$accept_transaction")):"
 jq . "$CORE_CONTRACTS"

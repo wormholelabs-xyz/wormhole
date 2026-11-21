@@ -262,12 +262,12 @@ classify_submit_response() {
 }
 
 # ntt_pinned_package_id <ntt-version>: the package id that ntt_upload_dars.sh requires for that version.
-# 0.6.1 on wormhole-core 0.12.2: NTT branch canton/migrate-ntt-layer, commit 16ce38d.
+# 0.6.2 on wormhole-core 0.12.3: NTT branch canton/migrate-ntt-layer, commit b4d944e.
 ntt_pinned_package_id() {
   case "$1" in
-    0.6.1) echo "37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc" ;;
+    0.6.2) echo "3aa43a1c498bd8c13467a8d9438d568c1a325bc948119395195bc2fbcb427093" ;;
     *)
-      echo "no ntt package pin for version '$1'; pinned versions: 0.6.1" >&2
+      echo "no ntt package pin for version '$1'; pinned versions: 0.6.2" >&2
       return 1
       ;;
   esac
@@ -275,5 +275,5 @@ ntt_pinned_package_id() {
 
 # ntt_requires_custody_party <ntt-version>: NttGovernance and NttManager have the signatory nttCustody.
 ntt_requires_custody_party() {
-  [[ "$1" == "0.6.1" ]]
+  [[ "$1" == "0.6.2" ]]
 }

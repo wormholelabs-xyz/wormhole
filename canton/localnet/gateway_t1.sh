@@ -344,11 +344,24 @@ check_service_endpoints() {
     check_service_answers "no route" "$removed_path" 404 -
   done
   check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
-  # ntt 0.5.0: the register flow reads only gg contracts, the genesis roots of the pinned packages.
+  # ntt 0.6.2: the register flow reads only gg contracts, the genesis roots of the pinned packages. Without a namespace,
+  # the covering claimed-roots node is missing.
   check_service_answers "register flow from the gg reader" /v1/flows/register 200 \
     "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\"])
-     and (.missing == [])
+     and ([.missing[].role] == [\"covering claimed-roots ReplayNode\"])
      and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])"
+  # With the namespace of the next registration, the service serves the claimed-roots node that covers the pair.
+  local register_namespace expected_claimed_roots_node
+  register_namespace="$(ntt_namespace_for "$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, id: "Amulet"}')" "$GG_PARTY" \
+    "$(ntt_governance_next_id)")"
+  expected_claimed_roots_node="$(claimed_roots_node_covering "$GG_PARTY" "$register_namespace")"
+  check_service_answers "register flow with a namespace serves the covering claimed-roots node" \
+    "/v1/flows/register?namespace=$(jq -rn --arg namespace "$register_namespace" '$namespace | @uri')" 200 \
+    "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\", \"covering claimed-roots ReplayNode\"])
+     and (.missing == [])
+     and (.disclosures[4].contractId == \"$expected_claimed_roots_node\")
+     and (.disclosures[4].templateId | split(\":\")[0]) == \"$WORMHOLE_CORE_PACKAGE_ID\""
+  check_service_answers "register flow with the reserved namespace" "/v1/flows/register?namespace=wormhole-core%3Areplay-roots" 400 -
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.

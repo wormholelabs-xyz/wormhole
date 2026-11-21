@@ -10,16 +10,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
 readonly WORMHOLE_CORE_VERSION="0.12.3"
 readonly WORMHOLE_CORE_PACKAGE_ID="32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371"
 # NTT_PIN_VERSION selects one entry of ntt_pinned_package_id.
-readonly NTT_VERSION="${NTT_PIN_VERSION:-0.6.1}"
+readonly NTT_VERSION="${NTT_PIN_VERSION:-0.6.2}"
 NTT_PACKAGE_ID="$(ntt_pinned_package_id "$NTT_VERSION")" || exit 1
 readonly NTT_PACKAGE_ID
 # token-cip0056 0.2.0: its CoinFactory template is the canonical burn/mint factory.
 readonly TOKEN_CIP0056_PACKAGE_ID="0a624d6a07264860159e881ca7ff6b349f58e95f393c8861529089f9cd8ba474"
 readonly NTT_CANTON_DIR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton"
 readonly NTT_DAR="$NTT_CANTON_DIR/ntt/.daml/dist/ntt-$NTT_VERSION.dar"
-# wormhole-genesis 0.2.1 on ntt 0.6.1 and core 0.12.2: NTT branch canton/migrate-ntt-layer, commit 16ce38d.
-readonly WORMHOLE_GENESIS_VERSION="0.2.1"
-readonly WORMHOLE_GENESIS_PACKAGE_ID="8af94ec56cd660812074f23437bbd798e1c13c6be18f512437a413bd9775096c"
+# wormhole-genesis 0.2.2 on ntt 0.6.2 and core 0.12.3: NTT branch canton/migrate-ntt-layer, commit b4d944e.
+readonly WORMHOLE_GENESIS_VERSION="0.2.2"
+readonly WORMHOLE_GENESIS_PACKAGE_ID="4a69c9c01de4f71eecc442d3aa48f197fec850e49115f91f8ace3340cf99c510"
 readonly WORMHOLE_GENESIS_DAR="$NTT_CANTON_DIR/genesis/.daml/dist/wormhole-genesis-$WORMHOLE_GENESIS_VERSION.dar"
 
 NTT_CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
@@ -151,6 +151,32 @@ covering_replay_node() {
       '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns)
              | select(.createArgument.prefix.value as $prefix | $digest | startswith($prefix))]
        | if length == 1 then .[0].contractId else error("expected one covering replay node, found \(length)") end'
+}
+
+# claimed_roots_node_covering <consumer> <namespace>: the gg claimed-roots ReplayNode that covers claimedRootDigest of
+# the pair. ClaimReplayRoot (core 0.12.3) and RegisterManager (ntt 0.6.2) take it as claimedRootsNodeCid.
+claimed_roots_node_covering() {
+  covering_replay_node "$CLAIMED_ROOTS_NAMESPACE" \
+    "$(generate_vaa -kind claimed-root-digest -consumer-party "$1" -namespace "$2" | jq -er .digestHex)"
+}
+
+# ntt_namespace_for <instrument-json> <admin> <manager-id>: Wormhole.Ntt.Manager.nttNamespaceFor.
+ntt_namespace_for() {
+  generate_vaa -kind ntt-namespace -namespace-instrument-admin "$(jq -er .admin <<<"$1")" \
+    -namespace-instrument-id "$(jq -er .id <<<"$1")" -namespace-admin-party "$2" -namespace-manager-id "$3" | jq -er .namespace
+}
+
+# registration_claimed_roots_node <instrument-json> <admin>: the claimed-roots node that covers the replay root of the
+# next registration on the current NttGovernance root (namespace from its nextId).
+registration_claimed_roots_node() {
+  claimed_roots_node_covering "$GG_PARTY" "$(ntt_namespace_for "$1" "$2" "$(ntt_governance_next_id)")"
+}
+
+# ntt_governance_next_id: the nextId of the NttGovernance root of guardianGovernance.
+ntt_governance_next_id() {
+  active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
+    | jq -er --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]
+        | if length == 1 then .[0].createArgument.nextId else error("expected one NttGovernance, found \(length)") end'
 }
 
 # ntt_transfer_vaa <ntt-transfer flags...>: a VAA from the current guardian set.
