@@ -16,7 +16,7 @@ import Wormhole.Core.GuardianSet (GuardianSet(..), GuardianSetMember(..))
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
-import Test.TestCore (devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, registerEmitter, setupWithPartyLabel)
+import Test.TestCore (claimedRootsNodeCovering, devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, registerEmitter, setupWithPartyLabel)
 
 -- | One value at one ledger boundary.
 data ForgedValueCase
@@ -149,11 +149,12 @@ claimReplayRoot : Party -> Party -> Script (ContractId ReplayNode)
 claimReplayRoot guardianGovernance consumer = do
   [(registryCid, _)] <- query @ReplayRootRegistry guardianGovernance
   registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance registryCid
-  submit (actAs consumer <> disclose registryDisclosure) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance consumer "forged"
+  submit (actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd registryCid ClaimReplayRoot with
       consumer, namespace = "forged", splitThreshold = defaultSplitThreshold
       payer = consumer, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = guardianGovernance
+      expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
 
 -- | Valid control values: the harness accepts each one, so a rejection in the
 -- shell table comes from the forged value.

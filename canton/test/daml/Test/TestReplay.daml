@@ -19,7 +19,7 @@ import DA.Text qualified as T
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.State
-import Test.TestCore (setup, govSetFeeVAA)
+import Test.TestCore (claimedRootsNodeCovering, setup, govSetFeeVAA)
 
 -- | Right-pad a hex fragment with zeros to a full 64-nibble digest.
 pad64 : Text -> VaaDigest
@@ -54,7 +54,8 @@ registerReplayRoot : Party -> Party -> Text -> Int -> Script (ContractId ReplayN
 registerReplayRoot guardianGovernance consumer namespace threshold = do
   [(regCid, _)] <- query @ReplayRootRegistry guardianGovernance
   regDisc <- fromSome <$> queryDisclosure guardianGovernance regCid
-  submit (actAs consumer <> disclose regDisc) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance consumer namespace
+  submit (actAs consumer <> disclose regDisc <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       namespace
@@ -63,6 +64,7 @@ registerReplayRoot guardianGovernance consumer namespace threshold = do
       coreStateCid = None    -- claimFee is 0 in the fixture
       feeAllocation = None
       expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s
 -- @namespace@ trie covering @digest@, queried as @consumer@. The filter matches
@@ -309,20 +311,25 @@ testReplayNamespaceLengthBounds = do
         , (namespaceOfLength 129, False)
         ]
   forA_ namespaceCases \(namespace, isAccepted) -> do
+    ggNodes <- query @ReplayNode guardianGovernance
+    [(claimedRootsNodeCid, _)] <- pure (filter (\(_, node) -> node.namespace == claimedRootsNamespace) ggNodes)
+    claimedRootsNodeDisclosure <- fromSome <$> queryDisclosure guardianGovernance claimedRootsNodeCid
     let createNode = createCmd ReplayNode with
           consumer, guardianGovernance, namespace, prefix = rootPrefix, splitThreshold = 4, consumed = Set.empty
         claimRoot = exerciseCmd registryCid ClaimReplayRoot with
           consumer, namespace, splitThreshold = 4, payer = consumer
           coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = guardianGovernance
+          claimedRootsNodeCid
+        claimSubmitOptions = actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure
     if isAccepted
       then do
         _ <- submit (actAs consumer <> actAs guardianGovernance) createNode
-        rootCid <- submit (actAs consumer <> disclose registryDisclosure) claimRoot
+        rootCid <- submit claimSubmitOptions claimRoot
         Some root <- queryContractId consumer rootCid
         root.namespace === namespace
       else do
         submitMustFail (actAs consumer <> actAs guardianGovernance) createNode
-        submitMustFail (actAs consumer <> disclose registryDisclosure) claimRoot
+        submitMustFail claimSubmitOptions claimRoot
 
 -- | Nodes are co-signed: neither the consumer nor guardianGovernance can
 -- archive (and so re-create-empty) a node alone.
@@ -339,11 +346,10 @@ testNodeArchiveNeedsBoth = do
 
 -- | Root claims are free and self-serve; the registry pins down WHOSE scope a
 -- claim can touch. Claiming a root for a consumer requires that consumer's
--- authority — nobody can fork someone ELSE'S scope. A consumer duplicating its
--- own root is deliberately possible: parallel roots are self-harm, detected
--- off-ledger ('coveringNode' aborts on more than one covering node). Roots
--- cannot be minted outside the registry — the consumer alone lacks
--- guardianGovernance's signature.
+-- authority — nobody can fork someone ELSE'S scope. A second claim of one
+-- (consumer, namespace) fails (Test.TestClaimedReplayRoots). Roots cannot be
+-- minted outside the registry — the consumer alone lacks guardianGovernance's
+-- signature.
 testRootClaims : Script ()
 testRootClaims = do
   (guardianGovernance, consumer, rootCid) <- setupTrie 4
@@ -355,7 +361,20 @@ testRootClaims = do
   regDisc <- fromSome <$> queryDisclosure guardianGovernance regCid
   -- A third party cannot claim a root for someone else's scope.
   mallory <- allocateParty "TrieMallory"
-  submitMustFail (actAs mallory <> disclose regDisc) do
+  (malloryNodeCid, malloryNodeDisc) <- claimedRootsNodeCovering guardianGovernance consumer "mallory-scope"
+  submitMustFail (actAs mallory <> disclose regDisc <> disclose malloryNodeDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      namespace = "mallory-scope"
+      splitThreshold = 4
+      payer = consumer
+      coreStateCid = None
+      feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid = malloryNodeCid
+  -- The consumer cannot duplicate its own root.
+  (duplicateNodeCid, duplicateNodeDisc) <- claimedRootsNodeCovering guardianGovernance consumer ns
+  submitMustFail (actAs consumer <> disclose regDisc <> disclose duplicateNodeDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       namespace = ns
@@ -364,18 +383,9 @@ testRootClaims = do
       coreStateCid = None
       feeAllocation = None
       expectedGuardianGovernance = guardianGovernance
-  -- The consumer CAN duplicate its own root — by design, self-harm only.
-  _ <- submit (actAs consumer <> disclose regDisc) do
-    exerciseCmd regCid ClaimReplayRoot with
-      consumer
-      namespace = ns
-      splitThreshold = 4
-      payer = consumer
-      coreStateCid = None
-      feeAllocation = None
-      expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid = duplicateNodeCid
   roots <- query @ReplayNode consumer
-  length roots === 2
+  length roots === 1
   -- The consumer cannot create a co-signed node alone.
   submitMustFail consumer do
     createCmd ReplayNode with

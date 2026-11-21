@@ -21,7 +21,8 @@ import Test.TestRedTeamCore
   ( redTeamGuardianPubKey1, redTeamGuardianPubKey2, redTeamGuardianPubKey3, rtAppMessageBySet1AllSigners
   , rtGuardianSetUpgradeToSet1 )
 import Test.TestCore
-  ( devnetGenesisGuardian, devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key, devnetGuardianSet1PubKey
+  ( claimedRootsNodeCovering, devnetGenesisGuardian, devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key
+  , devnetGuardianSet1PubKey
   , govGuardianSetUpgradeVAA, govSetFeeVAA, numberCases, set1MessageVAA, setup )
 
 -- | Set 1 member of 'govGuardianSetUpgradeVAA' with its key attached.
@@ -75,11 +76,12 @@ testVerifyWithoutHintsByExternalParty = do
   verifyAs guardianGovernance integrator coreStateCid govSetFeeVAA >>= checkVerifiedBySet "govSetFeeVAA" 0
   [(registryCid, _)] <- query @ReplayRootRegistry guardianGovernance
   registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance registryCid
-  rootCid <- submit (actAs integrator <> disclose registryDisclosure) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance integrator "hint-free"
+  rootCid <- submit (actAs integrator <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd registryCid ClaimReplayRoot with
       consumer = integrator, namespace = "hint-free", splitThreshold = defaultSplitThreshold
       payer = integrator, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = guardianGovernance
+      expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
   coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   (vaa, _) <- submit (actAs integrator <> disclose coreStateDisclosure) do
     exerciseCmd coreStateCid VerifyAndConsumeVAA with

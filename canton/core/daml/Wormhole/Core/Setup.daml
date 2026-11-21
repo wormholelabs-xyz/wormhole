@@ -5,9 +5,11 @@
 module Wormhole.Core.Setup where
 
 import DA.Map qualified as Map
+import DA.Set qualified as Set
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
+import Wormhole.Core.Replay
 import Wormhole.Core.State
 
 -- | Wormhole ChainID assigned to Canton.
@@ -106,3 +108,17 @@ mkInitialReplayRootRegistry parties claimFee =
     guardianGovernance = parties.guardianGovernance
     onboardingFeeAdmin = parties.onboardingFeeAdmin
     claimFee
+
+-- | Root of the claimed-roots tree that 'ClaimReplayRoot' consumes in. First
+-- genesis of a guardianGovernance only: a re-genesis with the same
+-- guardianGovernance keeps the existing tree. Creation needs the
+-- @guardianGovernance@ signature.
+mkInitialClaimedRootsNode : Party -> ReplayNode
+mkInitialClaimedRootsNode guardianGovernance =
+  ReplayNode with
+    consumer = guardianGovernance
+    guardianGovernance
+    namespace = claimedRootsNamespace
+    prefix = parseHexTextOrAbort ""
+    splitThreshold = defaultSplitThreshold
+    consumed = Set.empty
