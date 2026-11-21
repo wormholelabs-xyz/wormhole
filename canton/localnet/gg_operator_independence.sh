@@ -332,7 +332,8 @@ withdrawal_event="$(created_event "$transfer_fees_transaction" :Wormhole.Core.St
 check_sorted_parties_equal "FeeWithdrawalAuthorization signatories" "$(jq -c .signatories <<<"$withdrawal_event")" "$GG_PARTY"
 [[ "$(jq -c '.observers // []' <<<"$withdrawal_event")" == "[]" ]] || fail "step 13: FeeWithdrawalAuthorization has observers"
 jq -e --arg amount "$TRANSFER_FEES_AMOUNT" --arg recipient "$TRANSFER_FEES_RECIPIENT" --arg digest "$(jq -r .digestHex <<<"$transfer_fees_vaa")" \
-  '.createArgument.amount == $amount and .createArgument.recipient == $recipient and .createArgument.vaaHash == $digest' \
+  '.createArgument.amount == $amount and .createArgument.recipient == {tag: "UniversalAddress", value: $recipient}
+    and .createArgument.vaaHash == {tag: "VaaDigest", value: $digest}' \
   <<<"$withdrawal_event" > /dev/null || fail "step 13: FeeWithdrawalAuthorization fields $(jq -c .createArgument <<<"$withdrawal_event")"
 pass 13 "one FeeWithdrawalAuthorization, signatory gg, no observer"
 
@@ -424,7 +425,7 @@ release_vaa="$(generate_vaa -kind ntt-transfer -signing-set-index "$current_set_
 release_replay_node_cid="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Core.Replay:ReplayNode \
   | jq -er --arg gg "$GG_PARTY" --arg ns "$manager_namespace" --arg digest "$(jq -r .digestHex <<<"$release_vaa")" \
     '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns)
-           | select(.createArgument.prefix as $prefix | $digest | startswith($prefix))]
+           | select(.createArgument.prefix.value as $prefix | $digest | startswith($prefix))]
      | if length == 1 then .[0].contractId else error("expected one covering replay node, found \(length)") end')"
 release_registry="$(amulet_transfer_factory "$ntt_admin" "$ntt_recipient" "$RELEASE_AMOUNT" "$(jq -n --arg pot "$pot_cid" '[$pot]')")"
 release_transaction="$(submit_local sv "oi-ntt-release-$run_label" "$(json_array "\"$ntt_relayer\"")" \
