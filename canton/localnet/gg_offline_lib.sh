@@ -16,6 +16,7 @@ readonly GOVERNANCE_CHAIN_ID="1"
 readonly GOVERNANCE_CONTRACT="0000000000000000000000000000000000000000000000000000000000000004"
 readonly MAX_GUARDIAN_SET_INDEX=4294967295
 # Wormhole.Core.Replay.claimedRootsNamespace: the namespace of the gg claimed-roots tree.
+# shellcheck disable=SC2034 # used by the scripts that source this file
 readonly CLAIMED_ROOTS_NAMESPACE="wormhole-core:replay-roots"
 
 # check_party_id <label> <party-id>: <hint>::1220<64 lowercase hex>.
