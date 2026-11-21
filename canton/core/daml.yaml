@@ -7,10 +7,11 @@
 # is registry-enforced (see State.daml and README §4).
 sdk-version: 3.7.3
 name: wormhole-core
-version: 0.12.2
+version: 0.12.3
 source: daml
 # 0.12.0 is not SCU-compatible with 0.11.1 (GuardianSet and choice signatures changed); participants need a fresh wormhole-core line.
 # 0.12.1 replaces 0.12.0 (TransferFees accepts chain 0); no participant vetted 0.12.0.
+# 0.12.3 replaces 0.12.2 (ClaimReplayRoot takes claimedRootsNodeCid); no participant vetted 0.12.2.
 dependencies:
   - daml-prim
   - daml-stdlib

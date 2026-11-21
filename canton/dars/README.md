@@ -70,6 +70,11 @@ The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360
 The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
+0.12.3 `ClaimReplayRoot` takes the argument `claimedRootsNodeCid`.
+It refuses a second root for one (consumer, namespace) pair.
+The 0.12.3 main package id is `32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371` (Daml SDK 3.7.3).
+0.12.3 replaces 0.12.2 (`e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd`). No participant vetted 0.12.2.
+
 0.12.2 adds `tryGovernanceReplayRecordForRegenesisFromRecords`, the re-genesis replay merge over earlier replay records.
 The `CoreState` variants of the merge call it. Templates and choices do not change.
 The 0.12.2 main package id is `e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd` (Daml SDK 3.7.3).

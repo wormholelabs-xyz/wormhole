@@ -6,9 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
 
 # Package pins of the NTT run. ntt_upload_dars.sh checks each DAR against them with ==.
-# wormhole-core 0.12.2 (Daml SDK 3.7.3): the LocalNet core DAR, the core DALF of the NTT DAR and the watcher filter.
-readonly WORMHOLE_CORE_VERSION="0.12.2"
-readonly WORMHOLE_CORE_PACKAGE_ID="e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd"
+# wormhole-core 0.12.3 (Daml SDK 3.7.3): the LocalNet core DAR, the core DALF of the NTT DAR and the watcher filter.
+readonly WORMHOLE_CORE_VERSION="0.12.3"
+readonly WORMHOLE_CORE_PACKAGE_ID="32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371"
 # NTT_PIN_VERSION selects one entry of ntt_pinned_package_id.
 readonly NTT_VERSION="${NTT_PIN_VERSION:-0.5.0}"
 NTT_PACKAGE_ID="$(ntt_pinned_package_id "$NTT_VERSION")" || exit 1
