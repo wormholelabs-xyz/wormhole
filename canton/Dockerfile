@@ -85,7 +85,7 @@ COPY localnet/vetting_probe /vetting-probe-build
 RUN cd /vetting-probe-build/v1 && dpm build && cd /vetting-probe-build/v2 && dpm build
 
 # Go toolchain for the watcher sandbox tests; same image digest as node/Dockerfile.
-FROM docker.io/golang:1.25.10-bookworm@sha256:154bd7001b6eb339e88c964442c0ad6ed5e53f09844cc818a41ce4ecb3ce3b43 AS go-toolchain
+FROM docker.io/golang:1.26.10-bookworm@sha256:fe3da92a5cb2881e4aa75e625cb0b7c50571632fb4cf340cbe53e6ccdcffdd51 AS go-toolchain
 
 # Runs `go test -tags integration ./pkg/watchers/canton/...` with dpm, the SDK,
 # and a JDK. CI mounts the repository at /src; go.sum pins every module.
