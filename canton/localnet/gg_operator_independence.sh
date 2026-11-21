@@ -258,7 +258,7 @@ pass 7 "update $publish_update_id"
 
 step 8 "the watcher on sv (read as gg) observes the message"
 observation="$(await_observation live "$publish_update_id")"
-jq -e --arg address "$(jq -r .createArgument.emitterAddress <<<"$publisher_emitter_event")" --arg payload "$MESSAGE_PAYLOAD_HEX" \
+jq -e --arg address "$(byte_variant_hex EmitterAddress "$(jq -c .createArgument.emitterAddress <<<"$publisher_emitter_event")")" --arg payload "$MESSAGE_PAYLOAD_HEX" \
   '.emitterChain == 75 and .emitterAddress == $address and .sequence == 0 and .payloadHex == $payload' <<<"$observation" > /dev/null \
   || fail "step 8: observation $observation differs from the Emitter address, sequence 0 or the payload"
 pass 8 "chain 75, emitter $(jq -r .emitterAddress <<<"$observation") (Emitter.emitterAddress, registrar gg), sequence 0"
@@ -368,16 +368,17 @@ created_event "$register_manager_transaction" :Wormhole.Core.Replay:ReplayNode >
 check_sorted_parties_equal "transceiver Emitter signatories" "$(jq -c .signatories <<<"$transceiver_emitter_event")" "$GG_PARTY"
 manager_cid="$(jq -r .contractId <<<"$manager_event")"
 ledger_cid="$(jq -r .contractId <<<"$ledger_event")"
-manager_address="$(jq -r .createArgument.managerAddress <<<"$manager_event")"
+manager_address="$(byte_variant_hex NttManagerAddress "$(jq -c .createArgument.managerAddress <<<"$manager_event")")"
 manager_namespace="$(jq -r .createArgument.namespace <<<"$manager_event")"
-transceiver_emitter_address="$(jq -r .createArgument.emitterAddress <<<"$transceiver_emitter_event")"
+transceiver_emitter_address="$(byte_variant_hex EmitterAddress "$(jq -c .createArgument.emitterAddress <<<"$transceiver_emitter_event")")"
 pass 14 "NttManager ${manager_cid:0:16}, LockedLedger, transceiver Emitter (gg), ReplayNode created"
 
 step 15 "SetPeer by NttAdmin"
 transceiver_emitter_cid="$(jq -r .contractId <<<"$transceiver_emitter_event")"
 set_peer_transaction="$(submit_local "$NTT_WALLET_VALIDATOR" "oi-ntt-set-peer-$run_label" "$ntt_admin_only" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" SetPeer "$(jq -n --arg chain "$PEER_CHAIN_ID" \
-    --arg manager "$PEER_MANAGER_ADDRESS" --arg transceiver "$PEER_TRANSCEIVER_ADDRESS" --arg emitter "$transceiver_emitter_cid" \
+    --argjson manager "$(byte_variant_json NttManagerAddress "$PEER_MANAGER_ADDRESS")" \
+    --argjson transceiver "$(byte_variant_json EmitterAddress "$PEER_TRANSCEIVER_ADDRESS")" --arg emitter "$transceiver_emitter_cid" \
     --arg coreState "$core_state_cid" --arg admin "$ntt_admin" '{
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
@@ -393,7 +394,7 @@ transceiver_emitter_cid="$(created_event "$set_peer_transaction" :Wormhole.Core.
 lock_transaction="$(submit_local "$NTT_WALLET_VALIDATOR" "oi-ntt-lock-$run_label" "$(json_array "\"$ntt_user\"")" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Transfer "$(jq -n --arg user "$ntt_user" \
     --arg emitter "$transceiver_emitter_cid" --arg coreState "$core_state_cid" --arg ledger "$ledger_cid" --arg chain "$PEER_CHAIN_ID" \
-    --arg recipient "$PEER_RECIPIENT_ADDRESS" --arg rawAmount "$LOCK_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
+    --argjson recipient "$(byte_variant_json UniversalAddress "$PEER_RECIPIENT_ADDRESS")" --arg rawAmount "$LOCK_RAW_AMOUNT" --arg nonce "$OUTBOUND_NONCE" \
     --argjson inputs "$user_inputs" --argjson extraArgs "$(registry_extra_args "$lock_registry")" '{
       user: $user, transceiverEmitterCid: $emitter, coreStateCid: $coreState, ledgerCid: $ledger,
       recipientChain: $chain, recipientAddress: $recipient, rawAmount: $rawAmount, nonce: $nonce, consistencyLevel: "0",
@@ -411,7 +412,7 @@ pot_cid="$(jq -er .createArgument.custodyHoldingCid <<<"$ledger_after_lock")"
   "$(decimal_to_units "$LOCK_AMOUNT" "$AMULET_DECIMALS")" ]] || fail "step 16: LockedLedger balance is not $LOCK_AMOUNT"
 lock_observation="$(await_observation live "$(jq -er .updateId <<<"$lock_transaction")")"
 jq -e --arg address "$transceiver_emitter_address" --argjson message "$lock_message" \
-  '.emitterChain == 75 and .emitterAddress == $address and .sequence == ($message.sequence | tonumber) and .payloadHex == $message.payload' \
+  '.emitterChain == 75 and .emitterAddress == $address and .sequence == ($message.sequence | tonumber) and .payloadHex == $message.payload.value' \
   <<<"$lock_observation" > /dev/null || fail "step 16: observation $lock_observation differs from the WormholeMessage"
 pass 16 "locked $LOCK_AMOUNT CC; the watcher observed sequence $(jq -r .sequence <<<"$lock_observation") of emitter $transceiver_emitter_address"
 
@@ -431,7 +432,7 @@ release_transaction="$(submit_local sv "oi-ntt-release-$run_label" "$(json_array
     --arg coreState "$core_state_cid" --arg replayNode "$release_replay_node_cid" --arg vaa "$(jq -r .vaaHex <<<"$release_vaa")" \
     --arg recipient "$ntt_recipient" --arg ledger "$ledger_cid" \
     --argjson extraArgs "$(registry_extra_args "$release_registry")" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: {tag: "EncodedVaa", value: $vaa},
       recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')")" \
   "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$release_registry")" <<<"$(json_array \
     "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \

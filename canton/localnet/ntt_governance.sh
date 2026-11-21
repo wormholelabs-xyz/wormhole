@@ -13,8 +13,11 @@ root_event="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Nt
 [[ "$(jq -c '.signatories | sort' <<<"$root_event")" == "$(jq -cn --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY" '[$gg, $custody] | sort')" ]] \
   || fail "NttGovernance signatories $(jq -c .signatories <<<"$root_event"), expected guardianGovernance and nttCustody"
 root_cid="$(jq -r .contractId <<<"$root_event")"
-echo "NttGovernance $root_cid (nextId $(jq -r .createArgument.nextId <<<"$root_event"))"
+root_identity="$(byte_variant_hex NttGovernanceRootIdentity "$(jq -c .createArgument.rootIdentity <<<"$root_event")")"
+[[ "${#root_identity}" -eq 64 ]] || fail "NttGovernance rootIdentity has ${#root_identity} hex characters, expected 64"
+echo "NttGovernance $root_cid (nextId $(jq -r .createArgument.nextId <<<"$root_event"), rootIdentity $root_identity)"
 record_ntt_contract nttGovernance "$root_cid"
+record_ntt_contract nttGovernanceRootIdentity "$root_identity"
 
 factory_event="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Token.CIP0056.CoinFactory:CoinFactory" \
   | jq -ec --arg gg "$GG_PARTY" '[.[] | select(.createArgument.admin == $gg)]
