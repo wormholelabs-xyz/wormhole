@@ -149,7 +149,7 @@ covering_replay_node() {
   active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Core.Replay:ReplayNode" \
     | jq -er --arg gg "$GG_PARTY" --arg ns "$1" --arg digest "$2" \
       '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns)
-             | select(.createArgument.prefix as $prefix | $digest | startswith($prefix))]
+             | select(.createArgument.prefix.value as $prefix | $digest | startswith($prefix))]
        | if length == 1 then .[0].contractId else error("expected one covering replay node, found \(length)") end'
 }
 
