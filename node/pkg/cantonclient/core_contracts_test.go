@@ -17,6 +17,7 @@ const (
 	testSynchronizerID      = "global-synchronizer::" + testGovernanceFingerprint
 	testCoreContractIDHex   = "00" + "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11" + "ca12" + "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22"
 	testOtherContractIDHex  = "00" + "cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33" + "ca12" + "dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44"
+	testThirdContractIDHex  = "00" + "ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55" + "ca12" + "ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66"
 	testUnapprovedPackageID = lookalikePackageID
 )
 
@@ -158,6 +159,21 @@ func TestDecodeCreatedReplayNodeKeyEdges(t *testing.T) {
 	}
 }
 
+// After party replication, nested ids can name the representative package instead of the template package.
+func TestDecodeReplayNodePrefixOfAnotherApprovedPackage(t *testing.T) {
+	approved, err := ParseApprovedCorePackages([]byte(`[{"packageId":"` + pinnedPackageID + `","version":"0.12.3"},{"packageId":"` + retiringPinnedPackageID + `","version":"0.12.2"}]`))
+	require.NoError(t, err)
+	decoder, err := newCoreContractDecoder(governanceReadScope, approved)
+	require.NoError(t, err)
+	event := createdCoreEvent(CoreContractTemplateReplayNode, 7, testCoreContractIDHex, map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(retiringPinnedPackageID, "a7")})
+	contract, err := decoder.decodeCreatedCoreContract(event, testSynchronizerID)
+	require.NoError(t, err)
+	assert.Equal(t, pinnedPackageID, contract.TemplateID().PackageID().String())
+	replayNodeKey, isReplayNode := contract.ReplayNodeKey()
+	require.True(t, isReplayNode)
+	assert.Equal(t, "a7", replayNodeKey.Prefix().String())
+}
+
 func TestDecodeCreatedCoreContractRejects(t *testing.T) {
 	decoder := testCoreContractDecoder(t)
 	cases := []struct {
@@ -209,7 +225,8 @@ func TestDecodeCreatedCoreContractRejects(t *testing.T) {
 		{name: "prefix of 64 nibbles", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(pinnedPackageID, strings.Repeat("a", 64))}, wantErr: "length 64 exceeds 63"},
 		{name: "uppercase prefix", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(pinnedPackageID, "A7")}, wantErr: "not lowercase hex"},
 		{name: "non-hex prefix", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(pinnedPackageID, "g")}, wantErr: "not lowercase hex"},
-		{name: "prefix variant of another package", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(testUnapprovedPackageID, "a7")}, wantErr: "expected the executing package"},
+		{name: "prefix variant of an unapproved package", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(testUnapprovedPackageID, "a7")}, wantErr: "not in the approved list"},
+		{name: "prefix variant with a malformed package id", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{"prefix": digestNibblePrefixVal("#wormhole-core", "a7")}, wantErr: "lowercase hex characters"},
 		{name: "prefix with wrong constructor", template: CoreContractTemplateReplayNode, overrides: map[string]*apiv2.Value{
 			"prefix": variantVal(&apiv2.Identifier{PackageId: pinnedPackageID, ModuleName: digestNibblePrefixVariant.moduleName, EntityName: digestNibblePrefixVariant.entityName}, "DigestNibbleSuffix", textVal("a7")),
 		}, wantErr: "has constructor"},

@@ -546,7 +546,12 @@ var messagePayloadVariant = singleConstructorVariant{
 // the executing package with a value of lowercase even-length hex without a
 // 0x prefix. This is the ledger's own constructor rule.
 func messagePayloadField(fields map[string]*apiv2.Value, label string, executingPackageID string) ([]byte, error) {
-	payloadHex, err := singleConstructorVariantTextField(fields, label, messagePayloadVariant, executingPackageID)
+	payloadHex, err := singleConstructorVariantTextField(fields, label, messagePayloadVariant, func(variantPackageID string) error {
+		if variantPackageID != executingPackageID {
+			return fmt.Errorf("expected the executing package %q", executingPackageID)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -570,10 +575,10 @@ type singleConstructorVariant struct {
 	constructor string
 }
 
-// singleConstructorVariantTextField reads a Value.variant of expectedVariant in
-// executingPackageID whose value is Text. variant_id is set because the reads
-// request verbose values.
-func singleConstructorVariantTextField(fields map[string]*apiv2.Value, label string, expectedVariant singleConstructorVariant, executingPackageID string) (string, error) {
+// singleConstructorVariantTextField reads a Value.variant of expectedVariant,
+// in a package that checkVariantPackageID accepts, whose value is Text.
+// variant_id is set because the reads request verbose values.
+func singleConstructorVariantTextField(fields map[string]*apiv2.Value, label string, expectedVariant singleConstructorVariant, checkVariantPackageID func(variantPackageID string) error) (string, error) {
 	fieldValue, found := fields[label]
 	if !found {
 		return "", fmt.Errorf("missing field %q", label)
@@ -590,9 +595,8 @@ func singleConstructorVariantTextField(fields map[string]*apiv2.Value, label str
 		return "", fmt.Errorf("field %q is variant %s:%s, expected %s:%s", label,
 			variantID.GetModuleName(), variantID.GetEntityName(), expectedVariant.moduleName, expectedVariant.entityName)
 	}
-	if variantID.GetPackageId() != executingPackageID {
-		return "", fmt.Errorf("field %q is a variant of package %q, expected the executing package %q", label,
-			variantID.GetPackageId(), executingPackageID)
+	if err := checkVariantPackageID(variantID.GetPackageId()); err != nil {
+		return "", fmt.Errorf("field %q is a variant of package %q: %w", label, variantID.GetPackageId(), err)
 	}
 	if variant.GetConstructor() != expectedVariant.constructor {
 		return "", fmt.Errorf("field %q has constructor %q, expected %q", label, variant.GetConstructor(), expectedVariant.constructor)

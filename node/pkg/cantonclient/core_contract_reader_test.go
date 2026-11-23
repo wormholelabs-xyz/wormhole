@@ -123,7 +123,7 @@ func TestReadActiveCoreContractsCap(t *testing.T) {
 	threeContracts := []*apiv2.GetActiveContractsResponse{
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 2, testOtherContractIDHex, nil)),
-		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testThirdContractIDHex, nil)),
 	}
 	cases := []struct {
 		name          string
@@ -173,6 +173,10 @@ func TestReadActiveCoreContractsRejects(t *testing.T) {
 		{name: "created after the snapshot offset", activeAtOffset: 2, responses: []*apiv2.GetActiveContractsResponse{activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil))}, wantErr: "outside [1, 2]"},
 		{name: "created at offset zero", activeAtOffset: 5, responses: []*apiv2.GetActiveContractsResponse{activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 0, testCoreContractIDHex, nil))}, wantErr: "outside [1, 5]"},
 		{name: "unapproved package id", activeAtOffset: 5, responses: []*apiv2.GetActiveContractsResponse{activeContractResponse(unapproved)}, wantErr: "not in the approved list"},
+		{name: "contract active on two synchronizers", activeAtOffset: 5, responses: []*apiv2.GetActiveContractsResponse{
+			activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
+			activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
+		}, wantErr: "repeats contract id"},
 		{name: "stream error after an entry", activeAtOffset: 5, responses: []*apiv2.GetActiveContractsResponse{activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil))}, finalErr: errors.New("connection reset"), wantErr: "connection reset"},
 	}
 	for _, tc := range cases {
@@ -188,6 +192,14 @@ func TestReadActiveCoreContractsRejects(t *testing.T) {
 
 func coreTransaction(offset int64, events ...*apiv2.Event) *apiv2.GetUpdatesResponse {
 	return &apiv2.GetUpdatesResponse{Update: &apiv2.GetUpdatesResponse_Transaction{Transaction: &apiv2.Transaction{
+		Offset:         offset,
+		SynchronizerId: testSynchronizerID,
+		Events:         events,
+	}}}
+}
+
+func coreReassignment(offset int64, events ...*apiv2.ReassignmentEvent) *apiv2.GetUpdatesResponse {
+	return &apiv2.GetUpdatesResponse{Update: &apiv2.GetUpdatesResponse_Reassignment{Reassignment: &apiv2.Reassignment{
 		Offset:         offset,
 		SynchronizerId: testSynchronizerID,
 		Events:         events,
@@ -255,8 +267,8 @@ func TestSubscribeCoreContractUpdatesDeliversInOrder(t *testing.T) {
 	assert.Nil(t, request.EndInclusive)
 	transactionFormat := request.GetUpdateFormat().GetIncludeTransactions()
 	assert.Equal(t, apiv2.TransactionShape_TRANSACTION_SHAPE_ACS_DELTA, transactionFormat.GetTransactionShape())
-	assert.Nil(t, request.GetUpdateFormat().GetIncludeReassignments())
 	checkFiltersTheDisclosedCoreTemplates(t, transactionFormat.GetEventFormat())
+	checkFiltersTheDisclosedCoreTemplates(t, request.GetUpdateFormat().GetIncludeReassignments())
 
 	require.Len(t, updates, 3)
 	assert.Equal(t, []int64{5, 8, 8}, []int64{updates[0].Offset(), updates[1].Offset(), updates[2].Offset()})
@@ -303,7 +315,14 @@ func TestSubscribeCoreContractUpdatesRejects(t *testing.T) {
 		{name: "empty event", second: coreTransaction(6, &apiv2.Event{}), wantErr: "expected a created or archived event"},
 		{name: "archive of an unapproved package id", second: coreTransaction(6, archivedLedgerEvent(unapprovedArchive)), wantErr: "not in the approved list"},
 		{name: "create of an unknown template", second: coreTransaction(6, createdLedgerEvent(unknownCreate)), wantErr: "not a disclosed core template"},
-		{name: "reassignment", second: &apiv2.GetUpdatesResponse{Update: &apiv2.GetUpdatesResponse_Reassignment{Reassignment: &apiv2.Reassignment{Offset: 6}}}, wantErr: "unexpected update"},
+		{name: "unassignment of a core contract", second: coreReassignment(6, &apiv2.ReassignmentEvent{Event: &apiv2.ReassignmentEvent_Unassigned{Unassigned: &apiv2.UnassignedEvent{
+			Offset: 6, ContractId: testCoreContractIDHex, TemplateId: coreTemplateIdentifier(pinnedPackageID, CoreContractTemplateReplayNode), PackageName: CorePackageName,
+			Source: testSynchronizerID, Target: "other-synchronizer::" + testLocalNetFingerprint,
+		}}}), wantErr: "unexpected update"},
+		{name: "assignment of a core contract", second: coreReassignment(6, &apiv2.ReassignmentEvent{Event: &apiv2.ReassignmentEvent_Assigned{Assigned: &apiv2.AssignedEvent{
+			Source: "other-synchronizer::" + testLocalNetFingerprint, Target: testSynchronizerID,
+			CreatedEvent: createdCoreEvent(CoreContractTemplateReplayNode, 6, testCoreContractIDHex, nil),
+		}}}), wantErr: "unexpected update"},
 		{name: "empty update", second: &apiv2.GetUpdatesResponse{}, wantErr: "unexpected update"},
 	}
 	for _, tc := range cases {

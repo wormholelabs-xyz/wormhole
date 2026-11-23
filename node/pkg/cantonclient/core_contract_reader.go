@@ -171,6 +171,8 @@ func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Contex
 		return nil, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
 	}
 	contracts := []CreatedCoreContract{}
+	// The snapshot has one entry per synchronizer that a contract is active on.
+	seenContractIDs := map[ContractID]bool{}
 	// Terminates: each response appends one contract or returns, and the append count stops at maxContracts.
 	for {
 		response, err := stream.Recv()
@@ -195,6 +197,10 @@ func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Contex
 		if err != nil {
 			return nil, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
 		}
+		if seenContractIDs[contract.ContractID()] {
+			return nil, fmt.Errorf("GetActiveContracts(%d): repeats contract id %s on synchronizer %s", activeAtOffset, contract.ContractID(), contract.SynchronizerID())
+		}
+		seenContractIDs[contract.ContractID()] = true
 		contracts = append(contracts, contract)
 	}
 }
@@ -211,6 +217,8 @@ func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.C
 				TransactionShape: apiv2.TransactionShape_TRANSACTION_SHAPE_ACS_DELTA,
 				EventFormat:      reader.decoder.eventFormat(),
 			},
+			// Requested so that a core contract moving between synchronizers fails the stream.
+			IncludeReassignments: reader.decoder.eventFormat(),
 		},
 	})
 	if err != nil {

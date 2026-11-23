@@ -267,6 +267,7 @@ type ArchivedCoreContract struct {
 
 func (contract ArchivedCoreContract) ContractID() ContractID { return contract.contractID }
 
+// TemplateID names the package of the archiving choice, not of the creation. Match archives by contract id only.
 func (contract ArchivedCoreContract) TemplateID() CoreTemplateID { return contract.templateID }
 
 // coreContractDecoder holds the rules that every decoded core contract satisfies.
@@ -324,7 +325,7 @@ func (decoder coreContractDecoder) decodeCreatedCoreContract(event *apiv2.Create
 	if templateID.template != CoreContractTemplateReplayNode {
 		return contract, nil
 	}
-	contract.replayNodeKey, err = decodeReplayNodeKey(createArguments, templateID.packageID)
+	contract.replayNodeKey, err = decodeReplayNodeKey(createArguments, decoder.approved)
 	if err != nil {
 		return CreatedCoreContract{}, fmt.Errorf("%s %s: %w", templateID, contractID, err)
 	}
@@ -358,7 +359,9 @@ var digestNibblePrefixVariant = singleConstructorVariant{
 }
 
 // decodeReplayNodeKey reads consumer, namespace and prefix of Wormhole.Core.Replay.ReplayNode.
-func decodeReplayNodeKey(createArguments map[string]*apiv2.Value, templatePackageID PackageID) (ReplayNodeKey, error) {
+// The prefix variant can name the template package or, after party replication,
+// the representative package; both are approved core packages.
+func decodeReplayNodeKey(createArguments map[string]*apiv2.Value, approved ApprovedCorePackages) (ReplayNodeKey, error) {
 	consumer, err := partyIDField(createArguments, "consumer")
 	if err != nil {
 		return ReplayNodeKey{}, err
@@ -371,7 +374,13 @@ func decodeReplayNodeKey(createArguments map[string]*apiv2.Value, templatePackag
 	if err != nil {
 		return ReplayNodeKey{}, fmt.Errorf("field %q: %w", "namespace", err)
 	}
-	prefixNibbles, err := singleConstructorVariantTextField(createArguments, "prefix", digestNibblePrefixVariant, templatePackageID.String())
+	prefixNibbles, err := singleConstructorVariantTextField(createArguments, "prefix", digestNibblePrefixVariant, func(variantPackageID string) error {
+		packageID, err := ParsePackageID(variantPackageID)
+		if err != nil {
+			return err
+		}
+		return approved.CheckCorePackageIDApproved(packageID)
+	})
 	if err != nil {
 		return ReplayNodeKey{}, err
 	}
