@@ -466,6 +466,13 @@ locked_ledger_balance_units() {
   decimal_to_units "$balance" "$DAML_DECIMAL_FRACTION_DIGITS"
 }
 
+# active_locked_ledger_cid: contract id of the active LockedLedger of the gg deployment, read as guardianGovernance.
+active_locked_ledger_cid() {
+  active_contracts app-provider "$GG_PARTY" ":Wormhole.Ntt.Ledger:LockedLedger" \
+    | jq -er --arg address "$lock_unlock_manager_address" '[.[] | select(.createArgument.managerAddress.value == $address)]
+        | if length == 1 then .[0].contractId else error("expected one LockedLedger") end'
+}
+
 check_transfer_through_service() {
   local locker_user locker_party locker_inputs flow registry transaction balance_before balance_after
   echo "== C6. (c) Outbound Transfer (lock of Canton Coin) as a user on app-user with the service set"
@@ -546,20 +553,26 @@ check_release() {
 }
 
 check_release_through_service() {
-  local recipient_user vaa flow poll
+  local recipient_user vaa flow poll active_ledger_cid set_ledger_cid
   echo "== C7. (b) Release on the Canton Coin deployment (reserve custodian nttCustody) with the service set"
   recipient_user="t1-recipient-$run_label"
   recipient_party="$(wallet_onboard app-user "$recipient_user")"
   wallet_tap app-user "$recipient_user" "$TAP_AMOUNT_USD"
   wallet_create_transfer_preapproval app-user "$recipient_user" > /dev/null
   vaa="$(release_vaa "$run_label" "$RELEASE_TRIMMED_AMOUNT")"
-  # The service caches ledger reads for --cache-ttl: fetch again until the set has the custody pot of the C6 lock.
+  active_ledger_cid="$(active_locked_ledger_cid)" || { fail_check "C7 active LockedLedger"; return; }
+  # The service caches ledger reads for --cache-ttl: fetch again until the set has the active LockedLedger.
   for (( poll = 1; poll <= FRESH_SET_MAX_POLLS; poll++ )); do
     flow="$(flow_set release "manager=$lock_unlock_manager_address&digest=$(jq -er .digestHex <<<"$vaa")&recipient=$recipient_party")" \
       || { fail_check "C7 release flow"; return; }
-    jq -e '[.disclosures[].role] | index("custody pot Holding")' <<<"$flow" > /dev/null && break
+    set_ledger_cid="$(flow_role_cid "$flow" LockedLedger)" || { fail_check "C7 release set has no LockedLedger"; return; }
+    [[ "$set_ledger_cid" == "$active_ledger_cid" ]] && break
     sleep 1
   done
+  if [[ "$set_ledger_cid" != "$active_ledger_cid" ]]; then
+    fail_check "C7 the service still returns an archived LockedLedger after $FRESH_SET_MAX_POLLS fetches"
+    return
+  fi
   echo "release set roles $(jq -c '[.disclosures[].role]' <<<"$flow") missing $(jq -c '[.missing[].role]' <<<"$flow")"
   check_flow_missing_roles "$flow" '["committed TransferFactory", "recipient TransferPreapproval"]' \
     || fail_check "C7 release set missing roles $(jq -c '[.missing[].role]' <<<"$flow")"
