@@ -870,7 +870,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 ### Prerequisites
 
 - `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
-- A disclosure service image from `canton/disclosure/service/Dockerfile` of the NTT repository.
+- A disclosure service image from `canton/disclosure/service/Dockerfile` of the NTT repository, commit `279fcaa` or later. Check C3 needs the `register` flow of that commit.
   The image must have the role flags (`--guardian-governance-party`, `--ntt-custody-party`) and `--behind-edge-proxy`.
   The image must not serve `/v1/disclosures` (NTT branch `canton/ntt-disclosure-sets`, commit `ab36968` or later).
 
@@ -902,7 +902,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 | --- | --- |
 | C1 | The proxy accepts the gateway client certificate. It refuses a request with no client certificate, and a certificate of a different CA, with HTTP 400. |
 | C2 | From `gateway-net`, a direct connection to the participant ports fails. A connection to the proxy succeeds. |
-| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow returns the four genesis roots of `guardianGovernance`: `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry` and `CoreState`, of the pinned packages. Without `namespace`, `missing` names `covering claimed-roots ReplayNode`. With the `namespace` of the next registration, the flow also returns that node: the node of the claimed-roots tree that covers the pair. The reserved namespace `wormhole-core:replay-roots` gets HTTP 400. |
+| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow takes `admin`, `instrument-admin` and `instrument-id`. It returns the four genesis roots of `guardianGovernance` of the pinned packages: `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry` and `CoreState`. It also returns the node of the claimed-roots tree that covers the claim namespace. The service calculates this namespace from the three parameters and the next manager ID of `NttGovernance`. The response field `claimNamespace` is equal to `ntt_namespace_for` of the same inputs. The response field `managerId` is equal to the next manager ID. The response field `missing` is empty. A request with the removed `namespace` parameter gets HTTP 400. A request without one of the three parameters gets HTTP 400. A malformed `admin` gets HTTP 400. |
 | C4 | The relayer sees no `NttManager`, `CoreState` or `LockedLedger`. |
 | C5 | The relayer submits `Mint` on the burn/mint deployment. |
 | C6 | A user on `app-user` locks Canton Coin with `Transfer` on the deployment of `ntt_lock_unlock_gg.sh`. |
