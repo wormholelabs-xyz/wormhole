@@ -1217,7 +1217,7 @@ The OAuth2 flags populate `Auth`:
 
 | Flag | Field | Rule |
 | - | - | - |
-| `--cantonAuthTokenURL` | `TokenURL` | Set with the client ID and the client secret, or not at all. |
+| `--cantonAuthTokenURL` | `TokenURL` | Set with the client ID and the client secret, or not at all. Use an absolute `https` URL with no user information and no fragment. |
 | `--cantonAuthClientID` | `ClientID` | Same rule. |
 | `--cantonAuthClientSecret` | `ClientSecret` | Same rule. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
 | `--cantonAuthAudience` | `Audience` | Optional. Needs the three flags above. No whitespace or control characters. |

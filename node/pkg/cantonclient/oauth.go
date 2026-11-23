@@ -2,8 +2,10 @@ package cantonclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -49,9 +51,58 @@ func (audience OAuthAudience) String() string {
 	return audience.value
 }
 
+// OAuthTokenURL is the absolute https URL of an OAuth2 token endpoint. Each token request sends the client secret to it.
+type OAuthTokenURL struct {
+	value string
+}
+
+// ParseOAuthTokenURL accepts an absolute https URL with a host name and an optional port, path and query.
+// SECURITY: an http token URL sends the client secret in plaintext. User information in the URL leaks a credential
+// into logs, so no error message repeats the URL. RFC 6749 section 3.2 forbids a fragment.
+func ParseOAuthTokenURL(rawTokenURL string) (OAuthTokenURL, error) {
+	if rawTokenURL == "" {
+		return OAuthTokenURL{}, errors.New("OAuth token URL is empty")
+	}
+	if !utf8.ValidString(rawTokenURL) {
+		return OAuthTokenURL{}, errors.New("OAuth token URL is not valid UTF-8")
+	}
+	for _, tokenURLRune := range rawTokenURL {
+		if unicode.IsSpace(tokenURLRune) {
+			return OAuthTokenURL{}, errors.New("OAuth token URL contains whitespace")
+		}
+		if unicode.IsControl(tokenURLRune) {
+			return OAuthTokenURL{}, errors.New("OAuth token URL contains a control character")
+		}
+	}
+	parsedTokenURL, err := url.Parse(rawTokenURL)
+	if err != nil {
+		return OAuthTokenURL{}, errors.New("OAuth token URL does not parse as a URL")
+	}
+	if parsedTokenURL.Scheme != "https" {
+		return OAuthTokenURL{}, errors.New("OAuth token URL must use https")
+	}
+	if parsedTokenURL.Opaque != "" {
+		return OAuthTokenURL{}, errors.New("OAuth token URL must be an absolute URL with //host")
+	}
+	if parsedTokenURL.User != nil {
+		return OAuthTokenURL{}, errors.New("OAuth token URL contains user information; pass the client id and secret in their own flags")
+	}
+	if parsedTokenURL.Hostname() == "" {
+		return OAuthTokenURL{}, errors.New("OAuth token URL has no host name")
+	}
+	if strings.ContainsRune(rawTokenURL, '#') {
+		return OAuthTokenURL{}, errors.New("OAuth token URL contains a fragment")
+	}
+	return OAuthTokenURL{value: rawTokenURL}, nil
+}
+
+func (tokenURL OAuthTokenURL) String() string {
+	return tokenURL.value
+}
+
 // OAuthClientCredentials are the parameters of the OAuth2 client-credentials grant for the Ledger API.
 type OAuthClientCredentials struct {
-	TokenURL     string
+	TokenURL     OAuthTokenURL
 	ClientID     string
 	ClientSecret string
 	Audience     OAuthAudience
@@ -72,8 +123,12 @@ func newOAuthPerRPCCredentials(ctx context.Context, clientCredentials OAuthClien
 // wrapper: a caching, self-refreshing token source for the client-credentials
 // grant.
 func newClientCredentialsTokenSource(ctx context.Context, clientCredentials OAuthClientCredentials) oauth2.TokenSource {
+	// SECURITY: Do not pass an OAuthTokenURL that ParseOAuthTokenURL did not make.
+	if _, err := ParseOAuthTokenURL(clientCredentials.TokenURL.value); err != nil {
+		panic(fmt.Sprintf("cantonclient: OAuth token URL was not made by ParseOAuthTokenURL: %v", err))
+	}
 	clientCredentialsConfig := &clientcredentials.Config{
-		TokenURL:     clientCredentials.TokenURL,
+		TokenURL:     clientCredentials.TokenURL.String(),
 		ClientID:     clientCredentials.ClientID,
 		ClientSecret: clientCredentials.ClientSecret,
 	}
