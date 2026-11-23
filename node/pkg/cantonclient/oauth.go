@@ -2,6 +2,7 @@ package cantonclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -57,40 +58,40 @@ type OAuthTokenURL struct {
 
 // ParseOAuthTokenURL accepts an absolute https URL with a host name and an optional port, path and query.
 // SECURITY: an http token URL sends the client secret in plaintext. User information in the URL leaks a credential
-// into logs. RFC 6749 section 3.2 forbids a fragment.
+// into logs, so no error message repeats the URL. RFC 6749 section 3.2 forbids a fragment.
 func ParseOAuthTokenURL(rawTokenURL string) (OAuthTokenURL, error) {
 	if rawTokenURL == "" {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL is empty")
+		return OAuthTokenURL{}, errors.New("OAuth token URL is empty")
 	}
 	if !utf8.ValidString(rawTokenURL) {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q is not valid UTF-8", rawTokenURL)
+		return OAuthTokenURL{}, errors.New("OAuth token URL is not valid UTF-8")
 	}
 	for _, tokenURLRune := range rawTokenURL {
 		if unicode.IsSpace(tokenURLRune) {
-			return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q contains whitespace", rawTokenURL)
+			return OAuthTokenURL{}, errors.New("OAuth token URL contains whitespace")
 		}
 		if unicode.IsControl(tokenURLRune) {
-			return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q contains a control character", rawTokenURL)
+			return OAuthTokenURL{}, errors.New("OAuth token URL contains a control character")
 		}
 	}
 	parsedTokenURL, err := url.Parse(rawTokenURL)
 	if err != nil {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q is invalid: %w", rawTokenURL, err)
+		return OAuthTokenURL{}, errors.New("OAuth token URL does not parse as a URL")
 	}
 	if parsedTokenURL.Scheme != "https" {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q must use https, not scheme %q", rawTokenURL, parsedTokenURL.Scheme)
+		return OAuthTokenURL{}, errors.New("OAuth token URL must use https")
 	}
 	if parsedTokenURL.Opaque != "" {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q must be an absolute URL with //host", rawTokenURL)
+		return OAuthTokenURL{}, errors.New("OAuth token URL must be an absolute URL with //host")
 	}
 	if parsedTokenURL.User != nil {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q contains user information; pass the client id and secret in their own flags", parsedTokenURL.Redacted())
+		return OAuthTokenURL{}, errors.New("OAuth token URL contains user information; pass the client id and secret in their own flags")
 	}
 	if parsedTokenURL.Hostname() == "" {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q has no host name", rawTokenURL)
+		return OAuthTokenURL{}, errors.New("OAuth token URL has no host name")
 	}
 	if strings.ContainsRune(rawTokenURL, '#') {
-		return OAuthTokenURL{}, fmt.Errorf("OAuth token URL %q contains a fragment", rawTokenURL)
+		return OAuthTokenURL{}, errors.New("OAuth token URL contains a fragment")
 	}
 	return OAuthTokenURL{value: rawTokenURL}, nil
 }
@@ -122,9 +123,9 @@ func newOAuthPerRPCCredentials(ctx context.Context, clientCredentials OAuthClien
 // wrapper: a caching, self-refreshing token source for the client-credentials
 // grant.
 func newClientCredentialsTokenSource(ctx context.Context, clientCredentials OAuthClientCredentials) oauth2.TokenSource {
-	// SECURITY: ParseOAuthTokenURL is the only constructor; the zero value has no https check.
-	if clientCredentials.TokenURL.value == "" {
-		panic("cantonclient: OAuth token URL was not made by ParseOAuthTokenURL")
+	// SECURITY: Do not pass an OAuthTokenURL that ParseOAuthTokenURL did not make.
+	if _, err := ParseOAuthTokenURL(clientCredentials.TokenURL.value); err != nil {
+		panic(fmt.Sprintf("cantonclient: OAuth token URL was not made by ParseOAuthTokenURL: %v", err))
 	}
 	clientCredentialsConfig := &clientcredentials.Config{
 		TokenURL:     clientCredentials.TokenURL.String(),
