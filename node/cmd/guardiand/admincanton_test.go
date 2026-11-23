@@ -237,6 +237,8 @@ func TestCantonListPublishesOAuthCredentials(t *testing.T) {
 		{name: "token URL without secret", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
 		{name: "lone client secret", oauthFlags: cantonListPublishesOAuthFlags{clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "must all be set together"},
 		{name: "full OAuth over plaintext", oauthFlags: fullOAuth, unsafePlaintext: true, expectedErrorMessage: "OAuth requires TLS"},
+		{name: "http token URL", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: "http://idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "--cantonAuthTokenURL: OAuth token URL"},
+		{name: "token URL with user information", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: "https://cid:sec@idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "user information"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -253,8 +255,10 @@ func TestCantonListPublishesOAuthCredentials(t *testing.T) {
 			}
 			expectedAudience, err := cantonclient.ParseOAuthAudience(testCase.expectedAudience)
 			require.NoError(t, err)
+			expectedTokenURL, err := cantonclient.ParseOAuthTokenURL(fullOAuth.tokenURL)
+			require.NoError(t, err)
 			require.Equal(t, &cantonclient.OAuthClientCredentials{
-				TokenURL:     fullOAuth.tokenURL,
+				TokenURL:     expectedTokenURL,
 				ClientID:     fullOAuth.clientID,
 				ClientSecret: fullOAuth.clientSecret,
 				Audience:     expectedAudience,

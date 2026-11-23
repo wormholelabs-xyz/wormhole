@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 // TestOAuthPerRPCCredentials proves the client-credentials grant is executed
@@ -15,7 +16,7 @@ import (
 // per-RPC authorization metadata.
 func TestOAuthPerRPCCredentials(t *testing.T) {
 	var gotGrant, gotID, gotSecret string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		gotGrant = r.PostFormValue("grant_type")
 		var ok bool
@@ -29,7 +30,8 @@ func TestOAuthPerRPCCredentials(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ts := newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{TokenURL: srv.URL, ClientID: "cid", ClientSecret: "csecret"})
+	tokenURL := mustParseOAuthTokenURL(t, srv.URL)
+	ts := newClientCredentialsTokenSource(contextTrustingTokenEndpoint(srv), OAuthClientCredentials{TokenURL: tokenURL, ClientID: "cid", ClientSecret: "csecret"})
 	tok, err := ts.Token()
 	require.NoError(t, err)
 	assert.Equal(t, "tok123", tok.AccessToken)
@@ -41,7 +43,7 @@ func TestOAuthPerRPCCredentials(t *testing.T) {
 	// The gRPC wrapper must refuse plaintext transports: bearer tokens on an
 	// unencrypted channel would leak credentials. (Its GetRequestMetadata can
 	// only run inside a real TLS-backed RPC, so it is not exercised here.)
-	creds := newOAuthPerRPCCredentials(context.Background(), OAuthClientCredentials{TokenURL: srv.URL, ClientID: "cid", ClientSecret: "csecret"})
+	creds := newOAuthPerRPCCredentials(context.Background(), OAuthClientCredentials{TokenURL: tokenURL, ClientID: "cid", ClientSecret: "csecret"})
 	assert.True(t, creds.RequireTransportSecurity())
 }
 
@@ -55,7 +57,7 @@ type tokenRequestForm struct {
 }
 
 func newRecordingTokenEndpoint(t *testing.T, recordedForm *tokenRequestForm) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+	return httptest.NewTLSServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		assert.NoError(t, request.ParseForm())
 		recordedForm.grantType = request.PostFormValue("grant_type")
 		var hasBasicAuth bool
@@ -88,8 +90,8 @@ func TestClientCredentialsTokenRequestAudience(t *testing.T) {
 			audience, err := ParseOAuthAudience(testCase.rawAudience)
 			require.NoError(t, err)
 
-			tokenSource := newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{
-				TokenURL:     tokenEndpoint.URL,
+			tokenSource := newClientCredentialsTokenSource(contextTrustingTokenEndpoint(tokenEndpoint), OAuthClientCredentials{
+				TokenURL:     mustParseOAuthTokenURL(t, tokenEndpoint.URL),
 				ClientID:     "cid",
 				ClientSecret: "csecret",
 				Audience:     audience,
@@ -144,4 +146,69 @@ func TestParseOAuthAudience(t *testing.T) {
 			require.Equal(t, testCase.rawAudience, audience.String())
 		})
 	}
+}
+
+// contextTrustingTokenEndpoint carries the HTTP client of an httptest TLS server, which trusts its certificate.
+func contextTrustingTokenEndpoint(tokenEndpoint *httptest.Server) context.Context {
+	return context.WithValue(context.Background(), oauth2.HTTPClient, tokenEndpoint.Client())
+}
+
+func mustParseOAuthTokenURL(t *testing.T, rawTokenURL string) OAuthTokenURL {
+	t.Helper()
+	tokenURL, err := ParseOAuthTokenURL(rawTokenURL)
+	require.NoError(t, err)
+	return tokenURL
+}
+
+func TestParseOAuthTokenURL(t *testing.T) {
+	const keycloakTokenURL = "https://keycloak.example/realms/canton/protocol/openid-connect/token"
+	testCases := []struct {
+		name                 string
+		rawTokenURL          string
+		expectedErrorMessage string
+	}{
+		{name: "keycloak token endpoint", rawTokenURL: keycloakTokenURL},
+		{name: "explicit port", rawTokenURL: "https://keycloak.example:8443/realms/canton/protocol/openid-connect/token"},
+		{name: "query string", rawTokenURL: "https://idp.example/oauth/token?tenant=canton"},
+		{name: "uppercase https scheme", rawTokenURL: "HTTPS://idp.example/oauth/token"},
+		{name: "IP address host", rawTokenURL: "https://10.0.0.5:8443/token"},
+		{name: "empty", rawTokenURL: "", expectedErrorMessage: "empty"},
+		{name: "http scheme", rawTokenURL: "http://keycloak.example/realms/canton/protocol/openid-connect/token", expectedErrorMessage: "must use https"},
+		{name: "uppercase http scheme", rawTokenURL: "HTTP://keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "ftp scheme", rawTokenURL: "ftp://keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "no scheme", rawTokenURL: "keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "scheme-relative", rawTokenURL: "//keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "opaque https", rawTokenURL: "https:keycloak.example/token", expectedErrorMessage: "absolute"},
+		{name: "no host", rawTokenURL: "https://", expectedErrorMessage: "host name"},
+		{name: "port without host name", rawTokenURL: "https://:8443/token", expectedErrorMessage: "host name"},
+		{name: "user information", rawTokenURL: "https://client:secret@keycloak.example/token", expectedErrorMessage: "user information"},
+		{name: "user name only", rawTokenURL: "https://client@keycloak.example/token", expectedErrorMessage: "user information"},
+		{name: "fragment", rawTokenURL: keycloakTokenURL + "#section", expectedErrorMessage: "fragment"},
+		{name: "empty fragment", rawTokenURL: keycloakTokenURL + "#", expectedErrorMessage: "fragment"},
+		{name: "leading space", rawTokenURL: " " + keycloakTokenURL, expectedErrorMessage: "whitespace"},
+		{name: "trailing newline", rawTokenURL: keycloakTokenURL + "\n", expectedErrorMessage: "whitespace"},
+		{name: "inner space", rawTokenURL: "https://keycloak.example/realms/can ton/token", expectedErrorMessage: "whitespace"},
+		{name: "NUL character", rawTokenURL: "https://keycloak.example/\x00token", expectedErrorMessage: "control character"},
+		{name: "DEL character", rawTokenURL: "https://keycloak.example/\x7ftoken", expectedErrorMessage: "control character"},
+		{name: "invalid UTF-8", rawTokenURL: "https://keycloak.example/\xfftoken", expectedErrorMessage: "UTF-8"},
+		{name: "invalid percent escape in host", rawTokenURL: "https://keycloak%zz.example/token", expectedErrorMessage: "invalid"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tokenURL, err := ParseOAuthTokenURL(testCase.rawTokenURL)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Equal(t, OAuthTokenURL{}, tokenURL)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.rawTokenURL, tokenURL.String())
+		})
+	}
+}
+
+func TestClientCredentialsTokenSourceRefusesAnUnparsedTokenURL(t *testing.T) {
+	require.Panics(t, func() {
+		newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{ClientID: "cid", ClientSecret: "csecret"})
+	})
 }

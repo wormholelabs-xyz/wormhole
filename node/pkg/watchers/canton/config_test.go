@@ -307,6 +307,34 @@ func TestCreateOAuthAudienceValidation(t *testing.T) {
 	}
 }
 
+// TestCreateRequiresAnHTTPSTokenURL: the client secret is sent to the token URL.
+func TestCreateRequiresAnHTTPSTokenURL(t *testing.T) {
+	authWithTokenURL := func(tokenURL string) AuthConfig {
+		return AuthConfig{TokenURL: tokenURL, ClientID: "cid", ClientSecret: "sec"}
+	}
+	testCases := []struct {
+		name                 string
+		tokenURL             string
+		expectedErrorMessage string
+	}{
+		{name: "https keycloak token endpoint", tokenURL: "https://keycloak.example/realms/canton/protocol/openid-connect/token"},
+		{name: "http token URL", tokenURL: "http://keycloak.example/realms/canton/protocol/openid-connect/token", expectedErrorMessage: "auth token URL"},
+		{name: "uppercase http token URL", tokenURL: "HTTP://keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "token URL without a scheme", tokenURL: "keycloak.example/token", expectedErrorMessage: "must use https"},
+		{name: "token URL with user information", tokenURL: "https://cid:sec@keycloak.example/token", expectedErrorMessage: "user information"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := createWithAuth(t, authWithTokenURL(testCase.tokenURL), common.MainNet)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestWatcherConfigFieldsAreExactlyTheFlagFields: each WatcherConfig field comes from a guardiand flag. A package
 // test cannot set a transport through the production config.
 func TestWatcherConfigFieldsAreExactlyTheFlagFields(t *testing.T) {

@@ -109,7 +109,7 @@ func (a AuthConfig) complete() bool {
 }
 
 // parseOAuthClientCredentials returns nil when every auth field is empty. It rejects partial credentials, an
-// audience without credentials, and an audience that ParseOAuthAudience rejects.
+// audience without credentials, and a token URL or audience that its parser rejects.
 func (a AuthConfig) parseOAuthClientCredentials() (*cantonclient.OAuthClientCredentials, error) {
 	audience, err := cantonclient.ParseOAuthAudience(a.Audience)
 	if err != nil {
@@ -124,8 +124,12 @@ func (a AuthConfig) parseOAuthClientCredentials() (*cantonclient.OAuthClientCred
 	if !a.complete() {
 		return nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
 	}
+	tokenURL, err := cantonclient.ParseOAuthTokenURL(a.TokenURL)
+	if err != nil {
+		return nil, fmt.Errorf("canton: auth token URL: %w", err)
+	}
 	return &cantonclient.OAuthClientCredentials{
-		TokenURL:     a.TokenURL,
+		TokenURL:     tokenURL,
 		ClientID:     a.ClientID,
 		ClientSecret: a.ClientSecret,
 		Audience:     audience,
