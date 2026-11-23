@@ -4,11 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/oauth2"
 )
 
 // TestOAuthPerRPCCredentials proves the client-credentials grant is executed
@@ -31,7 +32,7 @@ func TestOAuthPerRPCCredentials(t *testing.T) {
 	defer tokenEndpoint.Close()
 
 	tokenURL := mustParseOAuthTokenURL(t, tokenEndpoint.URL)
-	tokenSource := newClientCredentialsTokenSource(contextTrustingTokenEndpoint(tokenEndpoint), OAuthClientCredentials{TokenURL: tokenURL, ClientID: "cid", ClientSecret: "csecret"})
+	tokenSource := newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{TokenURL: tokenURL, ClientID: "cid", ClientSecret: "csecret"}, tokenEndpoint.Client().Transport)
 	token, err := tokenSource.Token()
 	require.NoError(t, err)
 	assert.Equal(t, "tok123", token.AccessToken)
@@ -90,12 +91,12 @@ func TestClientCredentialsTokenRequestAudience(t *testing.T) {
 			audience, err := ParseOAuthAudience(testCase.rawAudience)
 			require.NoError(t, err)
 
-			tokenSource := newClientCredentialsTokenSource(contextTrustingTokenEndpoint(tokenEndpoint), OAuthClientCredentials{
+			tokenSource := newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{
 				TokenURL:     mustParseOAuthTokenURL(t, tokenEndpoint.URL),
 				ClientID:     "cid",
 				ClientSecret: "csecret",
 				Audience:     audience,
-			})
+			}, tokenEndpoint.Client().Transport)
 			token, err := tokenSource.Token()
 			require.NoError(t, err)
 
@@ -146,11 +147,6 @@ func TestParseOAuthAudience(t *testing.T) {
 			require.Equal(t, testCase.rawAudience, audience.String())
 		})
 	}
-}
-
-// contextTrustingTokenEndpoint carries the HTTP client of an httptest TLS server, which trusts its certificate.
-func contextTrustingTokenEndpoint(tokenEndpoint *httptest.Server) context.Context {
-	return context.WithValue(context.Background(), oauth2.HTTPClient, tokenEndpoint.Client())
 }
 
 func mustParseOAuthTokenURL(t *testing.T, rawTokenURL string) OAuthTokenURL {
@@ -233,6 +229,73 @@ func TestParseOAuthTokenURLErrorOmitsTheSecret(t *testing.T) {
 
 func TestClientCredentialsTokenSourceRefusesAnUnparsedTokenURL(t *testing.T) {
 	require.Panics(t, func() {
-		newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{ClientID: "cid", ClientSecret: "csecret"})
+		newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{ClientID: "cid", ClientSecret: "csecret"}, nil)
 	})
+}
+
+// TestOAuthTokenRequestRefusesRedirects: a 307 or 308 redirect resends the client secret to the redirect target.
+func TestOAuthTokenRequestRefusesRedirects(t *testing.T) {
+	redirectStatusCodes := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+	for _, redirectStatusCode := range redirectStatusCodes {
+		t.Run(http.StatusText(redirectStatusCode), func(t *testing.T) {
+			var redirectTargetRequestCount atomic.Int32
+			plaintextRedirectTarget := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+				redirectTargetRequestCount.Add(1)
+				responseWriter.Header().Set("Content-Type", "application/json")
+				_, _ = responseWriter.Write([]byte(`{"access_token":"tok123","token_type":"Bearer","expires_in":300}`))
+			}))
+			defer plaintextRedirectTarget.Close()
+			redirectingTokenEndpoint := httptest.NewTLSServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				http.Redirect(responseWriter, request, plaintextRedirectTarget.URL+"/token", redirectStatusCode)
+			}))
+			defer redirectingTokenEndpoint.Close()
+
+			tokenSource := newClientCredentialsTokenSource(context.Background(), OAuthClientCredentials{
+				TokenURL:     mustParseOAuthTokenURL(t, redirectingTokenEndpoint.URL),
+				ClientID:     "cid",
+				ClientSecret: "csecret",
+			}, redirectingTokenEndpoint.Client().Transport)
+			token, err := tokenSource.Token()
+
+			require.ErrorContains(t, err, "redirect")
+			require.Nil(t, token)
+			require.Zero(t, redirectTargetRequestCount.Load())
+		})
+	}
+}
+
+func TestOAuthTokenHTTPClientBoundsTheRequest(t *testing.T) {
+	tokenHTTPClient := newOAuthTokenHTTPClient(nil)
+	require.Equal(t, 30*time.Second, oauthTokenRequestTimeout)
+	require.Equal(t, oauthTokenRequestTimeout, tokenHTTPClient.Timeout)
+	require.NotNil(t, tokenHTTPClient.CheckRedirect)
+	require.Nil(t, tokenHTTPClient.Transport, "nil selects http.DefaultTransport and the system roots")
+}
+
+func TestOAuthTokenRequestTimesOut(t *testing.T) {
+	releaseSlowTokenEndpoint := make(chan struct{})
+	slowTokenEndpoint := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case <-releaseSlowTokenEndpoint:
+		case <-request.Context().Done():
+		}
+	}))
+	defer slowTokenEndpoint.Close()
+	defer close(releaseSlowTokenEndpoint)
+
+	tokenHTTPClient := newOAuthTokenHTTPClient(slowTokenEndpoint.Client().Transport)
+	tokenHTTPClient.Timeout = 50 * time.Millisecond
+	tokenRequest, err := http.NewRequest(http.MethodPost, slowTokenEndpoint.URL, nil)
+	require.NoError(t, err)
+	tokenResponse, err := tokenHTTPClient.Do(tokenRequest)
+	if tokenResponse != nil {
+		_ = tokenResponse.Body.Close()
+	}
+	require.ErrorContains(t, err, "Client.Timeout")
 }
