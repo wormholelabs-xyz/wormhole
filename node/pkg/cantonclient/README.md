@@ -19,6 +19,8 @@ See [`canton/README.md`](../../../canton/README.md) for the full design.
 | `transfer_fees_vectorgen_test.go` | generates the signed TransferFees fixtures of `Test.TestTransferFees` |
 | `cantongrpc.go` | the gRPC client against the generated stubs |
 | `cantongrpc_updateid_test.go` | unit tests for update ids on the stream and `GetUpdateById` |
+| `core_contracts.go` | decoded `CoreState`, `EmitterRegistry`, `ReplayRootRegistry` and `ReplayNode` contracts for the disclosure service |
+| `core_contract_reader.go` | `CoreContractReader`: active-contract snapshot and ACS-delta stream of those contracts, with created event blobs |
 | `proto/com/daml/ledger/api/v2/*.proto` | vendored Ledger API v2 protos (the State+Update closure) from **Canton 3.7.3** |
 | `proto/gen/...` | generated Go stubs (committed; see below) |
 
@@ -47,7 +49,7 @@ Provenance of the fourteen files:
 
 Extract each file with `unzip -p <jar> com/daml/ledger/api/v2/<file>.proto`.
 The 3.7.3 protos add fields and RPCs to the 3.5.6 protos. Two server behaviors changed with them.
-`GetActiveContracts` excludes incomplete reassignments by default; the watcher does not call it.
+`GetActiveContracts` excludes incomplete reassignments by default; `CoreContractReader` relies on it.
 A `ListVettedPackages` page can be empty and still carry a next-page token, because the server applies
 the package filter after it selects the page. `ListVettedPackageMetadata` follows the token.
 `google/protobuf/*` come from the buf well-known types and
