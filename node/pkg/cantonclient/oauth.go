@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -116,13 +118,32 @@ type OAuthClientCredentials struct {
 // stream error and is handled by the watcher's resubscribe-from-last-offset
 // logic.
 func newOAuthPerRPCCredentials(ctx context.Context, clientCredentials OAuthClientCredentials) credentials.PerRPCCredentials {
-	return oauth.TokenSource{TokenSource: newClientCredentialsTokenSource(ctx, clientCredentials)}
+	return oauth.TokenSource{TokenSource: newClientCredentialsTokenSource(ctx, clientCredentials, nil)}
+}
+
+// oauthTokenRequestTimeout bounds one token request, including the TLS handshake and the response body.
+const oauthTokenRequestTimeout = 30 * time.Second
+
+// newOAuthTokenHTTPClient returns the HTTP client of the token request. A nil transport selects
+// http.DefaultTransport.
+func newOAuthTokenHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       oauthTokenRequestTimeout,
+		CheckRedirect: refuseOAuthTokenEndpointRedirect,
+	}
+}
+
+// refuseOAuthTokenEndpointRedirect fails every redirect of the token request.
+// SECURITY: a 307 or 308 redirect resends the request body, with the client secret, to the redirect target.
+func refuseOAuthTokenEndpointRedirect(_ *http.Request, _ []*http.Request) error {
+	return errors.New("OAuth token endpoint answered with a redirect; token requests do not follow redirects")
 }
 
 // newClientCredentialsTokenSource is the testable seam beneath the gRPC
 // wrapper: a caching, self-refreshing token source for the client-credentials
-// grant.
-func newClientCredentialsTokenSource(ctx context.Context, clientCredentials OAuthClientCredentials) oauth2.TokenSource {
+// grant. Production passes a nil tokenEndpointTransport; tests pass the transport of an httptest TLS server.
+func newClientCredentialsTokenSource(ctx context.Context, clientCredentials OAuthClientCredentials, tokenEndpointTransport http.RoundTripper) oauth2.TokenSource {
 	// SECURITY: Do not pass an OAuthTokenURL that ParseOAuthTokenURL did not make.
 	if _, err := ParseOAuthTokenURL(clientCredentials.TokenURL.value); err != nil {
 		panic(fmt.Sprintf("cantonclient: OAuth token URL was not made by ParseOAuthTokenURL: %v", err))
@@ -135,7 +156,8 @@ func newClientCredentialsTokenSource(ctx context.Context, clientCredentials OAut
 	if clientCredentials.Audience.IsSet() {
 		clientCredentialsConfig.EndpointParams = url.Values{"audience": {clientCredentials.Audience.String()}}
 	}
-	return clientCredentialsConfig.TokenSource(ctx)
+	tokenRequestContext := context.WithValue(ctx, oauth2.HTTPClient, newOAuthTokenHTTPClient(tokenEndpointTransport))
+	return clientCredentialsConfig.TokenSource(tokenRequestContext)
 }
 
 // NewOAuthDialOption enables OAuth2 client-credentials authentication (e.g. a
