@@ -37,6 +37,15 @@ Two guardian parties exist from genesis: `guardianGovernance` (`gg`) and `feeCus
 Each guardian participant hosts the two parties. `feeCustody` is in the `gg` namespace.
 The proposed NTT custody deployment (decision U1) adds the party `nttCustody` in the `gg` namespace.
 Each custody party copies the hosts, the confirmation threshold and the owner keys of `gg` (Section 7.4).
+This rule applies at all times, also after a hosting change or a key change (decision U6).
+`feeCustody` signs `CoreState`. Thus its hosts confirm each `PublishMessage`, each VAA check and each governance transaction.
+With the hosts and the threshold of `gg`, `feeCustody` adds no liveness dependency.
+The last step of each hosting procedure and each key procedure is the custody hosting comparison:
+
+1. Run [`gg_show_topology.sh`](../canton/localnet/gg_show_topology.sh) or its production equivalent.
+2. Find the rows of `gg`, `feeCustody` and `nttCustody`.
+3. Make sure that the three rows show the same hosts and host permissions.
+4. Make sure that the three rows show the same confirmation threshold and signing keys.
 
 | Property | Value |
 | - | - |
@@ -50,7 +59,7 @@ Each custody party copies the hosts, the confirmation threshold and the owner ke
 
 | `feeCustody` property | Value |
 | - | - |
-| Hosting and confirmation threshold | The same as `gg`. |
+| Hosting and confirmation threshold | The same as `gg` at all times (decision U6). |
 | Owner keys and signing key threshold | The same as `gg` (decision U5). |
 | Signatory of | `CoreState` only. |
 | Role | Fee recipient of `CoreState`. It owns the collected fees. |
@@ -256,7 +265,7 @@ LocalNet rehearsal: `CUSTODY_PARTY_NAME=feeCustody` [`custody_host.sh`](../canto
 
 ### 4.3 Add a host after genesis
 
-A new guardian participant must host `gg` and `nttCustody` after these parties have contracts.
+A new guardian participant must host `gg`, `feeCustody` and `nttCustody` after these parties have contracts.
 Thus the new host needs Canton offline party replication.
 For the steps, refer to the Canton party management documentation at
 <https://docs.canton.network/global-synchronizer/production-operations/party-management.md>.
@@ -276,8 +285,9 @@ The replication has 13 steps in a fixed order. In summary:
    `import_party_acs(..., party = Some(<party>), contractImportMode = ContractImportMode.Validation)`.
 10. The new participant connects again.
 11. Poll `clear_party_onboarding_flag` until it returns `FlagNotSet`.
+12. Do the custody hosting comparison (Section 2).
 
-Do these steps for `gg` and `nttCustody` together.
+Do these steps for `gg`, `feeCustody` and `nttCustody` together.
 
 The export contains the ACS at the offset where the new hosting becomes active.
 Each honest existing host exports the same contract set for one new host.
@@ -330,6 +340,9 @@ Rules for each new host:
    Change the threshold in a separate change if necessary.
 5. If an ACS commitment mismatch stays for one full interval after the onboarding flag is clear, remove the new host.
    The new host agrees with its source host and disagrees with the other hosts. Report the source guardian.
+
+Do each change of rules 3 to 5 for `gg`, `feeCustody` and `nttCustody` together.
+After each change, do the custody hosting comparison (Section 2).
 
 WARNING: If your participant logs "Mediator approved a request that has been locally rejected",
 or stops with "with failed activeness check is approved", do not import a contract to stop the restart loop.
@@ -996,6 +1009,7 @@ Procedure:
 10. Make sure that the namespace threshold and the signing key threshold of each party did not change.
 11. Make sure that the effective times of the changes are in the load order: `nttCustody`, `feeCustody`, `gg`, then the namespace.
 12. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
+13. Do the custody hosting comparison (Section 2).
 
 Canton gives each change of one load call its own effective time.
 On LocalNet with Canton 3.7.3, the spread was about 1 s.
@@ -1169,11 +1183,12 @@ Replace the admin with the emergency ceremony (Section 7.9).
 **Guardian removal:**
 
 1. Remove the owner key of the guardian with an owner key rotation (Section 7.4).
-2. Remove the `gg` hosting from the participant of the guardian.
+2. Remove the `gg`, `feeCustody` and `nttCustody` hosting from the participant of the guardian.
    That participant can remove its own hosting. Other changes to the hosting need the `gg` threshold.
-3. Make sure that the confirmation threshold is a majority of the hosts that stay.
+3. Make sure that the confirmation threshold of each of the three parties is a majority of the hosts that stay.
+   If a change is necessary, change the threshold of the three parties together.
 4. Remove the Ledger API user of the watcher of the guardian.
-5. Remove the `nttCustody` hosting from that participant in the same way.
+5. Do the custody hosting comparison (Section 2).
 
 CAUTION: A participant that stops to host a party keeps its copy of the contracts of that party.
 The copy does not change after the removal.
@@ -1477,6 +1492,16 @@ Such a path must have a separate fee payer before any fee goes above 0 (Section 
 The custody party separates Daml authority. It does not separate key authority.
 Two owner keys and two confirming hosts can move each holding of `feeCustody` without a VAA.
 Follow-up: a transfer with a receiver preapproval gives no custody authority at charge time (Token Standard V2).
+
+**U6: hosting of `feeCustody`.**
+Decision on 2026-11-23: `feeCustody` stays a `CoreState` signatory.
+Thus the hosts of `feeCustody` confirm each `PublishMessage`, each VAA check and each governance transaction.
+Each custody party always has the hosts, the confirmation threshold and the owner keys of `gg` (Section 2).
+Then `feeCustody` adds no liveness dependency to the `gg` hosts.
+A hosting procedure or a key procedure changes the three parties together (Sections 4.3, 4.4, 7.4 and 7.7).
+The last step of each procedure is the custody hosting comparison with `gg_show_topology.sh`.
+The alternative is a pull model, in which `feeCustody` is not a `CoreState` signatory.
+That alternative stays an option if the hosting of `feeCustody` must be different from `gg`.
 
 **U3: the two-id window for a core package upgrade.**
 The one-id procedure (Section 6.7) has a signing outage from step 5 to step 14 and a coordinated restart.
