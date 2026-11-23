@@ -48,6 +48,23 @@ func NewCantonGrpcClient(rpc string, readScope ReadScope, logger *zap.Logger, tr
 	if err := readScope.CheckWasConstructed(); err != nil {
 		return nil, err
 	}
+	conn, err := dialLedgerAPI(rpc, transportCreds, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &grpcClient{
+		conn:      conn,
+		state:     apiv2.NewStateServiceClient(conn),
+		update:    apiv2.NewUpdateServiceClient(conn),
+		packages:  apiv2.NewPackageServiceClient(conn),
+		version:   apiv2.NewVersionServiceClient(conn),
+		readScope: readScope,
+		logger:    logger,
+	}, nil
+}
+
+// dialLedgerAPI dials rpc with TLS when transportCreds is nil and bounds each received message.
+func dialLedgerAPI(rpc string, transportCreds credentials.TransportCredentials, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	if transportCreds == nil {
 		transportCreds = credentials.NewTLS(nil)
 	}
@@ -59,15 +76,7 @@ func NewCantonGrpcClient(rpc string, readScope ReadScope, logger *zap.Logger, tr
 	if err != nil {
 		return nil, fmt.Errorf("cantonclient: failed to dial %s: %w", rpc, err)
 	}
-	return &grpcClient{
-		conn:      conn,
-		state:     apiv2.NewStateServiceClient(conn),
-		update:    apiv2.NewUpdateServiceClient(conn),
-		packages:  apiv2.NewPackageServiceClient(conn),
-		version:   apiv2.NewVersionServiceClient(conn),
-		readScope: readScope,
-		logger:    logger,
-	}, nil
+	return conn, nil
 }
 
 func (c *grpcClient) Close() error {
@@ -527,40 +536,25 @@ const (
 	messagePayloadConstructor = "MessagePayload"
 )
 
-// messagePayloadField reads a Daml MessagePayload: a Value.variant whose
-// variant_id is Wormhole.Core.Bytes:MessagePayload in the executing package,
-// with constructor messagePayloadConstructor and a value of lowercase
-// even-length hex without a 0x prefix. This is the ledger's own constructor rule.
-// variant_id is set because the update stream requests verbose values.
+var messagePayloadVariant = singleConstructorVariant{
+	moduleName:  messagePayloadModule,
+	entityName:  messagePayloadEntity,
+	constructor: messagePayloadConstructor,
+}
+
+// messagePayloadField reads a Daml MessagePayload: a messagePayloadVariant of
+// the executing package with a value of lowercase even-length hex without a
+// 0x prefix. This is the ledger's own constructor rule.
 func messagePayloadField(fields map[string]*apiv2.Value, label string, executingPackageID string) ([]byte, error) {
-	v, ok := fields[label]
-	if !ok {
-		return nil, fmt.Errorf("missing field %q", label)
+	payloadHex, err := singleConstructorVariantTextField(fields, label, messagePayloadVariant, func(variantPackageID string) error {
+		if variantPackageID != executingPackageID {
+			return fmt.Errorf("expected the executing package %q", executingPackageID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	variant := v.GetVariant()
-	if variant == nil {
-		return nil, fmt.Errorf("field %q is not a variant", label)
-	}
-	variantID := variant.GetVariantId()
-	if variantID == nil {
-		return nil, fmt.Errorf("field %q has no variant id", label)
-	}
-	if variantID.GetModuleName() != messagePayloadModule || variantID.GetEntityName() != messagePayloadEntity {
-		return nil, fmt.Errorf("field %q is variant %s:%s, expected %s:%s", label,
-			variantID.GetModuleName(), variantID.GetEntityName(), messagePayloadModule, messagePayloadEntity)
-	}
-	if variantID.GetPackageId() != executingPackageID {
-		return nil, fmt.Errorf("field %q is a variant of package %q, expected the executing package %q", label,
-			variantID.GetPackageId(), executingPackageID)
-	}
-	if variant.GetConstructor() != messagePayloadConstructor {
-		return nil, fmt.Errorf("field %q has constructor %q, expected %q", label, variant.GetConstructor(), messagePayloadConstructor)
-	}
-	textValue, ok := variant.GetValue().GetSum().(*apiv2.Value_Text)
-	if !ok {
-		return nil, fmt.Errorf("field %q does not hold text", label)
-	}
-	payloadHex := textValue.Text
 	if !isLowercaseHex(payloadHex) {
 		return nil, fmt.Errorf("field %q is not lowercase hex", label)
 	}
@@ -572,6 +566,46 @@ func messagePayloadField(fields map[string]*apiv2.Value, label string, executing
 		return nil, fmt.Errorf("field %q is not valid hex: %w", label, err)
 	}
 	return payload, nil
+}
+
+// singleConstructorVariant identifies a positional single-constructor Daml data type.
+type singleConstructorVariant struct {
+	moduleName  string
+	entityName  string
+	constructor string
+}
+
+// singleConstructorVariantTextField reads a Value.variant of expectedVariant,
+// in a package that checkVariantPackageID accepts, whose value is Text.
+// variant_id is set because the reads request verbose values.
+func singleConstructorVariantTextField(fields map[string]*apiv2.Value, label string, expectedVariant singleConstructorVariant, checkVariantPackageID func(variantPackageID string) error) (string, error) {
+	fieldValue, found := fields[label]
+	if !found {
+		return "", fmt.Errorf("missing field %q", label)
+	}
+	variant := fieldValue.GetVariant()
+	if variant == nil {
+		return "", fmt.Errorf("field %q is not a variant", label)
+	}
+	variantID := variant.GetVariantId()
+	if variantID == nil {
+		return "", fmt.Errorf("field %q has no variant id", label)
+	}
+	if variantID.GetModuleName() != expectedVariant.moduleName || variantID.GetEntityName() != expectedVariant.entityName {
+		return "", fmt.Errorf("field %q is variant %s:%s, expected %s:%s", label,
+			variantID.GetModuleName(), variantID.GetEntityName(), expectedVariant.moduleName, expectedVariant.entityName)
+	}
+	if err := checkVariantPackageID(variantID.GetPackageId()); err != nil {
+		return "", fmt.Errorf("field %q is a variant of package %q: %w", label, variantID.GetPackageId(), err)
+	}
+	if variant.GetConstructor() != expectedVariant.constructor {
+		return "", fmt.Errorf("field %q has constructor %q, expected %q", label, variant.GetConstructor(), expectedVariant.constructor)
+	}
+	textValue, isText := variant.GetValue().GetSum().(*apiv2.Value_Text)
+	if !isText {
+		return "", fmt.Errorf("field %q does not hold text", label)
+	}
+	return textValue.Text, nil
 }
 
 func isLowercaseHex(text string) bool {

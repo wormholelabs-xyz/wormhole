@@ -76,6 +76,14 @@ func ParseApprovedCorePackages(fileJSON []byte) (ApprovedCorePackages, error) {
 	return ApprovedCorePackages{entries: entries}, nil
 }
 
+// CheckCorePackageIDApproved requires packageID in the list at any version.
+func (approved ApprovedCorePackages) CheckCorePackageIDApproved(packageID PackageID) error {
+	if _, found := approved.entries[packageID]; !found {
+		return fmt.Errorf("core package id %s is not in the approved list compiled into guardiand", packageID)
+	}
+	return nil
+}
+
 // CheckCorePackageApproved requires packageID in the list at exactly version.
 func (approved ApprovedCorePackages) CheckCorePackageApproved(packageID PackageID, version CorePackageVersion) error {
 	approvedVersion, found := approved.entries[packageID]
