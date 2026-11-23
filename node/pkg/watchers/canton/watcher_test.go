@@ -546,6 +546,7 @@ func TestNewWatcherBuildsOAuthClientCredentials(t *testing.T) {
 		{name: "whitespace-only audience", auth: withAudience("\t"), expectedErrorMessage: "whitespace"},
 		{name: "audience with a trailing space", auth: withAudience("https://canton.network.global "), expectedErrorMessage: "whitespace"},
 		{name: "audience with a control character", auth: withAudience("https://canton.network\x00.global"), expectedErrorMessage: "control character"},
+		{name: "http token URL", auth: AuthConfig{TokenURL: "http://idp.example/token", ClientID: completeAuth.ClientID, ClientSecret: completeAuth.ClientSecret}, expectedErrorMessage: "auth token URL"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -563,8 +564,10 @@ func TestNewWatcherBuildsOAuthClientCredentials(t *testing.T) {
 			}
 			expectedAudience, err := cantonclient.ParseOAuthAudience(testCase.expectedAudience)
 			require.NoError(t, err)
+			expectedTokenURL, err := cantonclient.ParseOAuthTokenURL(completeAuth.TokenURL)
+			require.NoError(t, err)
 			require.Equal(t, &cantonclient.OAuthClientCredentials{
-				TokenURL:     completeAuth.TokenURL,
+				TokenURL:     expectedTokenURL,
 				ClientID:     completeAuth.ClientID,
 				ClientSecret: completeAuth.ClientSecret,
 				Audience:     expectedAudience,

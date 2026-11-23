@@ -49,7 +49,7 @@ func init() {
 	cantonListPublishesReadAsParty = flags.String("cantonReadAsParty", "", "guardianGovernance party id to read as (<hint>::1220<64 lowercase hex>)")
 	cantonListPublishesFromOffset = flags.Int64("fromOffset", -1, "Exclusive participant offset to start after (the offset recorded at step 1 of the upgrade)")
 	cantonListPublishesExecutingPackageID = flags.String("executingPackageID", "", "wormhole-core package id (64 lowercase hex) whose publishes to list")
-	cantonListPublishesAuthTokenURL = flags.String("cantonAuthTokenURL", "", "OAuth2 token endpoint; the client secret is read from GUARDIAND_CANTONAUTHCLIENTSECRET")
+	cantonListPublishesAuthTokenURL = flags.String("cantonAuthTokenURL", "", "OAuth2 token endpoint (https only); the client secret is read from GUARDIAND_CANTONAUTHCLIENTSECRET")
 	cantonListPublishesAuthClientID = flags.String("cantonAuthClientID", "", "OAuth2 client id")
 	cantonListPublishesAuthAudience = flags.String("cantonAuthAudience", "", "Optional OAuth2 audience: the Ledger API target audience of the participant")
 	cantonListPublishesPlaintext = flags.Bool("unsafePlaintext", false, "Dial without TLS (local sandbox only)")
@@ -158,8 +158,12 @@ func cantonListPublishesOAuthCredentials(oauthFlags cantonListPublishesOAuthFlag
 	if unsafePlaintext {
 		return nil, fmt.Errorf("OAuth requires TLS; remove --unsafePlaintext")
 	}
+	tokenURL, err := cantonclient.ParseOAuthTokenURL(oauthFlags.tokenURL)
+	if err != nil {
+		return nil, fmt.Errorf("--cantonAuthTokenURL: %w", err)
+	}
 	return &cantonclient.OAuthClientCredentials{
-		TokenURL:     oauthFlags.tokenURL,
+		TokenURL:     tokenURL,
 		ClientID:     oauthFlags.clientID,
 		ClientSecret: oauthFlags.clientSecret,
 		Audience:     audience,
