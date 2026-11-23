@@ -344,24 +344,40 @@ check_service_endpoints() {
     check_service_answers "no route" "$removed_path" 404 -
   done
   check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
-  # ntt 0.6.2: the register flow reads only gg contracts, the genesis roots of the pinned packages. Without a namespace,
-  # the covering claimed-roots node is missing.
-  check_service_answers "register flow from the gg reader" /v1/flows/register 200 \
-    "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\"])
-     and ([.missing[].role] == [\"covering claimed-roots ReplayNode\"])
-     and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])"
-  # With the namespace of the next registration, the service serves the claimed-roots node that covers the pair.
-  local register_namespace expected_claimed_roots_node
-  register_namespace="$(ntt_namespace_for "$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, id: "Amulet"}')" "$GG_PARTY" \
-    "$(ntt_governance_next_id)")"
-  expected_claimed_roots_node="$(claimed_roots_node_covering "$GG_PARTY" "$register_namespace")"
-  check_service_answers "register flow with a namespace serves the covering claimed-roots node" \
-    "/v1/flows/register?namespace=$(jq -rn --arg namespace "$register_namespace" '$namespace | @uri')" 200 \
+  check_register_flow
+}
+
+# register_flow_path <params-json>: /v1/flows/register with each key of the JSON object as a URI-encoded parameter.
+register_flow_path() {
+  echo "/v1/flows/register?$(jq -r 'to_entries | map("\(.key)=\(.value | @uri)") | join("&")' <<<"$1")"
+}
+
+# check_register_flow: the service derives the claim namespace from admin, instrument-admin, instrument-id and the
+# NttGovernance nextId, and serves the claimed-roots node that covers it.
+check_register_flow() {
+  local register_params next_manager_id expected_claim_namespace expected_claimed_roots_node required_param
+  register_params="$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, "instrument-admin": $gg, "instrument-id": "Amulet"}')"
+  next_manager_id="$(ntt_governance_next_id)"
+  [[ "$next_manager_id" =~ ^[0-9]+$ ]] || fail "NttGovernance nextId is not a natural number: $next_manager_id"
+  expected_claim_namespace="$(ntt_namespace_for "$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, id: "Amulet"}')" "$GG_PARTY" \
+    "$next_manager_id")"
+  expected_claimed_roots_node="$(claimed_roots_node_covering "$GG_PARTY" "$expected_claim_namespace")"
+  check_service_answers "register flow derives the claim namespace and serves the covering claimed-roots node" \
+    "$(register_flow_path "$register_params")" 200 \
     "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\", \"covering claimed-roots ReplayNode\"])
      and (.missing == [])
+     and (.claimNamespace == \"$expected_claim_namespace\")
+     and (.managerId == $next_manager_id)
      and (.disclosures[4].contractId == \"$expected_claimed_roots_node\")
-     and (.disclosures[4].templateId | split(\":\")[0]) == \"$WORMHOLE_CORE_PACKAGE_ID\""
-  check_service_answers "register flow with the reserved namespace" "/v1/flows/register?namespace=wormhole-core%3Areplay-roots" 400 -
+     and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])"
+  check_service_answers "register flow with the removed namespace parameter" \
+    "$(register_flow_path "$(jq -c --arg namespace "$expected_claim_namespace" '. + {namespace: $namespace}' <<<"$register_params")")" 400 -
+  for required_param in admin instrument-admin instrument-id; do
+    check_service_answers "register flow without $required_param" \
+      "$(register_flow_path "$(jq -c --arg name "$required_param" 'del(.[$name])' <<<"$register_params")")" 400 -
+  done
+  check_service_answers "register flow with a malformed admin" \
+    "$(register_flow_path "$(jq -c '.admin = "not-a-party"' <<<"$register_params")")" 400 -
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.
