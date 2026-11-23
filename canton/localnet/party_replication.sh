@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Offline replication of guardianGovernance (source app-provider) and nttCustody (source sv) to guardian4 at Confirmation.
+# Offline replication of guardianGovernance and feeCustody (source app-provider) and nttCustody (source sv) to guardian4
+# at Confirmation. Each phase changes the three parties together: they keep the same hosting.
 # Usage: party_replication.sh <phase> [owner-name owner-name]
 #   connect        Connect guardian4 to the global synchronizer and vet every DAR that app-provider has.
 #   prepare        Steps 2 to 7: consent, disconnect guardian4, owner signatures, ACS export to $LOCALNET_STATE_DIR/guardian4/replication.
 #   complete       Steps 10 to 13: ACS import with contract validation, reconnect, clear the onboarding flag.
-#   remove-host    Remove REPLICATION_REMOVED_HOST (participant id or name) from both parties.
+#   remove-host    Remove REPLICATION_REMOVED_HOST (participant id or name) from each party.
 #   add-host-without-consent  Add REPLICATION_ADDED_HOST with the owner signatures only (negative check).
-#   set-threshold  Set the confirmation threshold of both parties to REPLICATION_CONFIRMATION_THRESHOLD.
+#   set-threshold  Set the confirmation threshold of each party to REPLICATION_CONFIRMATION_THRESHOLD.
 #   set-permission Set REPLICATION_PERMISSION_HOST (console name) to REPLICATION_HOST_PERMISSION (Observation or
-#                  Confirmation) on both parties. An increase needs the consent of that host.
+#                  Confirmation) on each party. An increase needs the consent of that host.
 #   set-permission-without-consent  Increase that permission with the owner signatures only (negative check).
 # Each PartyToParticipant change is compared with the intended change before any owner signs it.
 # The owner names (default owner1 owner2) are two current guardianGovernance namespace owners under gg-keys/.
@@ -24,7 +25,8 @@ first_owner="${2:-owner1}"
 second_owner="${3:-owner2}"
 check_owner_names_are_safe "$first_owner" "$second_owner"
 check_owner_names_differ "$first_owner" "$second_owner"
-custody_party="$(jq -er .partyId "$LOCALNET_STATE_DIR/custody-artifacts.json")"
+[[ -n "$FEE_CUSTODY_PARTY" ]] || fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
+[[ -n "$CUSTODY_PARTY" ]] || fail "missing $CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=nttCustody custody_host.sh first."
 
 owner_signer_argv() { jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$1.key" '["node", $tool, "sign", $key]'; }
 
@@ -43,7 +45,7 @@ fi
 mkdir -p "$replication_dir"
 LEDGER_API_TOKEN="$(cat "$gg_work_dir/script.jwt")" \
 REPLICATION_PHASE="$replication_phase" REPLICATION_TARGET=guardian4 REPLICATION_DIR="$replication_dir" \
-REPLICATION_PARTIES="$GG_PARTY=app-provider,$custody_party=sv" \
+REPLICATION_PARTIES="$GG_PARTY=app-provider,$FEE_CUSTODY_PARTY=app-provider,$CUSTODY_PARTY=sv" \
 OWNER_PUBKEY_1="$GG_KEY_DIR/$first_owner.pub" OWNER_SIGN_ARGV_1="$(owner_signer_argv "$first_owner")" \
 OWNER_PUBKEY_2="$GG_KEY_DIR/$second_owner.pub" OWNER_SIGN_ARGV_2="$(owner_signer_argv "$second_owner")" \
 CANTON_CONSOLE_CONFIG="$LOCALNET_SCRIPT_DIR/console/remote-participants-guardian4.conf" \
