@@ -61,8 +61,7 @@ scan_confirms_publish() {
     || fail "$label: publish_message_scan on $participant_name did not confirm update $update_id at offset $end"
   echo "PASS: $label: $participant_name shows the PublishMessage as guardianGovernance"
 }
-# check_app_user_has_no_emitter_event <label> <update-id>: app-user shows no Emitter event of the update. app-user hosts
-# feeCustody, a CoreState stakeholder, so it can show the CoreState events of the update.
+# check_app_user_has_no_emitter_event <label> <update-id>: app-user shows no Emitter event of the update.
 check_app_user_has_no_emitter_event() {
   local update_json event_templates
   update_json="$(gg_update_at "$(json_api_url app-user)" "$2")"
@@ -75,7 +74,7 @@ check_app_user_has_no_emitter_event() {
   if grep -qE '(^|,)Wormhole\.Core\.State:Emitter\.' <<<"$event_templates"; then
     fail "$1: app-user shows the Emitter events of the PublishMessage: $event_templates"
   fi
-  echo "PASS: $1: app-user shows no Emitter event of the PublishMessage (CoreState events through feeCustody: $event_templates)"
+  echo "PASS: $1: app-user shows no Emitter event of the PublishMessage (events: $event_templates)"
 }
 # publish_and_check <label> <require-guardian4-vote>: publish one message and check it on each host; app-user must show
 # no Emitter event of it. With require-guardian4-vote true, also require that the mediator counted a guardian4 approval

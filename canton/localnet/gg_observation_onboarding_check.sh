@@ -2,11 +2,11 @@
 # Observation-first onboarding check (L1 runbook rule 3): a guardianGovernance host at Observation stays below the
 # confirmation threshold; after promotion to Confirmation it counts.
 #   1. Set guardian4 to Observation. Disconnect app-provider. guardian4 must be connected. A gg PublishMessage with only
-#      sv confirming must time out, with guardianGovernance as the one unresponsive party, and the mediator
-#      log must show no guardian4 verdict in that time.
+#      sv confirming must time out, with guardianGovernance and feeCustody as the unresponsive parties, and the
+#      mediator log must show no guardian4 verdict in that time.
 #   2. Promote guardian4 to Confirmation. Disconnect app-provider. The same PublishMessage must commit, because sv and
 #      guardian4 reach the threshold of 2. CorePublisher submits on sv, so sv stays connected.
-# Precondition: guardian4 hosts guardianGovernance at Confirmation (gg_hosting_change_check.sh passes) and an
+# Precondition: guardian4 hosts the guardian namespace parties at Confirmation (gg_hosting_change_check.sh passes) and a
 # CorePublisher Emitter exists (gg_publish_and_govern.sh ran). The mediator timeout runs on sequencer time, so a
 # background ticker requests time proofs from sv while app-provider is offline. The EXIT trap reconnects app-provider
 # and restores guardian4 to Confirmation.
@@ -21,6 +21,7 @@ first_owner="${1:-owner1}"
 second_owner="${2:-owner2}"
 check_owner_names_are_safe "$first_owner" "$second_owner"
 check_owner_names_differ "$first_owner" "$second_owner"
+[[ -n "$FEE_CUSTODY_PARTY" ]] || fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
 
 set_guardian4_permission() {
   REPLICATION_PERMISSION_HOST=guardian4 REPLICATION_HOST_PERMISSION="$1" \
@@ -43,14 +44,15 @@ restore_state() {
 trap restore_state EXIT
 
 # require_timeout_rejection <output-prefix>: the completion in <prefix>.out must be MEDIATOR_SAYS_TX_TIMED_OUT with
-# guardianGovernance as the only unresponsive party. feeCustody keeps two connected hosts: sv and app-user.
+# exactly guardianGovernance and feeCustody, the CoreState signatories on the same hosts, as unresponsive parties.
 require_timeout_rejection() {
   local summary
   summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
   jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1 \
     || { echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
-  jq -e --arg party "$GG_PARTY" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$party]' <<<"$summary" >/dev/null 2>&1 \
-    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
+  jq -e --arg gg "$GG_PARTY" --arg fee "$FEE_CUSTODY_PARTY" \
+    '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) | sort == ([$gg, $fee] | sort)' <<<"$summary" >/dev/null 2>&1 \
+    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY and $FEE_CUSTODY_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
   echo "PASS: Observation host does not count; the PublishMessage timed out. $summary"
 }
 
