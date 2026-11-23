@@ -88,8 +88,8 @@ Set `DB_PORT` to use a different port.
 | `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
 | `watcher_harness_lib.sh` | Shared functions that start and stop the guardian watcher harness. |
 | `guardian4.sh` | Starts or removes the temporary participant `guardian4` and its PostgreSQL container. |
-| `party_replication.sh` | Connects `guardian4`. Replicates `guardianGovernance` and `nttCustody` to `guardian4` offline. Removes a host. Sets the confirmation threshold. Sets a host permission. Compares each hosting change with the intended change before the owner keys sign it. |
-| `gg_hosting_change_check.sh` | Checks the hosts, the threshold and the ACS of `guardian4` after a hosting change. |
+| `party_replication.sh` | Connects `guardian4`. Replicates `guardianGovernance`, `feeCustody` and `nttCustody` to `guardian4` offline. Each other phase changes the three parties together. Removes a host. Sets the confirmation threshold. Sets a host permission. Compares each hosting change with the intended change before the owner keys sign it. |
+| `gg_hosting_change_check.sh` | Checks the hosts, the threshold and the ACS of `guardian4` after a hosting change. Checks the three guardian namespace parties. |
 | `gg_hosting_change_live_check.sh` | Checks that a `PublishMessage` commits with `guardian4` as a confirmer, also with `app-provider` disconnected. |
 | `gg_hosting_change_negative_check.sh` | Checks that the synchronizer rejects a hosting change with one owner key or without host consent. |
 | `gg_observation_onboarding_check.sh` | Checks that an Observation host stays below the threshold, and counts after a consented promotion to Confirmation. |
