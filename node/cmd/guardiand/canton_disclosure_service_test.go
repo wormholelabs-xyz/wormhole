@@ -136,6 +136,8 @@ type emptyLedgerReader struct{}
 
 func (emptyLedgerReader) GetLedgerEnd(context.Context) (int64, error) { return 5, nil }
 
+func (emptyLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) { return true, nil }
+
 func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, int) (cantonclient.ActiveCoreContracts, error) {
 	return cantonclient.ActiveCoreContracts{}, nil
 }

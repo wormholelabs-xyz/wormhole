@@ -1338,6 +1338,7 @@ The service also has its own limits:
 | Status | Meaning |
 | - | - |
 | `bootstrapping` | The first snapshot is not complete. |
+| `read_party_not_hosted` | No connected synchronizer hosts `gg` on your participant. The index stops at the last offset of the hosting. Point the service at a participant that hosts `gg`. |
 | `stream_disconnected` | The update stream is not connected. |
 | `ledger_lag_above_bound` | The newest ledger end read that the index reached is older than `--ledgerLagBound`. |
 | `index_singleton_missing` | A singleton has no live instance. |
@@ -1379,6 +1380,7 @@ The service writes at most one warning log each second for 503 answers. The log 
 | `wormhole_canton_disclosure_index_used_bytes` | The value is more than 80 % of `wormhole_canton_disclosure_index_byte_cap_bytes`. |
 | `wormhole_canton_disclosure_ledger_lag_seconds` | The value is more than `--ledgerLagBound`. |
 | `wormhole_canton_disclosure_stream_connected` | The value is 0 for 1 minute. |
+| `wormhole_canton_disclosure_read_party_hosted` | The value is 0. |
 | `wormhole_canton_disclosure_index_rebuilds_total` | The value increases. The `reason` label shows the cause. |
 | `wormhole_canton_disclosure_resnapshot_differences_total` | The value increases. The `kind` label shows the difference. |
 | `wormhole_canton_disclosure_index_ignored_unknown_archives` | The value increases. |

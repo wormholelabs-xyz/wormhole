@@ -88,6 +88,47 @@ func TestServiceReadinessStates(t *testing.T) {
 			expectReady:    true,
 		},
 		{
+			name: "read party not hosted",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyNotHosted,
+		},
+		{
+			name: "read party hosted again",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+				served.setReadPartyHosted(true)
+			},
+			expectedStatus: ServiceReadinessStatusReady,
+			expectReady:    true,
+		},
+		{
+			name: "read party not hosted before the bootstrap",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				served.setStreamConnected(true)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusBootstrapping,
+		},
+		{
+			name: "read party not hosted at the byte cap",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				const byteCapBytes = int64(20_000)
+				swapTestIndex(served, newBootstrappedTestIndex(t, byteCapBytes, newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", int(byteCapBytes))), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyNotHosted,
+		},
+		{
 			name: "no ledger end read since a bootstrap older than the bound",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)

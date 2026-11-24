@@ -45,6 +45,12 @@ func TestGaugesReadTheServedIndexAtScrapeTime(t *testing.T) {
 	require.Equal(t, float64(testBootstrapOffset), gatheredGaugeValue(t, "wormhole_canton_disclosure_index_offset", "", ""))
 	require.Equal(t, 1.0, gatheredGaugeValue(t, "wormhole_canton_disclosure_index_readiness", "readiness", IndexReadinessReady.String()))
 	require.Equal(t, 1.0, gatheredGaugeValue(t, "wormhole_canton_disclosure_stream_connected", "", ""))
+	require.Equal(t, 1.0, gatheredGaugeValue(t, "wormhole_canton_disclosure_read_party_hosted", "", ""))
+
+	served.setReadPartyHosted(false)
+	require.Equal(t, 0.0, gatheredGaugeValue(t, "wormhole_canton_disclosure_read_party_hosted", "", ""))
+	require.Equal(t, 1.0, gatheredGaugeValue(t, "wormhole_canton_disclosure_service_readiness", "status", string(ServiceReadinessStatusReadPartyNotHosted)))
+	served.setReadPartyHosted(true)
 
 	clock.current = clock.current.Add(90 * time.Second)
 	served.recordLedgerEnd(testBootstrapOffset+4, clock.current)
@@ -61,6 +67,6 @@ func TestGaugesReadTheServedIndexAtScrapeTime(t *testing.T) {
 func TestAllServiceReadinessStatuses(t *testing.T) {
 	require.Equal(t, []ServiceReadinessStatus{
 		"ready", "ready_byte_cap_reached", "bootstrapping", "stream_disconnected", "ledger_lag_above_bound",
-		"index_singleton_missing", "index_singleton_conflict", "index_inconsistent", "index_resnapshot_difference",
+		"read_party_not_hosted", "index_singleton_missing", "index_singleton_conflict", "index_inconsistent", "index_resnapshot_difference",
 	}, allServiceReadinessStatuses())
 }
