@@ -46,7 +46,33 @@ type fakeCoreContractLedgerReader struct {
 	subscribeBeginOffsets    []int64
 	ledgerEndReadCount       int
 	// snapshotReadGates[i], when not nil, holds snapshot read i until the gate closes.
-	snapshotReadGates []chan struct{}
+	snapshotReadGates     []chan struct{}
+	readPartyUnhosted     bool
+	readPartyHostingErr   error
+	readPartyHostingReads int
+}
+
+func (reader *fakeCoreContractLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) {
+	reader.mutex.Lock()
+	defer reader.mutex.Unlock()
+	reader.readPartyHostingReads++
+	if reader.readPartyHostingErr != nil {
+		return false, reader.readPartyHostingErr
+	}
+	return !reader.readPartyUnhosted, nil
+}
+
+func (reader *fakeCoreContractLedgerReader) setReadPartyHosting(unhosted bool, hostingErr error) {
+	reader.mutex.Lock()
+	defer reader.mutex.Unlock()
+	reader.readPartyUnhosted = unhosted
+	reader.readPartyHostingErr = hostingErr
+}
+
+func (reader *fakeCoreContractLedgerReader) readPartyHostingReadCount() int {
+	reader.mutex.Lock()
+	defer reader.mutex.Unlock()
+	return reader.readPartyHostingReads
 }
 
 func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64, error) {
@@ -1043,4 +1069,78 @@ func TestWriterLeavesTheCountTruncatedIndexWhenTheLedgerShrinks(t *testing.T) {
 	require.Equal(t, testContractIDHex(2), result.Contract().ContractID().String())
 	require.NoError(t, stop())
 	require.Equal(t, rebuildsBefore+1, rebuildCount(IndexRebuildReasonByteCapRetry))
+}
+
+func requireEventuallyServiceStatus(t *testing.T, served *ServedIndex, expectedStatus ServiceReadinessStatus) {
+	t.Helper()
+	require.Eventually(t, func() bool { return served.ServiceReadiness().Status() == expectedStatus }, 5*time.Second, time.Millisecond, "status %s", expectedStatus)
+}
+
+func TestWriterReportsAReadPartyThatLosesItsHosting(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:         testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+	}
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, testWriterTiming())
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+
+	reader.setReadPartyHosting(true, nil)
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReadPartyNotHosted)
+	require.False(t, served.ServiceReadiness().IsReady())
+
+	reader.setReadPartyHosting(false, nil)
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+	require.NoError(t, stop())
+	snapshotReads, _ := reader.callCounts()
+	require.Equal(t, 1, snapshotReads, "a hosting change alone does not rebuild the index")
+}
+
+func TestWriterKeepsTheHostingStateWhenTheHostingReadFails(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:         testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+	}
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, testWriterTiming())
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+	reader.setReadPartyHosting(true, nil)
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReadPartyNotHosted)
+
+	readsBeforeFailure := reader.readPartyHostingReadCount()
+	reader.setReadPartyHosting(false, errors.New("unavailable"))
+	require.Eventually(t, func() bool { return reader.readPartyHostingReadCount() >= readsBeforeFailure+5 }, 5*time.Second, time.Millisecond)
+	require.Equal(t, ServiceReadinessStatusReadPartyNotHosted, served.ServiceReadiness().Status())
+
+	reader.setReadPartyHosting(false, nil)
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+	require.NoError(t, stop())
+}
+
+func TestWriterBootstrapOnAParticipantThatDoesNotHostTheReadParty(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:         testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+		readPartyUnhosted: true,
+	}
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, testWriterTiming())
+	require.Eventually(t, func() bool { _, hasIndex := served.IndexStatus(); return hasIndex }, 5*time.Second, time.Millisecond)
+	require.Equal(t, ServiceReadinessStatusReadPartyNotHosted, served.ServiceReadiness().Status())
+	require.NoError(t, stop())
+}
+
+func TestWriterBuildFailsWhenTheBootstrapHostingReadFails(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:           testBootstrapOffset,
+		snapshotResponses:   []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+		readPartyHostingErr: errors.New("unavailable"),
+	}
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, testWriterTiming())
+	require.Eventually(t, func() bool { return reader.readPartyHostingReadCount() >= 2 }, 5*time.Second, time.Millisecond)
+	_, hasIndex := served.IndexStatus()
+	require.False(t, hasIndex)
+	require.Equal(t, ServiceReadinessStatusBootstrapping, served.ServiceReadiness().Status())
+	_ = stop()
 }

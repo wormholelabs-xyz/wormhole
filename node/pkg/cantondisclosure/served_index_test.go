@@ -88,6 +88,47 @@ func TestServiceReadinessStates(t *testing.T) {
 			expectReady:    true,
 		},
 		{
+			name: "read party not hosted",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyNotHosted,
+		},
+		{
+			name: "read party hosted again",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+				served.setReadPartyHosted(true)
+			},
+			expectedStatus: ServiceReadinessStatusReady,
+			expectReady:    true,
+		},
+		{
+			name: "read party not hosted before the bootstrap",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				served.setStreamConnected(true)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusBootstrapping,
+		},
+		{
+			name: "read party not hosted at the byte cap",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				const byteCapBytes = int64(20_000)
+				swapTestIndex(served, newBootstrappedTestIndex(t, byteCapBytes, newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", int(byteCapBytes))), clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+				served.setReadPartyHosted(false)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyNotHosted,
+		},
+		{
 			name: "no ledger end read since a bootstrap older than the bound",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
@@ -372,4 +413,65 @@ func TestCheckLedgerLagBoundAgainstThePollInterval(t *testing.T) {
 	require.Error(t, CheckLedgerLagBound(ProductionLedgerEndPollInterval))
 	require.Error(t, CheckLedgerLagBound(2*ProductionLedgerEndPollInterval-time.Nanosecond))
 	require.NoError(t, CheckLedgerLagBound(2*ProductionLedgerEndPollInterval))
+}
+
+// Idle offset checkpoint cadence that the LocalNet suite measured on a Canton 3.7.3 participant: the filtered update
+// stream of guardianGovernance sends a checkpoint about every 45 s, and each checkpoint reaches the ledger end of
+// about 30 s before. Other parties advance the ledger end meanwhile. Measured largest lag: 74.6 s.
+const (
+	measuredIdleCheckpointInterval = 45 * time.Second
+	measuredCheckpointOffsetDelay  = 30 * time.Second
+)
+
+// simulateIdleCheckpointCadence advances the ledger end each second, reads it each poll interval, and advances the index
+// to the ledger end of measuredCheckpointOffsetDelay before at each measuredIdleCheckpointInterval. Returns the
+// readiness after each poll.
+func simulateIdleCheckpointCadence(t *testing.T, ledgerLagBound time.Duration, runDuration time.Duration) []ServiceReadiness {
+	t.Helper()
+	clock := &testClock{current: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+	served, err := newServedIndexWithClock(ledgerLagBound, clock.now)
+	require.NoError(t, err)
+	index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+	swapTestIndex(served, index, clock)
+	served.setStreamConnected(true)
+	startedAt := clock.current
+	readinessAfterEachPoll := []ServiceReadiness{}
+	for elapsed := time.Second; elapsed <= runDuration; elapsed += time.Second {
+		clock.current = startedAt.Add(elapsed)
+		ledgerEnd := testBootstrapOffset + int64(elapsed/time.Second)
+		if elapsed%measuredIdleCheckpointInterval == 0 && elapsed > measuredCheckpointOffsetDelay {
+			require.NoError(t, index.AdvanceOffset(testBootstrapOffset+int64((elapsed-measuredCheckpointOffsetDelay)/time.Second)))
+		}
+		if elapsed%ProductionLedgerEndPollInterval == 0 {
+			served.recordLedgerEnd(ledgerEnd, clock.current)
+			readinessAfterEachPoll = append(readinessAfterEachPoll, served.ServiceReadiness())
+		}
+	}
+	return readinessAfterEachPoll
+}
+
+func TestDefaultLedgerLagBoundAdmitsTheIdleCheckpointCadence(t *testing.T) {
+	testCases := []struct {
+		name              string
+		ledgerLagBound    time.Duration
+		expectAlwaysReady bool
+	}{
+		{name: "default bound", ledgerLagBound: DefaultLedgerLagBound, expectAlwaysReady: true},
+		{name: "one minute bound", ledgerLagBound: time.Minute, expectAlwaysReady: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			readinessAfterEachPoll := simulateIdleCheckpointCadence(t, testCase.ledgerLagBound, 30*time.Minute)
+			largestLag := time.Duration(0)
+			notReadyPolls := 0
+			for _, readiness := range readinessAfterEachPoll {
+				largestLag = max(largestLag, readiness.LedgerLag)
+				if !readiness.IsReady() {
+					notReadyPolls++
+				}
+			}
+			require.Greater(t, largestLag, time.Minute, "the simulated cadence reproduces the measured lag above one minute")
+			require.Equal(t, testCase.expectAlwaysReady, notReadyPolls == 0, "%d of %d polls not ready, largest lag %s", notReadyPolls, len(readinessAfterEachPoll), largestLag)
+		})
+	}
 }

@@ -1303,7 +1303,7 @@ Thus the service affects liveness only.
 | `--listenAddress` | Mandatory. HTTP listen address of the routes (`host:port`). |
 | `--statusAddr` | Listen address of `/metrics`. The default is `127.0.0.1:6061`. An empty value disables it. |
 | `--indexByteCapBytes` | Byte cap of the index. The default is 4 GiB. |
-| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 1 minute. |
+| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 3 minutes. Without core transactions, the index moves only on offset checkpoints. Then the lag can be 75 seconds on Canton 3.7.3. |
 | `--resnapshotInterval` | Interval of the snapshot comparison, from 1 minute to 168 hours. The default is 1 hour. |
 | `--logLevel` | Log level: `debug`, `info`, `warn` or `error`. The default is `info`. |
 
@@ -1338,6 +1338,7 @@ The service also has its own limits:
 | Status | Meaning |
 | - | - |
 | `bootstrapping` | The first snapshot is not complete. |
+| `read_party_not_hosted` | No connected synchronizer hosts `gg` on your participant. The index stops at the last offset of the hosting. Point the service at a participant that hosts `gg`. |
 | `stream_disconnected` | The update stream is not connected. |
 | `ledger_lag_above_bound` | The newest ledger end read that the index reached is older than `--ledgerLagBound`. |
 | `index_singleton_missing` | A singleton has no live instance. |
@@ -1379,6 +1380,7 @@ The service writes at most one warning log each second for 503 answers. The log 
 | `wormhole_canton_disclosure_index_used_bytes` | The value is more than 80 % of `wormhole_canton_disclosure_index_byte_cap_bytes`. |
 | `wormhole_canton_disclosure_ledger_lag_seconds` | The value is more than `--ledgerLagBound`. |
 | `wormhole_canton_disclosure_stream_connected` | The value is 0 for 1 minute. |
+| `wormhole_canton_disclosure_read_party_hosted` | The value is 0. |
 | `wormhole_canton_disclosure_index_rebuilds_total` | The value increases. The `reason` label shows the cause. |
 | `wormhole_canton_disclosure_resnapshot_differences_total` | The value increases. The `kind` label shows the difference. |
 | `wormhole_canton_disclosure_index_ignored_unknown_archives` | The value increases. |

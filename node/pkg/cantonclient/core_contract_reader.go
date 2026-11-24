@@ -21,6 +21,10 @@ type CoreContractReader interface {
 	// GetLedgerEnd maps to StateService.GetLedgerEnd.
 	GetLedgerEnd(ctx context.Context) (int64, error)
 
+	// ReadPartyIsHosted is true when a connected synchronizer hosts the guardianGovernance party on this participant,
+	// at any permission. Maps to StateService.GetConnectedSynchronizers.
+	ReadPartyIsHosted(ctx context.Context) (bool, error)
+
 	// ReadActiveCoreContracts returns the active disclosed core contracts at
 	// activeAtOffset, with their created event blobs. Above maxReplayNodes
 	// ReplayNodes, the result keeps the singletons only and reports ReplayNodesTruncated.
@@ -264,6 +268,21 @@ func (reader *grpcCoreContractReader) GetLedgerEnd(ctx context.Context) (int64, 
 		return 0, fmt.Errorf("GetLedgerEnd: %w", err)
 	}
 	return response.GetOffset(), nil
+}
+
+func (reader *grpcCoreContractReader) ReadPartyIsHosted(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
+	response, err := reader.state.GetConnectedSynchronizers(ctx, &apiv2.GetConnectedSynchronizersRequest{Party: reader.decoder.guardianGovernance.String()})
+	if err != nil {
+		return false, fmt.Errorf("GetConnectedSynchronizers: %w", err)
+	}
+	for _, synchronizer := range response.GetConnectedSynchronizers() {
+		if synchronizer.GetPermission() != apiv2.ParticipantPermission_PARTICIPANT_PERMISSION_UNSPECIFIED {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // eventFormat filters the disclosed core templates of every core package
