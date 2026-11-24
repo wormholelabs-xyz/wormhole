@@ -9,11 +9,22 @@ import (
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 )
 
-// Bounds of the ledger lag bound of /v1/readyz.
+// Bounds of the ledger lag bound of /v1/readyz. The minimum is twice the production ledger end poll interval.
 const (
-	minLedgerLagBound = time.Second
+	minLedgerLagBound = 10 * time.Second
 	maxLedgerLagBound = time.Hour
 )
+
+// DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz.
+const DefaultLedgerLagBound = time.Minute
+
+// CheckLedgerLagBound requires ledgerLagBound in [10s, 1h].
+func CheckLedgerLagBound(ledgerLagBound time.Duration) error {
+	if ledgerLagBound < minLedgerLagBound || ledgerLagBound > maxLedgerLagBound {
+		return fmt.Errorf("cantondisclosure: ledger lag bound %s is outside [%s, %s]", ledgerLagBound, minLedgerLagBound, maxLedgerLagBound)
+	}
+	return nil
+}
 
 // ServiceReadinessStatus is the fixed /v1/readyz status text.
 type ServiceReadinessStatus string
@@ -89,8 +100,8 @@ func NewServedIndex(ledgerLagBound time.Duration) (*ServedIndex, error) {
 }
 
 func newServedIndexWithClock(ledgerLagBound time.Duration, now func() time.Time) (*ServedIndex, error) {
-	if ledgerLagBound < minLedgerLagBound || ledgerLagBound > maxLedgerLagBound {
-		return nil, fmt.Errorf("cantondisclosure: ledger lag bound %s is outside [%s, %s]", ledgerLagBound, minLedgerLagBound, maxLedgerLagBound)
+	if err := CheckLedgerLagBound(ledgerLagBound); err != nil {
+		return nil, err
 	}
 	if now == nil {
 		return nil, fmt.Errorf("cantondisclosure: missing clock")
