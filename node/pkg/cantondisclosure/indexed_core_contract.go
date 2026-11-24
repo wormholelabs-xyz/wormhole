@@ -11,7 +11,7 @@ import (
 // indexEntryOverheadBytes is the fixed byte count charged per entry in
 // addition to its blob, for the contract id, key texts, map and struct overhead.
 // A typical entry uses about 600 bytes; the 255-byte party and 512-byte namespace maximum uses about 1.3 KiB.
-const indexEntryOverheadBytes = 1024
+const indexEntryOverheadBytes = 1536
 
 // replayNodeLocation is the trie node that a ReplayNode covers: Daml fields consumer, namespace and prefix.
 type replayNodeLocation struct {

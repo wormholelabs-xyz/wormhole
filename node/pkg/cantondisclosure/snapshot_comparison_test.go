@@ -90,13 +90,13 @@ func TestCompareWithSnapshotPreconditions(t *testing.T) {
 		{name: "index not bootstrapped", bootstrap: false, snapshotOffset: testBootstrapOffset, expectedError: ErrIndexNotBootstrapped},
 		{name: "snapshot offset below the index offset", bootstrap: true, snapshotOffset: testBootstrapOffset - 1, expectedError: ErrSnapshotOffsetMismatch},
 		{name: "snapshot offset above the index offset", bootstrap: true, snapshotOffset: testBootstrapOffset + 1, expectedError: ErrSnapshotOffsetMismatch},
-		{name: "duplicate contract id in the snapshot", bootstrap: true, snapshotOffset: testBootstrapOffset, snapshot: []IndexedCoreContract{node, node}, expectedError: ErrDuplicateCreate},
+		{name: "duplicate contract id in the snapshot", bootstrap: true, snapshotOffset: testBootstrapOffset, snapshot: []IndexedCoreContract{node, node}, expectedError: ErrSnapshotRepeatsContractID},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			index := newTestIndex(t, testLargeIndexByteCap)
 			if testCase.bootstrap {
-				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t)))
+				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t), false))
 			}
 			_, err := index.compareWithIndexedSnapshot(testCase.snapshotOffset, testCase.snapshot)
 			require.ErrorIs(t, err, testCase.expectedError)

@@ -120,7 +120,7 @@ func newBootstrappedTestIndex(t *testing.T, byteCapBytes int64, contracts ...Ind
 	t.Helper()
 	index := newTestIndex(t, byteCapBytes)
 	snapshot := append(testGenesisSingletons(t), contracts...)
-	require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, snapshot))
+	require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, snapshot, false))
 	return index
 }
 
