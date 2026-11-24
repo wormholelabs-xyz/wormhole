@@ -33,6 +33,16 @@ var disclosedCoreContractTemplates = [...]CoreContractTemplate{
 	CoreContractTemplateReplayNode,
 }
 
+// singletonCoreContractTemplates lists the disclosed core templates with one live instance per guardianGovernance.
+var singletonCoreContractTemplates = [...]CoreContractTemplate{
+	CoreContractTemplateCoreState,
+	CoreContractTemplateEmitterRegistry,
+	CoreContractTemplateReplayRootRegistry,
+}
+
+// Compile-time assertion: the singleton templates are every disclosed template except ReplayNode.
+var _ = [1]struct{}{}[len(disclosedCoreContractTemplates)-len(singletonCoreContractTemplates)-1]
+
 // ModuleName is the Daml module that declares the template.
 func (template CoreContractTemplate) ModuleName() string {
 	switch template {

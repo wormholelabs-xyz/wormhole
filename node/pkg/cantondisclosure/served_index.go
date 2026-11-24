@@ -10,7 +10,8 @@ import (
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 )
 
-// Bounds of the ledger lag bound of /v1/readyz. The minimum is twice the production ledger end poll interval.
+// Bounds of the ledger lag bound of /v1/readyz. The minimum is twice the production ledger end poll interval,
+// because an index at the ledger end reports a lag of up to one poll interval.
 const (
 	minLedgerLagBound = 10 * time.Second
 	maxLedgerLagBound = time.Hour
@@ -22,16 +23,16 @@ const ProductionLedgerEndPollInterval = 5 * time.Second
 // ledgerEndObservationCapacity holds one unreached ledger end read per poll over the largest lag bound.
 const ledgerEndObservationCapacity = int(maxLedgerLagBound/ProductionLedgerEndPollInterval) + 1
 
-// Compile-time assertion: minLedgerLagBound > ProductionLedgerEndPollInterval.
-const _ uint64 = uint64(minLedgerLagBound - ProductionLedgerEndPollInterval - 1)
+// Compile-time assertion: minLedgerLagBound >= 2 * ProductionLedgerEndPollInterval.
+const _ uint64 = uint64(minLedgerLagBound - 2*ProductionLedgerEndPollInterval)
 
 // DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz.
 const DefaultLedgerLagBound = time.Minute
 
-// CheckLedgerLagBound requires ledgerLagBound in [10s, 1h] and above ProductionLedgerEndPollInterval.
+// CheckLedgerLagBound requires ledgerLagBound in [10s, 1h] and at least twice ProductionLedgerEndPollInterval.
 func CheckLedgerLagBound(ledgerLagBound time.Duration) error {
-	if ledgerLagBound <= ProductionLedgerEndPollInterval {
-		return fmt.Errorf("cantondisclosure: ledger lag bound %s is not above the ledger end poll interval %s", ledgerLagBound, ProductionLedgerEndPollInterval)
+	if ledgerLagBound < 2*ProductionLedgerEndPollInterval {
+		return fmt.Errorf("cantondisclosure: ledger lag bound %s is below twice the ledger end poll interval %s", ledgerLagBound, ProductionLedgerEndPollInterval)
 	}
 	if ledgerLagBound < minLedgerLagBound || ledgerLagBound > maxLedgerLagBound {
 		return fmt.Errorf("cantondisclosure: ledger lag bound %s is outside [%s, %s]", ledgerLagBound, minLedgerLagBound, maxLedgerLagBound)
@@ -55,7 +56,8 @@ const (
 type ServiceReadiness struct {
 	BootstrapCompleted bool
 	StreamConnected    bool
-	// LedgerLag bounds how long ago the index offset last reached an observed ledger end.
+	// LedgerLag is the age of the newest ledger end read that the index offset reached: an upper bound
+	// of the time since the index last held every core contract update of the ledger.
 	LedgerLag      time.Duration
 	LedgerLagBound time.Duration
 	IndexReadiness IndexReadiness
@@ -102,9 +104,12 @@ type ServedIndex struct {
 	streamConnected bool
 	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnds holds the reads above the index offset,
 	// oldest first, with strictly increasing offsets, at most ledgerEndObservationCapacity.
-	latestLedgerEnd     observedLedgerEnd
-	hasLatestLedgerEnd  bool
-	unreachedLedgerEnds []observedLedgerEnd
+	// newestReachedLedgerEnd is the newest read at or below the index offset.
+	latestLedgerEnd           observedLedgerEnd
+	hasLatestLedgerEnd        bool
+	unreachedLedgerEnds       []observedLedgerEnd
+	newestReachedLedgerEnd    observedLedgerEnd
+	hasNewestReachedLedgerEnd bool
 }
 
 // NewServedIndex fails each lookup with IndexReadinessBootstrapping until the writer swaps in the first index.
@@ -122,15 +127,36 @@ func newServedIndexWithClock(ledgerLagBound time.Duration, now func() time.Time)
 	return &ServedIndex{ledgerLagBound: ledgerLagBound, now: now, unreachedLedgerEnds: make([]observedLedgerEnd, 0, ledgerEndObservationCapacity)}, nil
 }
 
-// swapIndex serves index from now on. index must be bootstrapped.
-func (served *ServedIndex) swapIndex(index *CoreContractIndex) {
+// swapIndex serves index from now on. index must be bootstrapped, and its offset must not be below the served offset.
+// bootstrapLedgerEnd is the ledger end read of its bootstrap snapshot, which the index reached.
+func (served *ServedIndex) swapIndex(index *CoreContractIndex, bootstrapLedgerEnd observedLedgerEnd) {
 	if index == nil {
 		panic("cantondisclosure: swap to a nil index")
 	}
-	if index.Status().Readiness == IndexReadinessBootstrapping {
+	status := index.Status()
+	if status.Readiness == IndexReadinessBootstrapping {
 		panic("cantondisclosure: swap to an index without a bootstrap snapshot")
 	}
+	if bootstrapLedgerEnd.offset > status.Offset {
+		panic("cantondisclosure: swap with a bootstrap ledger end above the index offset")
+	}
+	served.mutex.Lock()
+	defer served.mutex.Unlock()
+	if status.Offset < served.indexOffset() {
+		panic("cantondisclosure: swap to an index below the served offset")
+	}
 	served.currentIndex.Store(index)
+	served.recordReachedLedgerEndLocked(bootstrapLedgerEnd)
+	served.removeReachedLedgerEndsLocked(status.Offset)
+}
+
+// recordReachedLedgerEndLocked keeps the newest reached read.
+func (served *ServedIndex) recordReachedLedgerEndLocked(reached observedLedgerEnd) {
+	if served.hasNewestReachedLedgerEnd && !reached.observedAt.After(served.newestReachedLedgerEnd.observedAt) {
+		return
+	}
+	served.newestReachedLedgerEnd = reached
+	served.hasNewestReachedLedgerEnd = true
 }
 
 func (served *ServedIndex) setStreamConnected(connected bool) {
@@ -145,9 +171,9 @@ func (served *ServedIndex) recordLedgerEnd(ledgerEnd int64, observedAt time.Time
 	if ledgerEnd < 0 {
 		panic(fmt.Sprintf("cantondisclosure: negative ledger end %d", ledgerEnd))
 	}
-	indexOffset := served.indexOffset()
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
+	indexOffset := served.indexOffset()
 	if served.hasLatestLedgerEnd && observedAt.Before(served.latestLedgerEnd.observedAt) {
 		panic("cantondisclosure: ledger end observations go back in time")
 	}
@@ -155,6 +181,7 @@ func (served *ServedIndex) recordLedgerEnd(ledgerEnd int64, observedAt time.Time
 	served.hasLatestLedgerEnd = true
 	served.removeReachedLedgerEndsLocked(indexOffset)
 	if ledgerEnd <= indexOffset {
+		served.recordReachedLedgerEndLocked(served.latestLedgerEnd)
 		return
 	}
 	queuedCount := len(served.unreachedLedgerEnds)
@@ -171,7 +198,8 @@ func (served *ServedIndex) recordLedgerEnd(ledgerEnd int64, observedAt time.Time
 	}
 }
 
-// indexOffset is -1 before the first swap.
+// indexOffset is -1 before the first swap. Callers that compare it with the reached reads hold served.mutex,
+// so that the offset is read after every reached read that it covers.
 func (served *ServedIndex) indexOffset() int64 {
 	index := served.currentIndex.Load()
 	if index == nil {
@@ -180,10 +208,11 @@ func (served *ServedIndex) indexOffset() int64 {
 	return index.Status().Offset
 }
 
-// removeReachedLedgerEndsLocked drops the queued reads at or below indexOffset.
+// removeReachedLedgerEndsLocked moves the queued reads at or below indexOffset to the newest reached read.
 func (served *ServedIndex) removeReachedLedgerEndsLocked(indexOffset int64) {
 	reachedCount := 0
 	for reachedCount < len(served.unreachedLedgerEnds) && served.unreachedLedgerEnds[reachedCount].offset <= indexOffset {
+		served.recordReachedLedgerEndLocked(served.unreachedLedgerEnds[reachedCount])
 		reachedCount++
 	}
 	served.unreachedLedgerEnds = slices.Delete(served.unreachedLedgerEnds, 0, reachedCount)
@@ -192,24 +221,27 @@ func (served *ServedIndex) removeReachedLedgerEndsLocked(indexOffset int64) {
 	}
 }
 
-// ledgerLagLocked is the age of the latest ledger end read, or the age of the oldest unreached read if larger.
+// unknownLedgerLag is the lag before the index reached any ledger end read.
+const unknownLedgerLag = maxLedgerLagBound + time.Second
+
+// ledgerLagLocked is the age of the newest read that indexOffset reached. Under a constant lag D it is D at
+// each poll and grows to D plus one poll interval before the next, so a lag above the bound always fails readiness.
 func (served *ServedIndex) ledgerLagLocked(now time.Time, indexOffset int64) time.Duration {
-	if !served.hasLatestLedgerEnd {
-		return maxLedgerLagBound + time.Second
-	}
 	served.removeReachedLedgerEndsLocked(indexOffset)
-	ledgerLag := now.Sub(served.latestLedgerEnd.observedAt)
-	if len(served.unreachedLedgerEnds) > 0 {
-		ledgerLag = max(ledgerLag, now.Sub(served.unreachedLedgerEnds[0].observedAt))
+	if !served.hasNewestReachedLedgerEnd {
+		return unknownLedgerLag
 	}
-	return max(ledgerLag, 0)
+	if served.newestReachedLedgerEnd.offset > indexOffset {
+		panic("cantondisclosure: the newest reached ledger end is above the index offset")
+	}
+	return max(now.Sub(served.newestReachedLedgerEnd.observedAt), 0)
 }
 
 // LedgerOffsetsBehind is the latest read ledger end minus the index offset, at least 0.
 func (served *ServedIndex) LedgerOffsetsBehind() int64 {
-	indexOffset := served.indexOffset()
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
+	indexOffset := served.indexOffset()
 	if !served.hasLatestLedgerEnd || indexOffset < 0 {
 		return 0
 	}
@@ -218,9 +250,9 @@ func (served *ServedIndex) LedgerOffsetsBehind() int64 {
 
 // ServiceReadiness is a copy of the readiness inputs.
 func (served *ServedIndex) ServiceReadiness() ServiceReadiness {
-	index := served.currentIndex.Load()
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
+	index := served.currentIndex.Load()
 	readiness := ServiceReadiness{
 		StreamConnected: served.streamConnected,
 		LedgerLagBound:  served.ledgerLagBound,

@@ -901,7 +901,11 @@ The index operates as follows:
    - The decoder refuses an update.
    - The connection attempts stop.
    - A periodic snapshot finds a contract that is missing from the index, or a contract that is stale in the index.
-5. The index accepts only the package IDs of the approved list in `guardiand`.
+5. A periodic event starts a background build: a byte cap retry, a snapshot difference, or a periodic snapshot that the participant pruned. The service continues to update the old index. It replaces the old index when the new index reaches the same offset.
+6. A snapshot difference stops all lookups of the old index until the replacement.
+7. If the ledger lag stays above `--ledgerLagBound` and the index offset does not move, the service connects the stream again.
+8. If a snapshot has more `ReplayNode` contracts than the byte cap admits, the service stops that read. Then it reads the three singletons alone.
+9. The index accepts only the package IDs of the approved list in `guardiand`.
 
 All routes accept `GET` only:
 
@@ -943,7 +947,7 @@ If the index is not ready, the answer is 503.
 
 - The bootstrap is complete.
 - The service has a connection to the update stream.
-- The ledger lag is not more than `--ledgerLagBound`.
+- The ledger lag is not more than `--ledgerLagBound`. The ledger lag is the age of the newest ledger end read that the index offset reached.
 - The index is consistent, and it has exactly one live instance of each singleton.
 
 The index has a byte cap (`--indexByteCapBytes`, default 4 GiB). The cap applies to the blob bytes plus 1536 bytes for each contract.

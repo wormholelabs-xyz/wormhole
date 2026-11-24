@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,11 +25,12 @@ type fakeSnapshotResponse struct {
 }
 
 // fakeSubscriptionScript: subscribeErr fails the subscribe call. Otherwise the stream sends advances,
-// then fails with finalErr, or stays open until cancellation when finalErr is nil.
+// then fails with finalErr, or forwards advanceFeed until cancellation when finalErr is nil.
 type fakeSubscriptionScript struct {
 	subscribeErr error
 	advances     []cantonclient.CoreContractLedgerAdvance
 	finalErr     error
+	advanceFeed  <-chan cantonclient.CoreContractLedgerAdvance
 }
 
 // fakeCoreContractLedgerReader replays scripted answers. The last snapshot response repeats; a subscribe
@@ -43,6 +45,8 @@ type fakeCoreContractLedgerReader struct {
 	snapshotReplayNodeLimits []int
 	subscribeBeginOffsets    []int64
 	ledgerEndReadCount       int
+	// snapshotReadGates[i], when not nil, holds snapshot read i until the gate closes.
+	snapshotReadGates []chan struct{}
 }
 
 func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64, error) {
@@ -53,10 +57,21 @@ func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64
 }
 
 // ReadActiveCoreContracts applies the limits of the gRPC reader through cantonclient.CollectActiveCoreContractsForTest.
-func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(_ context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error) {
+func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error) {
 	reader.mutex.Lock()
-	defer reader.mutex.Unlock()
+	readIndex := len(reader.snapshotOffsets)
 	reader.snapshotOffsets = append(reader.snapshotOffsets, activeAtOffset)
+	if readIndex < len(reader.snapshotReadGates) && reader.snapshotReadGates[readIndex] != nil {
+		gate := reader.snapshotReadGates[readIndex]
+		reader.mutex.Unlock()
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return cantonclient.ActiveCoreContracts{}, ctx.Err()
+		}
+		reader.mutex.Lock()
+	}
+	defer reader.mutex.Unlock()
 	reader.snapshotReplayNodeLimits = append(reader.snapshotReplayNodeLimits, maxReplayNodes)
 	if len(reader.snapshotResponses) == 0 {
 		return cantonclient.ActiveCoreContracts{}, errors.New("fake reader: no scripted snapshot")
@@ -98,7 +113,19 @@ func (reader *fakeCoreContractLedgerReader) SubscribeCoreContractUpdates(ctx con
 			subscription.Fail(script.finalErr)
 			return
 		}
-		<-streamCtx.Done()
+		// Runs until cancellation.
+		for {
+			select {
+			case <-streamCtx.Done():
+				return
+			case advance := <-script.advanceFeed:
+				select {
+				case <-streamCtx.Done():
+					return
+				case out <- advance:
+				}
+			}
+		}
 	}()
 	return subscription, nil
 }
@@ -127,6 +154,7 @@ func testWriterTiming() IndexWriterTiming {
 		RebuildMaxDelay:                 2 * time.Millisecond,
 		MaxConsecutiveRebuildAttempts:   3,
 		StableFollowDuration:            time.Hour,
+		StalledStreamTimeout:            time.Hour,
 	}
 }
 
@@ -135,6 +163,11 @@ func runTestWriter(t *testing.T, reader *fakeCoreContractLedgerReader, byteCapBy
 	t.Helper()
 	served, err := NewServedIndex(time.Minute)
 	require.NoError(t, err)
+	return served, runTestWriterOn(t, reader, served, byteCapBytes, timing)
+}
+
+func runTestWriterOn(t *testing.T, reader *fakeCoreContractLedgerReader, served *ServedIndex, byteCapBytes int64, timing IndexWriterTiming) func() error {
+	t.Helper()
 	writer, err := NewCoreContractIndexWriter(reader, served, testPartyID(t, testGuardianGovernance), byteCapBytes, timing, zap.NewNop())
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -151,7 +184,7 @@ func runTestWriter(t *testing.T, reader *fakeCoreContractLedgerReader, byteCapBy
 		}
 	}
 	t.Cleanup(func() { cancel() })
-	return served, stop
+	return stop
 }
 
 func requireEventuallyIndexOffset(t *testing.T, served *ServedIndex, expectedOffset int64) {
@@ -680,5 +713,199 @@ func TestWriterServesSingletonsPastTheSnapshotReplayNodeLimit(t *testing.T) {
 			}
 			reader.mutex.Unlock()
 		})
+	}
+}
+
+// requireReadinessStaysReadyUntil samples the readiness every millisecond until reached is true,
+// and requires every sample to be ready.
+func requireReadinessStaysReadyUntil(t *testing.T, served *ServedIndex, reached func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !reached() {
+		readiness := served.ServiceReadiness()
+		require.True(t, readiness.IsReady(), "readiness %s", readiness.Status())
+		require.True(t, time.Now().Before(deadline), "condition not reached")
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestWriterKeepsFollowingTheCappedIndexDuringAByteCapRetry(t *testing.T) {
+	ledger := testDecodingLedger()
+	const byteCapBytes = int64(20_000)
+	oversizedNode := decodedReplayNodeEvent(1, "")
+	oversizedNode.CreatedEventBlob = testBlob(1, int(byteCapBytes))
+	replacementGate := make(chan struct{})
+	advanceFeed := make(chan cantonclient.CoreContractLedgerAdvance)
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, oversizedNode)},
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(2, ""))},
+		},
+		snapshotReadGates: []chan struct{}{nil, replacementGate},
+		subscriptionScripts: []fakeSubscriptionScript{
+			{advanceFeed: advanceFeed},
+			{advances: []cantonclient.CoreContractLedgerAdvance{ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, testBootstrapOffset+2)}},
+		},
+	}
+	timing := testWriterTiming()
+	timing.ResnapshotInterval = 20 * time.Millisecond
+	served, stop := runTestWriter(t, reader, byteCapBytes, timing)
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads == 2 && served.ServiceReadiness().Status() == ServiceReadinessStatusReadyByteCapReached
+	}, 5*time.Second, time.Millisecond)
+
+	reader.mutex.Lock()
+	reader.ledgerEnd = testBootstrapOffset + 2
+	reader.mutex.Unlock()
+	advanceFeed <- ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, testBootstrapOffset+2)
+	requireReadinessStaysReadyUntil(t, served, func() bool {
+		status, _ := served.IndexStatus()
+		return status.Offset == testBootstrapOffset+2 && served.LedgerOffsetsBehind() == 0
+	})
+	require.Equal(t, ServiceReadinessStatusReadyByteCapReached, served.ServiceReadiness().Status())
+	for _, template := range singletonTemplates {
+		_, err := served.LookupSingleton(template)
+		require.NoError(t, err, template.String())
+	}
+
+	close(replacementGate)
+	requireReadinessStaysReadyUntil(t, served, func() bool { return served.ServiceReadiness().Status() == ServiceReadinessStatusReady })
+	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.NoError(t, err)
+	require.Equal(t, testContractIDHex(2), result.Contract().ContractID().String())
+	require.NoError(t, stop())
+	snapshotReads, _ := reader.callCounts()
+	require.Equal(t, 2, snapshotReads)
+	require.Equal(t, []int64{testBootstrapOffset, testBootstrapOffset, testBootstrapOffset + 2}, reader.recordedSubscribeBeginOffsets())
+}
+
+func TestWriterSuspendsAStaleIndexAndSwapsAfterTheReplacementCatchesUp(t *testing.T) {
+	ledger := testDecodingLedger()
+	staleNode := decodedReplayNodeEvent(1, "")
+	replacementGate := make(chan struct{})
+	advanceFeed := make(chan cantonclient.CoreContractLedgerAdvance)
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, staleNode)},
+			{contracts: decodedGenesisSnapshot(t, ledger)},
+		},
+		snapshotReadGates: []chan struct{}{nil, nil, replacementGate},
+		subscriptionScripts: []fakeSubscriptionScript{
+			{advanceFeed: advanceFeed},
+			{advances: []cantonclient.CoreContractLedgerAdvance{ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, testBootstrapOffset+2)}},
+		},
+	}
+	timing := testWriterTiming()
+	timing.ResnapshotInterval = 20 * time.Millisecond
+	rebuildsBefore := rebuildCount(IndexRebuildReasonResnapshotDifference)
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, timing)
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads == 3 && served.ServiceReadiness().Status() == "index_resnapshot_difference"
+	}, 5*time.Second, time.Millisecond)
+	_, err := served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
+	_, err = served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
+
+	advanceFeed <- ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, testBootstrapOffset+2)
+	requireEventuallyIndexOffset(t, served, testBootstrapOffset+2)
+	close(replacementGate)
+	require.Eventually(t, func() bool { return served.ServiceReadiness().Status() == ServiceReadinessStatusReady }, 5*time.Second, time.Millisecond)
+	status, _ := served.IndexStatus()
+	require.Equal(t, testBootstrapOffset+2, status.Offset)
+	require.Equal(t, 0, status.LiveReplayNodeCount)
+	_, err = served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.ErrorIs(t, err, ErrNoCoveringReplayNode)
+	require.NoError(t, stop())
+	require.Equal(t, rebuildsBefore+1, rebuildCount(IndexRebuildReasonResnapshotDifference))
+	require.Equal(t, []int64{testBootstrapOffset, testBootstrapOffset, testBootstrapOffset + 2}, reader.recordedSubscribeBeginOffsets())
+}
+
+func TestWriterKeepsTheCappedIndexWhenTheReplacementBuildFails(t *testing.T) {
+	ledger := testDecodingLedger()
+	const byteCapBytes = int64(20_000)
+	oversizedNode := decodedReplayNodeEvent(1, "")
+	oversizedNode.CreatedEventBlob = testBlob(1, int(byteCapBytes))
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, oversizedNode)},
+			{err: status.Error(codes.Unavailable, "down")},
+		},
+	}
+	timing := testWriterTiming()
+	timing.ResnapshotInterval = 10 * time.Millisecond
+	buildFailuresBefore := testutil.ToFloat64(indexBuildFailuresCounter)
+	served, stop := runTestWriter(t, reader, byteCapBytes, timing)
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads >= 4
+	}, 5*time.Second, time.Millisecond)
+	require.Equal(t, ServiceReadinessStatusReadyByteCapReached, served.ServiceReadiness().Status())
+	require.NoError(t, stop())
+	require.Greater(t, testutil.ToFloat64(indexBuildFailuresCounter), buildFailuresBefore)
+	require.Equal(t, []int64{testBootstrapOffset}, reader.recordedSubscribeBeginOffsets())
+}
+
+func TestWriterReconnectsAStalledStream(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:         testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger)}},
+	}
+	var clockSkew atomic.Int64
+	served, err := newServedIndexWithClock(time.Minute, func() time.Time { return time.Now().Add(time.Duration(clockSkew.Load())) })
+	require.NoError(t, err)
+	timing := testWriterTiming()
+	timing.StalledStreamTimeout = 20 * time.Millisecond
+	timing.MaxConsecutiveReconnectAttempts = maxConsecutiveAttemptLimit
+	stop := runTestWriterOn(t, reader, served, testLargeIndexByteCap, timing)
+	require.Eventually(t, func() bool { return served.ServiceReadiness().IsReady() }, 5*time.Second, time.Millisecond)
+	time.Sleep(10 * timing.StalledStreamTimeout)
+	_, subscribes := reader.callCounts()
+	require.Equal(t, 1, subscribes, "a stream within the lag bound is not stalled")
+
+	clockSkew.Store(int64(2 * time.Minute))
+	require.Eventually(t, func() bool {
+		_, subscribes := reader.callCounts()
+		return subscribes >= 2
+	}, 5*time.Second, time.Millisecond)
+	require.NoError(t, stop())
+}
+
+func TestStreamStalled(t *testing.T) {
+	served, clock := newTestServedIndex(t)
+	index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+	swapTestIndex(served, index, clock)
+	timing := testWriterTiming()
+	timing.StalledStreamTimeout = 30 * time.Second
+	writer, err := NewCoreContractIndexWriter(&fakeCoreContractLedgerReader{}, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, timing, zap.NewNop())
+	require.NoError(t, err)
+	session := &ledgerFollowSession{writer: writer, followed: &followedIndex{index: index}}
+	bootstrappedAt := clock.current
+	steps := []struct {
+		name          string
+		elapsed       time.Duration
+		advanceOffset int64
+		expectStalled bool
+	}{
+		{name: "lag at the bound", elapsed: testLedgerLagBound},
+		{name: "first check above the bound", elapsed: testLedgerLagBound + time.Second},
+		{name: "above the bound below the timeout", elapsed: testLedgerLagBound + 30*time.Second},
+		{name: "above the bound at the timeout", elapsed: testLedgerLagBound + 31*time.Second, expectStalled: true},
+		{name: "offset moved restarts the window", elapsed: testLedgerLagBound + 32*time.Second, advanceOffset: testBootstrapOffset + 1},
+		{name: "above the bound below the restarted timeout", elapsed: testLedgerLagBound + 61*time.Second},
+		{name: "above the bound at the restarted timeout", elapsed: testLedgerLagBound + 62*time.Second, expectStalled: true},
+	}
+	for _, step := range steps {
+		clock.current = bootstrappedAt.Add(step.elapsed)
+		if step.advanceOffset != 0 {
+			require.NoError(t, index.AdvanceOffset(step.advanceOffset))
+		}
+		require.Equal(t, step.expectStalled, session.streamStalled(clock.current), step.name)
 	}
 }
