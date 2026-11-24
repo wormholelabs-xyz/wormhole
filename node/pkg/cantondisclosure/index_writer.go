@@ -55,7 +55,7 @@ type IndexWriterTiming struct {
 // ProductionIndexWriterTiming is the production timing with resnapshotInterval.
 func ProductionIndexWriterTiming(resnapshotInterval time.Duration) IndexWriterTiming {
 	return IndexWriterTiming{
-		LedgerEndPollInterval:           5 * time.Second,
+		LedgerEndPollInterval:           ProductionLedgerEndPollInterval,
 		ResnapshotInterval:              resnapshotInterval,
 		SnapshotReadTimeout:             15 * time.Minute,
 		ReconnectInitialDelay:           500 * time.Millisecond,
@@ -153,6 +153,9 @@ func NewCoreContractIndexWriter(reader CoreContractLedgerReader, served *ServedI
 	}
 	if err := timing.check(); err != nil {
 		return nil, err
+	}
+	if timing.LedgerEndPollInterval >= served.ledgerLagBound {
+		return nil, fmt.Errorf("cantondisclosure: ledger end poll interval %s is not below the ledger lag bound %s", timing.LedgerEndPollInterval, served.ledgerLagBound)
 	}
 	return &CoreContractIndexWriter{
 		reader:             reader,

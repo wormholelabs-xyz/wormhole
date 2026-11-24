@@ -503,6 +503,11 @@ func TestNewCoreContractIndexWriterRejects(t *testing.T) {
 			timing.LedgerEndPollInterval = 0
 			return timing
 		}},
+		{name: "poll interval equal to the ledger lag bound", reader: reader, served: served, party: guardianGovernance, byteCapBytes: testLargeIndexByteCap, timing: func() IndexWriterTiming {
+			timing := testWriterTiming()
+			timing.LedgerEndPollInterval = time.Minute
+			return timing
+		}},
 		{name: "reconnect delays reversed", reader: reader, served: served, party: guardianGovernance, byteCapBytes: testLargeIndexByteCap, timing: func() IndexWriterTiming {
 			timing := testWriterTiming()
 			timing.ReconnectInitialDelay = timing.ReconnectMaxDelay + 1

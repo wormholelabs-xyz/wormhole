@@ -2,6 +2,7 @@ package cantondisclosure
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,11 +16,23 @@ const (
 	maxLedgerLagBound = time.Hour
 )
 
+// ProductionLedgerEndPollInterval is the interval of the ledger end reads of the lag measurement.
+const ProductionLedgerEndPollInterval = 5 * time.Second
+
+// ledgerEndObservationCapacity holds one unreached ledger end read per poll over the largest lag bound.
+const ledgerEndObservationCapacity = int(maxLedgerLagBound/ProductionLedgerEndPollInterval) + 1
+
+// Compile-time assertion: minLedgerLagBound > ProductionLedgerEndPollInterval.
+const _ uint64 = uint64(minLedgerLagBound - ProductionLedgerEndPollInterval - 1)
+
 // DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz.
 const DefaultLedgerLagBound = time.Minute
 
-// CheckLedgerLagBound requires ledgerLagBound in [10s, 1h].
+// CheckLedgerLagBound requires ledgerLagBound in [10s, 1h] and above ProductionLedgerEndPollInterval.
 func CheckLedgerLagBound(ledgerLagBound time.Duration) error {
+	if ledgerLagBound <= ProductionLedgerEndPollInterval {
+		return fmt.Errorf("cantondisclosure: ledger lag bound %s is not above the ledger end poll interval %s", ledgerLagBound, ProductionLedgerEndPollInterval)
+	}
 	if ledgerLagBound < minLedgerLagBound || ledgerLagBound > maxLedgerLagBound {
 		return fmt.Errorf("cantondisclosure: ledger lag bound %s is outside [%s, %s]", ledgerLagBound, minLedgerLagBound, maxLedgerLagBound)
 	}
@@ -87,11 +100,11 @@ type ServedIndex struct {
 
 	mutex           sync.Mutex
 	streamConnected bool
-	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnd is the oldest read ledger end above the index offset.
-	latestLedgerEnd       observedLedgerEnd
-	hasLatestLedgerEnd    bool
-	unreachedLedgerEnd    observedLedgerEnd
-	hasUnreachedLedgerEnd bool
+	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnds holds the reads above the index offset,
+	// oldest first, with strictly increasing offsets, at most ledgerEndObservationCapacity.
+	latestLedgerEnd     observedLedgerEnd
+	hasLatestLedgerEnd  bool
+	unreachedLedgerEnds []observedLedgerEnd
 }
 
 // NewServedIndex fails each lookup with IndexReadinessBootstrapping until the writer swaps in the first index.
@@ -106,7 +119,7 @@ func newServedIndexWithClock(ledgerLagBound time.Duration, now func() time.Time)
 	if now == nil {
 		return nil, fmt.Errorf("cantondisclosure: missing clock")
 	}
-	return &ServedIndex{ledgerLagBound: ledgerLagBound, now: now}, nil
+	return &ServedIndex{ledgerLagBound: ledgerLagBound, now: now, unreachedLedgerEnds: make([]observedLedgerEnd, 0, ledgerEndObservationCapacity)}, nil
 }
 
 // swapIndex serves index from now on. index must be bootstrapped.
@@ -126,11 +139,13 @@ func (served *ServedIndex) setStreamConnected(connected bool) {
 	served.streamConnected = connected
 }
 
-// recordLedgerEnd stores a ledger end read at observedAt.
+// recordLedgerEnd stores a ledger end read at observedAt. A full queue merges the read into its newest entry,
+// so that the oldest unreached read keeps its time.
 func (served *ServedIndex) recordLedgerEnd(ledgerEnd int64, observedAt time.Time) {
 	if ledgerEnd < 0 {
 		panic(fmt.Sprintf("cantondisclosure: negative ledger end %d", ledgerEnd))
 	}
+	indexOffset := served.indexOffset()
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
 	if served.hasLatestLedgerEnd && observedAt.Before(served.latestLedgerEnd.observedAt) {
@@ -138,10 +153,21 @@ func (served *ServedIndex) recordLedgerEnd(ledgerEnd int64, observedAt time.Time
 	}
 	served.latestLedgerEnd = observedLedgerEnd{offset: ledgerEnd, observedAt: observedAt}
 	served.hasLatestLedgerEnd = true
-	served.clearReachedLedgerEndLocked(served.indexOffset())
-	if !served.hasUnreachedLedgerEnd && ledgerEnd > served.indexOffset() {
-		served.unreachedLedgerEnd = served.latestLedgerEnd
-		served.hasUnreachedLedgerEnd = true
+	served.removeReachedLedgerEndsLocked(indexOffset)
+	if ledgerEnd <= indexOffset {
+		return
+	}
+	queuedCount := len(served.unreachedLedgerEnds)
+	if queuedCount > 0 && ledgerEnd <= served.unreachedLedgerEnds[queuedCount-1].offset {
+		return
+	}
+	if queuedCount == ledgerEndObservationCapacity {
+		served.unreachedLedgerEnds[queuedCount-1].offset = ledgerEnd
+		return
+	}
+	served.unreachedLedgerEnds = append(served.unreachedLedgerEnds, served.latestLedgerEnd)
+	if len(served.unreachedLedgerEnds) > ledgerEndObservationCapacity {
+		panic("cantondisclosure: unreached ledger end queue exceeds its capacity")
 	}
 }
 
@@ -154,21 +180,27 @@ func (served *ServedIndex) indexOffset() int64 {
 	return index.Status().Offset
 }
 
-func (served *ServedIndex) clearReachedLedgerEndLocked(indexOffset int64) {
-	if served.hasUnreachedLedgerEnd && indexOffset >= served.unreachedLedgerEnd.offset {
-		served.hasUnreachedLedgerEnd = false
+// removeReachedLedgerEndsLocked drops the queued reads at or below indexOffset.
+func (served *ServedIndex) removeReachedLedgerEndsLocked(indexOffset int64) {
+	reachedCount := 0
+	for reachedCount < len(served.unreachedLedgerEnds) && served.unreachedLedgerEnds[reachedCount].offset <= indexOffset {
+		reachedCount++
+	}
+	served.unreachedLedgerEnds = slices.Delete(served.unreachedLedgerEnds, 0, reachedCount)
+	if len(served.unreachedLedgerEnds) > 0 && served.unreachedLedgerEnds[0].offset <= indexOffset {
+		panic("cantondisclosure: a reached ledger end stays queued")
 	}
 }
 
-// ledgerLagLocked is the age of the latest ledger end read, or the age of the oldest unreached ledger end if larger.
+// ledgerLagLocked is the age of the latest ledger end read, or the age of the oldest unreached read if larger.
 func (served *ServedIndex) ledgerLagLocked(now time.Time, indexOffset int64) time.Duration {
 	if !served.hasLatestLedgerEnd {
 		return maxLedgerLagBound + time.Second
 	}
-	served.clearReachedLedgerEndLocked(indexOffset)
+	served.removeReachedLedgerEndsLocked(indexOffset)
 	ledgerLag := now.Sub(served.latestLedgerEnd.observedAt)
-	if served.hasUnreachedLedgerEnd {
-		ledgerLag = max(ledgerLag, now.Sub(served.unreachedLedgerEnd.observedAt))
+	if len(served.unreachedLedgerEnds) > 0 {
+		ledgerLag = max(ledgerLag, now.Sub(served.unreachedLedgerEnds[0].observedAt))
 	}
 	return max(ledgerLag, 0)
 }
