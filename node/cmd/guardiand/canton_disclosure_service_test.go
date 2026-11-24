@@ -135,8 +135,8 @@ type emptyLedgerReader struct{}
 
 func (emptyLedgerReader) GetLedgerEnd(context.Context) (int64, error) { return 5, nil }
 
-func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, int) ([]cantonclient.CreatedCoreContract, error) {
-	return nil, nil
+func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, int) (cantonclient.ActiveCoreContracts, error) {
+	return cantonclient.ActiveCoreContracts{}, nil
 }
 
 func (emptyLedgerReader) SubscribeCoreContractUpdates(ctx context.Context, _ int64, _ chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error) {
