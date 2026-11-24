@@ -97,7 +97,7 @@ var allIndexReadinessValues = [...]IndexReadiness{
 	IndexReadinessInconsistent,
 }
 
-// publishIndexMetrics sets the index gauges from status and the lag gauges from served.
+// publishIndexMetrics sets every disclosure gauge from served.
 func publishIndexMetrics(served *ServedIndex) {
 	readiness := served.ServiceReadiness()
 	if status, hasIndex := served.IndexStatus(); hasIndex {
