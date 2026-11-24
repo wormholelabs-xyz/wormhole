@@ -17,7 +17,8 @@
 #   D4 each served ReplayNode is active once the index offset is past the archive offset
 #   D5 submissions with only served blobs: VerifyAndConsumeVAA, and ClaimReplayRoot by a party on app-user that is not a
 #      stakeholder; stale blobs fail with LOCAL_VERDICT_INACTIVE_CONTRACTS
-#   D6 hosting change (hosting-change)       D7 idle ledger lag, resnapshot metrics and the core package count
+#   D6 hosting change (hosting-change): a ready instance serves the ledger; app-user reports read_party_not_hosted
+#   D7 idle ledger lag, resnapshot metrics and the core package count
 #   D8 restart rebuilds the same answers     D9 a small byte cap serves the singletons only
 #
 # The service binary is built from this checkout. The LocalNet Ledger API needs a JWT, and the service supports only
@@ -967,6 +968,8 @@ run_hosting_change() {
   for name in hosting-sv hosting-app-user hosting-guardian4; do
     record_hosting_outcome "$name"
   done
+  check_or_record D6 "hosting-app-user: /v1/readyz $(service_readyz hosting-app-user | jq -c .), expected 503 read_party_not_hosted" \
+    check_json_matches '.httpStatus == 503 and .status == "read_party_not_hosted"' "$(service_readyz hosting-app-user)"
   report_summary hosting-change
 }
 
