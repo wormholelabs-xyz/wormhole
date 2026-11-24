@@ -698,14 +698,14 @@ func TestSubscribeCoreContractUpdatesBoundsTheUpdatesOfOneTransaction(t *testing
 			for eventIndex := 0; eventIndex < tc.eventCount; eventIndex++ {
 				events = append(events, archivedLedgerEvent(archivedCoreEvent(CoreContractTemplateReplayNode, 5, testCoreContractIDHex)))
 			}
-			advance, advances, err := testCoreContractDecoder(t).decodeUpdatesResponse(coreTransaction(5, events...), 4)
+			advance, movesTheOffset, err := testCoreContractDecoder(t).decodeUpdatesResponse(coreTransaction(5, events...), 4)
 			if tc.expectRefused {
 				require.ErrorContains(t, err, "65537 core contract updates")
-				require.False(t, advances)
+				require.False(t, movesTheOffset)
 				return
 			}
 			require.NoError(t, err)
-			require.True(t, advances)
+			require.True(t, movesTheOffset)
 			require.Len(t, advance.Updates(), tc.eventCount)
 		})
 	}

@@ -16,7 +16,7 @@ func DecodeCreatedCoreContractForTest(readScope ReadScope, approved ApprovedCore
 
 // DecodeCoreContractUpdatesResponseForTest decodes one GetUpdates response with the production stream decoder.
 // Do not call it outside tests: it exists so that other packages test with decoded values.
-func DecodeCoreContractUpdatesResponseForTest(readScope ReadScope, approved ApprovedCorePackages, response *apiv2.GetUpdatesResponse, previousOffset int64) (advance CoreContractLedgerAdvance, advances bool, err error) {
+func DecodeCoreContractUpdatesResponseForTest(readScope ReadScope, approved ApprovedCorePackages, response *apiv2.GetUpdatesResponse, previousOffset int64) (advance CoreContractLedgerAdvance, movesTheOffset bool, err error) {
 	decoder, err := newCoreContractDecoder(readScope, approved)
 	if err != nil {
 		return CoreContractLedgerAdvance{}, false, err

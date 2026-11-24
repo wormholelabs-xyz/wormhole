@@ -555,7 +555,7 @@ func messagePayloadField(fields map[string]*apiv2.Value, label string, executing
 	if err != nil {
 		return nil, err
 	}
-	if !isLowercaseHex(payloadHex) {
+	if !IsLowercaseHex(payloadHex) {
 		return nil, fmt.Errorf("field %q is not lowercase hex", label)
 	}
 	if len(payloadHex)%2 != 0 {
@@ -608,8 +608,9 @@ func singleConstructorVariantTextField(fields map[string]*apiv2.Value, label str
 	return textValue.Text, nil
 }
 
-func isLowercaseHex(text string) bool {
-	for _, character := range text {
+// IsLowercaseHex is true when every byte of text is 0-9 or a-f. It is true for the empty text.
+func IsLowercaseHex(text string) bool {
+	for _, character := range []byte(text) {
 		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
 			return false
 		}

@@ -412,12 +412,12 @@ func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.C
 				subscription.Fail(fmt.Errorf("GetUpdates stream ended: %w", err))
 				return
 			}
-			advance, advances, err := reader.decoder.decodeUpdatesResponse(response, previousOffset)
+			advance, movesTheOffset, err := reader.decoder.decodeUpdatesResponse(response, previousOffset)
 			if err != nil {
 				subscription.Fail(fmt.Errorf("GetUpdates: %w: %w", ErrCoreContractStreamDecode, err))
 				return
 			}
-			if !advances {
+			if !movesTheOffset {
 				continue
 			}
 			previousOffset = advance.offset
@@ -431,8 +431,8 @@ func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.C
 	return subscription, nil
 }
 
-// decodeUpdatesResponse returns advances false for a checkpoint at previousOffset, which adds no progress.
-func (decoder coreContractDecoder) decodeUpdatesResponse(response *apiv2.GetUpdatesResponse, previousOffset int64) (advance CoreContractLedgerAdvance, advances bool, err error) {
+// decodeUpdatesResponse returns movesTheOffset false for a checkpoint at previousOffset.
+func (decoder coreContractDecoder) decodeUpdatesResponse(response *apiv2.GetUpdatesResponse, previousOffset int64) (advance CoreContractLedgerAdvance, movesTheOffset bool, err error) {
 	switch update := response.GetUpdate().(type) {
 	case *apiv2.GetUpdatesResponse_Transaction:
 		updates, err := decoder.decodeTransactionCoreContractUpdates(update.Transaction, previousOffset)
