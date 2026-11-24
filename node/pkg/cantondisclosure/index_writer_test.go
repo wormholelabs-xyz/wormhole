@@ -720,12 +720,17 @@ func TestWriterServesSingletonsPastTheSnapshotReplayNodeLimit(t *testing.T) {
 // and requires every sample to be ready.
 func requireReadinessStaysReadyUntil(t *testing.T, served *ServedIndex, reached func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.After(5 * time.Second)
+	sampleTicker := time.NewTicker(time.Millisecond)
+	defer sampleTicker.Stop()
 	for !reached() {
 		readiness := served.ServiceReadiness()
 		require.True(t, readiness.IsReady(), "readiness %s", readiness.Status())
-		require.True(t, time.Now().Before(deadline), "condition not reached")
-		time.Sleep(time.Millisecond)
+		select {
+		case <-deadline:
+			t.Fatal("condition not reached")
+		case <-sampleTicker.C:
+		}
 	}
 }
 
@@ -865,7 +870,7 @@ func TestWriterReconnectsAStalledStream(t *testing.T) {
 	timing.MaxConsecutiveReconnectAttempts = maxConsecutiveAttemptLimit
 	stop := runTestWriterOn(t, reader, served, testLargeIndexByteCap, timing)
 	require.Eventually(t, func() bool { return served.ServiceReadiness().IsReady() }, 5*time.Second, time.Millisecond)
-	time.Sleep(10 * timing.StalledStreamTimeout)
+	<-time.After(10 * timing.StalledStreamTimeout)
 	_, subscribes := reader.callCounts()
 	require.Equal(t, 1, subscribes, "a stream within the lag bound is not stalled")
 
