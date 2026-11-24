@@ -81,6 +81,8 @@ Set `DB_PORT` to use a different port.
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
 | `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. |
 | `gateway_t1.sh` | Runs the disclosure service on a separate gateway network behind a mutual-TLS proxy, and checks it. |
+| `disclosure_service_check.sh` | Runs the core disclosure service (`guardiand canton-disclosure-service`) against LocalNet and compares its answers with the ledger. |
+| `disclosure_service_offline_lib.sh` | Functions of `disclosure_service_check.sh` that `test/disclosure_service_offline_lib_test.sh` tests without LocalNet. |
 | `registry_api_check.sh` | Checks the CIP-0056 registry API of the disclosure service with an offer transfer and a direct transfer. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
 | `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
@@ -947,6 +949,75 @@ The script does these steps:
 3. The first transfer is an offer. B accepts it with the accept choice context.
 4. B creates a `TransferPreapproval`. The second transfer is direct.
 5. The script checks `totalSupply` before the mint, after the mint and after the transfers.
+
+## Core disclosure service check
+
+`disclosure_service_check.sh` builds `guardiand` from this checkout and runs `guardiand canton-disclosure-service`.
+The service reads a participant as `guardianGovernance`.
+The script compares each answer of the service with the ledger.
+Each submission of the script attaches only the blobs that the service returns.
+
+The LocalNet Ledger API requires a JWT.
+The service supports OAuth2 over TLS, or no authentication.
+Thus the script starts one nginx container (`disclosure-auth-proxy-<participant>`) for each participant that it reads.
+The container adds the JWT of the user `core-disclosure-reader` to each gRPC call.
+This user has only the right `CanReadAs(guardianGovernance)`.
+The service connects to the container with `--unsafePlaintext`.
+
+### Prerequisites
+
+- `gg_host.sh` ran.
+- `custody_host.sh` ran for `feeCustody` and for `nttCustody`.
+- `gg_operator_independence.sh 0 1` ran.
+- Go 1.26.10 and the Go module cache of `node`. The script builds with `GOFLAGS=-mod=readonly` and `GOPROXY=off`.
+
+### Procedure
+
+1. Run the checks:
+
+   ```bash
+   canton/localnet/disclosure_service_check.sh check 1
+   ```
+
+   The argument is the key indices of the current guardian set. The default is 1.
+
+2. Make sure that the last line of the output is `disclosure_service_check.sh check: PASS`.
+
+3. Run the hosting change check:
+
+   ```bash
+   canton/localnet/disclosure_service_check.sh hosting-change owner1 owner2
+   ```
+
+   The arguments are two current owner names of the guardian namespace.
+
+4. Make sure that the last line of the output is `disclosure_service_check.sh hosting-change: PASS`.
+
+5. Remove the containers and stop the service processes:
+
+   ```bash
+   canton/localnet/disclosure_service_check.sh down
+   ```
+
+CAUTION: The hosting change check removes `app-user` as a host of the guardian namespace parties.
+The change stays until you reset LocalNet.
+
+### Checks
+
+| Check | Result |
+| --- | --- |
+| D1 | The service reads `sv`. `/v1/readyz` gives 200. |
+| D2 | Each singleton route gives the contract ID, the blob, the template ID and the synchronizer ID that the ACS of `sv` shows. The singleton routes are `/v1/core-state`, `/v1/emitter-registry`, `/v1/replay-root-registry`. |
+| D3 | A local party of `sv` claims a replay root and consumes VAAs until the root node splits (129 digests, split threshold 128). Before each consume, `/v1/replay-node` gives the node that the ledger shows. The script finds this node as `Test.TestReplay.coveringNode` does. After the split, the script compares each consumed digest. It also compares one digest for each first nibble. `/v1/claimed-roots-node` gives the node that `ClaimReplayRoot` consumes. |
+| D4 | The service gives no archived node after its index offset is at the offset of the archive. |
+| D5 | Each `ClaimReplayRoot` and `VerifyAndConsumeVAA` with the blobs of the service commits. A party on `app-user` claims a root with the blobs of the service. It is not a stakeholder of the registry or of the claimed-roots node. A node blob from before the split fails with `LOCAL_VERDICT_INACTIVE_CONTRACTS`. A claimed-roots node blob from before a claim fails with the same error. |
+| D6 | `hosting-change` only. The script runs instances on `sv` and `app-user`. It replicates the parties to `guardian4` with `party_replication.sh`, starts an instance on `guardian4`, and removes `app-user` as a host. After three resnapshot intervals, an instance that gives `/v1/readyz` 200 must give the answers of the ledger. The script records the outcome and the resnapshot metrics of each instance. |
+| D7 | During 300 seconds without core transactions, each `/v1/readyz` sample gives 200 and the ledger lag stays below 60 seconds. Each resnapshot matches the index. The package upgrade row is `NOT_TESTED` while the approved list has one core package. |
+| D8 | After a restart, the service gives the same answers. |
+| D9 | With a byte cap that holds only the singletons, `/v1/readyz` gives `ready_byte_cap_reached`. The singleton routes give 200, and the node routes give 503. |
+
+The evidence is in `../localnet-state/evidence/disclosure-service/<subcommand>-<UTC time>/`.
+`results.jsonl` has one line for each check row. The other files contain the measurements and the service logs.
 
 ## Core package upgrade rehearsal
 
