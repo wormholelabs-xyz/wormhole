@@ -335,3 +335,20 @@ func TestCoreContractDeclarationsMatchDaml(t *testing.T) {
 	assert.Contains(t, bytesSource, `parseNibbleCountInRange "DigestNibblePrefix" 0 `+strconv.Itoa(maxDigestNibblePrefixNibbles)+"\n")
 	assert.Contains(t, bytesSource, "\nmodule "+digestNibblePrefixVariant.moduleName+"\n")
 }
+
+func TestIsLowercaseHex(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{text: "", want: true},
+		{text: "0123456789abcdef", want: true},
+		{text: "A", want: false},
+		{text: "g", want: false},
+		{text: "0x", want: false},
+		{text: "abé", want: false},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, IsLowercaseHex(tc.text), "%q", tc.text)
+	}
+}

@@ -143,7 +143,7 @@ func ParseContractID(hexText string) (ContractID, error) {
 	if !strings.HasPrefix(hexText, contractIDV1VersionPrefix) && !strings.HasPrefix(hexText, contractIDV2VersionPrefix) {
 		return ContractID{}, fmt.Errorf("contract id %q has no %s or %s version prefix", hexText, contractIDV1VersionPrefix, contractIDV2VersionPrefix)
 	}
-	if !isLowercaseHex(hexText) {
+	if !IsLowercaseHex(hexText) {
 		return ContractID{}, fmt.Errorf("contract id %q is not lowercase hex", hexText)
 	}
 	return ContractID{hexText: hexText}, nil
@@ -211,7 +211,7 @@ func ParseDigestNibblePrefix(nibbles string) (DigestNibblePrefix, error) {
 	if len(nibbles) > maxDigestNibblePrefixNibbles {
 		return DigestNibblePrefix{}, fmt.Errorf("digest nibble prefix length %d exceeds %d", len(nibbles), maxDigestNibblePrefixNibbles)
 	}
-	if !isLowercaseHex(nibbles) {
+	if !IsLowercaseHex(nibbles) {
 		return DigestNibblePrefix{}, fmt.Errorf("digest nibble prefix %q is not lowercase hex", nibbles)
 	}
 	return DigestNibblePrefix{nibbles: nibbles}, nil

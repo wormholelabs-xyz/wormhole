@@ -3,6 +3,7 @@ package guardiand
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -204,4 +205,41 @@ func TestServeCantonDisclosureShutsDownOnCancellation(t *testing.T) {
 	}
 	_, err = http.Get(baseURL + cantondisclosure.RoutePathHealthz)
 	require.Error(t, err)
+}
+
+// unreachableLedgerReader fails every ledger end read, so the index writer exhausts its rebuild attempts.
+type unreachableLedgerReader struct {
+	emptyLedgerReader
+}
+
+func (unreachableLedgerReader) GetLedgerEnd(context.Context) (int64, error) {
+	return 0, errors.New("participant unreachable")
+}
+
+func TestServeCantonDisclosureStopsWhenTheIndexWriterFails(t *testing.T) {
+	config, err := parseCantonDisclosureServiceFlags(validCantonDisclosureServiceFlags())
+	require.NoError(t, err)
+	config.writerTiming.RebuildInitialDelay = time.Millisecond
+	config.writerTiming.RebuildMaxDelay = 2 * time.Millisecond
+	config.writerTiming.MaxConsecutiveRebuildAttempts = 2
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	statusListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- serveCantonDisclosure(context.Background(), config, unreachableLedgerReader{}, listener, statusListener, zap.NewNop())
+	}()
+	select {
+	case err := <-serveResult:
+		require.ErrorIs(t, err, cantondisclosure.ErrRebuildAttemptsExhausted)
+		require.ErrorContains(t, err, "index writer")
+	case <-time.After(cantonDisclosureShutdownTimeout + 5*time.Second):
+		t.Fatal("serveCantonDisclosure did not return after the index writer failed")
+	}
+	for _, address := range []string{listener.Addr().String(), statusListener.Addr().String()} {
+		_, err := http.Get("http://" + address + cantondisclosure.RoutePathHealthz)
+		require.Error(t, err, address)
+	}
 }

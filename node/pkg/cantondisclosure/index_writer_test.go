@@ -914,3 +914,133 @@ func TestStreamStalled(t *testing.T) {
 		require.Equal(t, step.expectStalled, session.streamStalled(clock.current), step.name)
 	}
 }
+
+// endedTestSubscription is a subscription that failed with finalErr after its goroutine sent bufferedAdvances.
+func endedTestSubscription(t *testing.T, finalErr error, bufferedAdvances ...cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, chan cantonclient.CoreContractLedgerAdvance) {
+	t.Helper()
+	advances := make(chan cantonclient.CoreContractLedgerAdvance, advanceChannelCapacity)
+	for _, advance := range bufferedAdvances {
+		advances <- advance
+	}
+	subscription := cantonclient.NewSubscription(func() {})
+	if finalErr != nil {
+		subscription.Fail(finalErr)
+	}
+	subscription.Close()
+	<-subscription.Done()
+	return subscription, advances
+}
+
+func TestApplyAdvancesBufferedBeforeDone(t *testing.T) {
+	ledger := testDecodingLedger()
+	coreState := decodedSingletonEvent(testGenesisSerialBase, cantonclient.CoreContractTemplateCoreState)
+	unavailableErr := status.Error(codes.Unavailable, "connection reset")
+	testCases := []struct {
+		name                        string
+		finalErr                    error
+		bufferedAdvances            func(t *testing.T) []cantonclient.CoreContractLedgerAdvance
+		expectedOffset              int64
+		expectedAppliedAdvanceCount int
+		expectedRebuildReason       IndexRebuildReason
+	}{
+		{
+			name:     "every buffered advance applies before the reconnect",
+			finalErr: unavailableErr,
+			bufferedAdvances: func(t *testing.T) []cantonclient.CoreContractLedgerAdvance {
+				return []cantonclient.CoreContractLedgerAdvance{
+					ledger.DecodeTransaction(t, testBootstrapOffset, 11, cantonclienttest.Created(decodedReplayNodeEvent(1, ""))),
+					ledger.DecodeOffsetCheckpoint(t, 11, 12),
+					ledger.DecodeOffsetCheckpoint(t, 12, 13),
+				}
+			},
+			expectedOffset: 13, expectedAppliedAdvanceCount: 3,
+		},
+		{
+			name:     "stream ended without an error",
+			finalErr: nil,
+			bufferedAdvances: func(t *testing.T) []cantonclient.CoreContractLedgerAdvance {
+				return []cantonclient.CoreContractLedgerAdvance{ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, 11)}
+			},
+			expectedOffset: 11, expectedAppliedAdvanceCount: 1,
+		},
+		{
+			name:     "a pruned offset after the buffered advances rebuilds",
+			finalErr: status.Error(codes.FailedPrecondition, "PARTICIPANT_PRUNED_DATA_ACCESSED(9,0): pruned"),
+			bufferedAdvances: func(t *testing.T) []cantonclient.CoreContractLedgerAdvance {
+				return []cantonclient.CoreContractLedgerAdvance{ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, 11)}
+			},
+			expectedOffset: 11, expectedAppliedAdvanceCount: 1, expectedRebuildReason: IndexRebuildReasonPrunedOffset,
+		},
+		{
+			name:     "an inconsistent buffered advance stops the drain",
+			finalErr: unavailableErr,
+			bufferedAdvances: func(t *testing.T) []cantonclient.CoreContractLedgerAdvance {
+				return []cantonclient.CoreContractLedgerAdvance{
+					ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, 11),
+					ledger.DecodeTransaction(t, 11, 12, cantonclienttest.Created(coreState)),
+					ledger.DecodeOffsetCheckpoint(t, 12, 13),
+				}
+			},
+			expectedOffset: 11, expectedAppliedAdvanceCount: 1, expectedRebuildReason: IndexRebuildReasonInconsistentIndex,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			served, clock := newTestServedIndex(t)
+			index, err := NewCoreContractIndex(testPartyID(t, testGuardianGovernance), testLargeIndexByteCap)
+			require.NoError(t, err)
+			require.NoError(t, index.ApplyBootstrapSnapshot(testBootstrapOffset, decodedGenesisSnapshot(t, ledger)))
+			swapTestIndex(served, index, clock)
+			writer, err := NewCoreContractIndexWriter(&fakeCoreContractLedgerReader{}, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, testWriterTiming(), zap.NewNop())
+			require.NoError(t, err)
+			session := &ledgerFollowSession{writer: writer, followed: &followedIndex{index: index}}
+			subscription, advances := endedTestSubscription(t, testCase.finalErr, testCase.bufferedAdvances(t)...)
+
+			outcome := session.applyAdvancesBufferedBeforeDone(subscription, advances, 0)
+			require.Equal(t, testCase.expectedAppliedAdvanceCount, outcome.appliedAdvanceCount)
+			require.Equal(t, testCase.expectedRebuildReason, outcome.rebuildReason)
+			require.Error(t, outcome.err)
+			if testCase.finalErr != nil && testCase.expectedRebuildReason != IndexRebuildReasonInconsistentIndex {
+				require.ErrorIs(t, outcome.err, testCase.finalErr)
+			}
+			require.Equal(t, testCase.expectedOffset, index.Status().Offset)
+		})
+	}
+	require.Panics(t, func() {
+		served, _ := newTestServedIndex(t)
+		writer, err := NewCoreContractIndexWriter(&fakeCoreContractLedgerReader{}, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, testWriterTiming(), zap.NewNop())
+		require.NoError(t, err)
+		session := &ledgerFollowSession{writer: writer, followed: &followedIndex{index: newBootstrappedTestIndex(t, testLargeIndexByteCap)}}
+		session.applyAdvancesBufferedBeforeDone(cantonclient.NewSubscription(func() {}), make(chan cantonclient.CoreContractLedgerAdvance), 0)
+	})
+}
+
+func TestWriterLeavesTheCountTruncatedIndexWhenTheLedgerShrinks(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodesAboveTheSnapshotLimit()...)},
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(2, ""))},
+		},
+	}
+	timing := testWriterTiming()
+	timing.ResnapshotInterval = 20 * time.Millisecond
+	rebuildsBefore := rebuildCount(IndexRebuildReasonByteCapRetry)
+	served, stop := runTestWriter(t, reader, testReplayNodeLimitByteCapBytes, timing)
+	require.Eventually(t, func() bool {
+		return served.ServiceReadiness().Status() == ServiceReadinessStatusReadyByteCapReached
+	}, 5*time.Second, time.Millisecond)
+	status, _ := served.IndexStatus()
+	require.True(t, status.ReplayNodesDroppedAtByteCap)
+
+	requireReadinessStaysReadyUntil(t, served, func() bool { return served.ServiceReadiness().Status() == ServiceReadinessStatusReady })
+	status, _ = served.IndexStatus()
+	require.False(t, status.ReplayNodesDroppedAtByteCap)
+	require.Equal(t, 1, status.LiveReplayNodeCount)
+	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.NoError(t, err)
+	require.Equal(t, testContractIDHex(2), result.Contract().ContractID().String())
+	require.NoError(t, stop())
+	require.Equal(t, rebuildsBefore+1, rebuildCount(IndexRebuildReasonByteCapRetry))
+}

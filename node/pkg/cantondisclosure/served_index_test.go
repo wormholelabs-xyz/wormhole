@@ -202,6 +202,7 @@ func TestServiceReadinessStates(t *testing.T) {
 			readiness := served.ServiceReadiness()
 			require.Equal(t, testCase.expectedStatus, readiness.Status())
 			require.Equal(t, testCase.expectReady, readiness.IsReady())
+			require.Contains(t, allServiceReadinessStatuses(), readiness.Status())
 		})
 	}
 }

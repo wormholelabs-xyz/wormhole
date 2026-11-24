@@ -17,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 )
@@ -175,7 +177,8 @@ func TestLookupErrorsHaveFixedPublicBodies(t *testing.T) {
 		expectedRetryAfter string
 	}{
 		{name: "index not ready", target: RoutePathCoreState, lookupErr: fmt.Errorf("wrapped: %w", IndexNotReadyError{Readiness: IndexReadinessSingletonConflict}), expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady, expectedRetryAfter: "1"},
-		{name: "replay nodes dropped at the byte cap", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: IndexNotReadyError{Readiness: IndexReadinessByteCapReached}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady, expectedRetryAfter: "1"},
+		{name: "replay nodes dropped at the byte cap", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: IndexNotReadyError{Readiness: IndexReadinessByteCapReached}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
+		{name: "lookups suspended after a resnapshot difference", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessResnapshotDifference}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady, expectedRetryAfter: "1"},
 		{name: "no covering node", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: ErrNoCoveringReplayNode, expectedStatus: http.StatusNotFound, expectedMessage: publicMessageNoCoveringNode},
 		{name: "two covering nodes", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: MultipleCoveringReplayNodesError{CoveringNodeCount: 2}, expectedStatus: http.StatusInternalServerError, expectedMessage: publicMessageInternalError},
 		{name: "reserved namespace", target: claimedRootsNodeTarget(testConsumer, claimedRootsNamespace), lookupErr: ErrReservedReplayNamespace, expectedStatus: http.StatusBadRequest, expectedMessage: publicMessageReservedNamespace},
@@ -374,6 +377,7 @@ func TestReadyzStates(t *testing.T) {
 		{name: "singleton conflict", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessSingletonConflict }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_singleton_conflict"}`},
 		{name: "singleton missing", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessSingletonMissing }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_singleton_missing"}`},
 		{name: "inconsistent", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessInconsistent }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_inconsistent"}`},
+		{name: "resnapshot difference", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessResnapshotDifference }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_resnapshot_difference"}`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -468,4 +472,69 @@ func TestDisclosureHTTPServerLimits(t *testing.T) {
 	require.NoError(t, err)
 	_ = oversizedResponse.Body.Close()
 	require.Equal(t, http.StatusRequestHeaderFieldsTooLarge, oversizedResponse.StatusCode)
+}
+
+func TestHandlerWithAServedIndexAtTheByteCap(t *testing.T) {
+	served, clock := newTestServedIndex(t)
+	const byteCapBytes = int64(20_000)
+	oversizedNode := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", int(byteCapBytes))
+	swapTestIndex(served, newBootstrappedTestIndex(t, byteCapBytes, oversizedNode), clock)
+	served.setStreamConnected(true)
+	handler := newTestHTTPHandler(t, served, 4)
+
+	testCases := []struct {
+		name               string
+		target             string
+		expectedStatus     int
+		expectedRetryAfter string
+	}{
+		{name: "core state", target: RoutePathCoreState, expectedStatus: http.StatusOK},
+		{name: "emitter registry", target: RoutePathEmitterRegistry, expectedStatus: http.StatusOK},
+		{name: "replay root registry", target: RoutePathReplayRootRegistry, expectedStatus: http.StatusOK},
+		{name: "replay node", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), expectedStatus: http.StatusServiceUnavailable},
+		{name: "claimed-roots node", target: claimedRootsNodeTarget(testConsumer, testNamespace), expectedStatus: http.StatusServiceUnavailable},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := serveTestRequest(handler, http.MethodGet, testCase.target)
+			require.Equal(t, testCase.expectedStatus, recorder.Code)
+			require.Equal(t, testCase.expectedRetryAfter, recorder.Header().Get("Retry-After"))
+			if testCase.expectedStatus == http.StatusServiceUnavailable {
+				require.Equal(t, publicMessageIndexNotReady, decodePublicErrorBody(t, recorder).Error)
+			}
+		})
+	}
+	readyz := serveTestRequest(handler, http.MethodGet, RoutePathReadyz)
+	require.Equal(t, http.StatusOK, readyz.Code)
+	require.JSONEq(t, `{"status":"ready_byte_cap_reached"}`, readyz.Body.String())
+}
+
+func TestUnavailableLogsAreRateLimited(t *testing.T) {
+	observedCore, observedLogs := observer.New(zapcore.WarnLevel)
+	lookups := &fakeCoreContractLookups{lookupErr: IndexNotReadyError{Readiness: IndexReadinessSingletonMissing}}
+	handler, err := NewDisclosureHTTPHandler(lookups, 4, zap.New(observedCore))
+	require.NoError(t, err)
+	clock := &testClock{current: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+	handler.unavailableLogs.now = clock.now
+
+	for requestIndex := 0; requestIndex < 5; requestIndex++ {
+		require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
+	}
+	require.Equal(t, 1, observedLogs.Len())
+	require.Equal(t, uint64(0), observedLogs.All()[0].ContextMap()["suppressedUnavailableLogs"])
+
+	clock.current = clock.current.Add(unavailableLogInterval - time.Nanosecond)
+	require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
+	require.Equal(t, 1, observedLogs.Len())
+
+	clock.current = clock.current.Add(time.Nanosecond)
+	require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
+	require.Equal(t, 2, observedLogs.Len())
+	require.Equal(t, uint64(5), observedLogs.All()[1].ContextMap()["suppressedUnavailableLogs"])
+
+	lookups.lookupErr = errors.New(testInternalErrorDetail)
+	for requestIndex := 0; requestIndex < 3; requestIndex++ {
+		require.Equal(t, http.StatusInternalServerError, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
+	}
+	require.Equal(t, 5, observedLogs.Len(), "internal errors are logged every time")
 }
