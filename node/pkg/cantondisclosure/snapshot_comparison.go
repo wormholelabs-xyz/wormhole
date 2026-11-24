@@ -99,7 +99,7 @@ func compareSnapshotWithLiveContracts(offset int64, snapshot []IndexedCoreContra
 	snapshotContractIDs := make(map[cantonclient.ContractID]struct{}, len(snapshot))
 	for _, snapshotContract := range snapshot {
 		if _, isRepeated := snapshotContractIDs[snapshotContract.contractID]; isRepeated {
-			return SnapshotComparison{}, fmt.Errorf("%w: snapshot repeats %s", ErrDuplicateCreate, snapshotContract.contractID)
+			return SnapshotComparison{}, fmt.Errorf("%w: %s", ErrSnapshotRepeatsContractID, snapshotContract.contractID)
 		}
 		snapshotContractIDs[snapshotContract.contractID] = struct{}{}
 		liveContract, isLive := liveContractsByID[snapshotContract.contractID]

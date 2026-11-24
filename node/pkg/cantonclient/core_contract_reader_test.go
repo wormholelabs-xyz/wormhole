@@ -3,6 +3,7 @@ package cantonclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	apiv2 "github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen/com/daml/ledger/api/v2"
 )
@@ -98,8 +101,10 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 10, testOtherContractIDHex, nil)),
 	)
-	contracts, err := reader.ReadActiveCoreContracts(context.Background(), 10, 2)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 2)
 	require.NoError(t, err)
+	assert.False(t, snapshot.ReplayNodesTruncated())
+	contracts := snapshot.Contracts()
 	require.Len(t, contracts, 2)
 	assert.Equal(t, CoreContractTemplateCoreState, contracts[0].TemplateID().Template())
 	assert.Equal(t, testCoreContractIDHex, contracts[0].ContractID().String())
@@ -114,44 +119,120 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 
 func TestReadActiveCoreContractsEmptySnapshot(t *testing.T) {
 	reader, _ := testCoreContractReaderWithSnapshot(t)
-	contracts, err := reader.ReadActiveCoreContracts(context.Background(), 10, 1)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 1)
 	require.NoError(t, err)
-	assert.Empty(t, contracts)
+	assert.Empty(t, snapshot.Contracts())
+	assert.False(t, snapshot.ReplayNodesTruncated())
 }
 
-func TestReadActiveCoreContractsCap(t *testing.T) {
-	threeContracts := []*apiv2.GetActiveContractsResponse{
+func TestReadActiveCoreContractsReplayNodeLimit(t *testing.T) {
+	snapshotResponses := []*apiv2.GetActiveContractsResponse{
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 2, testOtherContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testThirdContractIDHex, nil)),
 	}
 	cases := []struct {
-		name          string
-		maxContracts  int
-		wantContracts int
-		wantErr       string
+		name               string
+		maxReplayNodes     int
+		wantContractIDs    []string
+		wantReplayTruncate bool
+		wantErr            string
 	}{
-		{name: "cap above the count", maxContracts: 4, wantContracts: 3},
-		{name: "cap equal to the count", maxContracts: 3, wantContracts: 3},
-		{name: "cap one below the count", maxContracts: 2, wantErr: "more than 2 active core contracts"},
-		{name: "cap of one", maxContracts: 1, wantErr: "more than 1 active core contracts"},
-		{name: "zero cap", maxContracts: 0, wantErr: "outside [1, 8388608]"},
-		{name: "negative cap", maxContracts: -1, wantErr: "outside [1, 8388608]"},
-		{name: "cap above the upper bound", maxContracts: MaxActiveCoreContractsPerSnapshot + 1, wantErr: "outside [1, 8388608]"},
+		{name: "limit above the replay node count", maxReplayNodes: 3, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
+		{name: "limit equal to the replay node count", maxReplayNodes: 2, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
+		{name: "limit one below the replay node count keeps the singletons", maxReplayNodes: 1, wantContractIDs: []string{testThirdContractIDHex}, wantReplayTruncate: true},
+		{name: "zero limit", maxReplayNodes: 0, wantErr: "outside [1, 8388608]"},
+		{name: "negative limit", maxReplayNodes: -1, wantErr: "outside [1, 8388608]"},
+		{name: "limit above the upper bound", maxReplayNodes: MaxActiveCoreContractsPerSnapshot + 1, wantErr: "outside [1, 8388608]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reader, _ := testCoreContractReaderWithSnapshot(t, threeContracts...)
-			contracts, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxContracts)
+			reader, _ := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxReplayNodes)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				assert.Nil(t, contracts)
+				assert.Equal(t, ActiveCoreContracts{}, snapshot)
 				return
 			}
 			require.NoError(t, err)
-			assert.Len(t, contracts, tc.wantContracts)
+			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
+			contractIDs := []string{}
+			for _, contract := range snapshot.Contracts() {
+				contractIDs = append(contractIDs, contract.ContractID().String())
+			}
+			assert.Equal(t, tc.wantContractIDs, contractIDs)
 		})
 	}
+}
+
+func snapshotContractIDHex(serial int) string {
+	return fmt.Sprintf("00%064x", serial)
+}
+
+func decodedSnapshotContract(t *testing.T, template CoreContractTemplate, serial int) CreatedCoreContract {
+	t.Helper()
+	contract, err := testCoreContractDecoder(t).decodeCreatedCoreContract(createdCoreEvent(template, 1, snapshotContractIDHex(serial), nil), testSynchronizerID)
+	require.NoError(t, err)
+	return contract
+}
+
+func TestCollectActiveCoreContracts(t *testing.T) {
+	cases := []struct {
+		name               string
+		templates          []CoreContractTemplate
+		maxReplayNodes     int
+		wantTemplates      []CoreContractTemplate
+		wantReplayTruncate bool
+		wantErr            string
+	}{
+		{
+			name:           "singletons after the truncation are kept",
+			templates:      []CoreContractTemplate{CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateEmitterRegistry, CoreContractTemplateReplayNode, CoreContractTemplateCoreState},
+			maxReplayNodes: 2, wantTemplates: []CoreContractTemplate{CoreContractTemplateEmitterRegistry, CoreContractTemplateCoreState}, wantReplayTruncate: true,
+		},
+		{
+			name:           "three instances of one singleton",
+			templates:      []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+			maxReplayNodes: 1, wantTemplates: []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+		},
+		{
+			name:           "four instances of one singleton",
+			templates:      []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+			maxReplayNodes: 1, wantErr: "more than 3 active Wormhole.Core.State:CoreState",
+		},
+		{
+			name:           "four singleton instances after the truncation",
+			templates:      []CoreContractTemplate{CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry},
+			maxReplayNodes: 1, wantErr: "more than 3 active Wormhole.Core.State:ReplayRootRegistry",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contracts := make([]CreatedCoreContract, 0, len(tc.templates))
+			for serial, template := range tc.templates {
+				contracts = append(contracts, decodedSnapshotContract(t, template, serial+1))
+			}
+			snapshot, err := CollectActiveCoreContractsForTest(contracts, tc.maxReplayNodes)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, ActiveCoreContracts{}, snapshot)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
+			gotTemplates := []CoreContractTemplate{}
+			for _, contract := range snapshot.Contracts() {
+				gotTemplates = append(gotTemplates, contract.TemplateID().Template())
+			}
+			assert.Equal(t, tc.wantTemplates, gotTemplates)
+		})
+	}
+}
+
+func TestCollectActiveCoreContractsRejectsARepeatedKeptContractID(t *testing.T) {
+	coreState := decodedSnapshotContract(t, CoreContractTemplateCoreState, 1)
+	_, err := CollectActiveCoreContractsForTest([]CreatedCoreContract{coreState, coreState}, 1)
+	require.ErrorContains(t, err, "repeats contract id")
 }
 
 func TestReadActiveCoreContractsRejects(t *testing.T) {
@@ -183,9 +264,9 @@ func TestReadActiveCoreContractsRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, service := testCoreContractReaderWithSnapshot(t, tc.responses...)
 			service.stream.finalErr = tc.finalErr
-			contracts, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, 10)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, 10)
 			require.ErrorContains(t, err, tc.wantErr)
-			assert.Nil(t, contracts)
+			assert.Equal(t, ActiveCoreContracts{}, snapshot)
 		})
 	}
 }
@@ -218,16 +299,16 @@ func offsetCheckpointResponse(offset int64) *apiv2.GetUpdatesResponse {
 	return &apiv2.GetUpdatesResponse{Update: &apiv2.GetUpdatesResponse_OffsetCheckpoint{OffsetCheckpoint: &apiv2.OffsetCheckpoint{Offset: offset}}}
 }
 
-// subscribeAndCollectCoreUpdates runs the stream to its end and returns the delivered updates and the terminal error.
-func subscribeAndCollectCoreUpdates(t *testing.T, beginExclusive int64, responses ...*apiv2.GetUpdatesResponse) ([]CoreContractUpdate, error, *apiv2.GetUpdatesRequest) {
+// subscribeAndCollectCoreUpdates runs the stream to its end and returns the delivered advances and the terminal error.
+func subscribeAndCollectCoreUpdates(t *testing.T, beginExclusive int64, responses ...*apiv2.GetUpdatesResponse) ([]CoreContractLedgerAdvance, error, *apiv2.GetUpdatesRequest) {
 	t.Helper()
 	service := &fakeCoreUpdatesService{stream: &scriptedCoreContractStream[apiv2.GetUpdatesResponse]{responses: responses}}
 	reader := &grpcCoreContractReader{update: service, decoder: testCoreContractDecoder(t)}
-	out := make(chan CoreContractUpdate, 4)
+	out := make(chan CoreContractLedgerAdvance, 4)
 	subscription, err := reader.SubscribeCoreContractUpdates(context.Background(), beginExclusive, out)
 	require.NoError(t, err)
 	defer subscription.Unsubscribe()
-	updates := []CoreContractUpdate{}
+	updates := []CoreContractLedgerAdvance{}
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
@@ -249,8 +330,8 @@ func subscribeAndCollectCoreUpdates(t *testing.T, beginExclusive int64, response
 	}
 }
 
-func TestSubscribeCoreContractUpdatesDeliversInOrder(t *testing.T) {
-	updates, streamErr, request := subscribeAndCollectCoreUpdates(t, 4,
+func TestSubscribeCoreContractUpdatesDeliversOneAdvancePerTransaction(t *testing.T) {
+	advances, streamErr, request := subscribeAndCollectCoreUpdates(t, 4,
 		coreTransaction(5,
 			createdLedgerEvent(createdCoreEvent(CoreContractTemplateReplayNode, 5, testCoreContractIDHex, nil)),
 		),
@@ -259,9 +340,12 @@ func TestSubscribeCoreContractUpdatesDeliversInOrder(t *testing.T) {
 			archivedLedgerEvent(archivedCoreEvent(CoreContractTemplateReplayNode, 8, testCoreContractIDHex)),
 			createdLedgerEvent(createdCoreEvent(CoreContractTemplateReplayNode, 8, testOtherContractIDHex, map[string]*apiv2.Value{"prefix": digestNibblePrefixVal(pinnedPackageID, "a70")})),
 		),
+		offsetCheckpointResponse(8),
+		offsetCheckpointResponse(11),
 	)
 	require.ErrorContains(t, streamErr, "GetUpdates stream ended")
 	require.ErrorIs(t, streamErr, io.EOF)
+	require.NotErrorIs(t, streamErr, ErrCoreContractStreamDecode)
 
 	assert.Equal(t, int64(4), request.GetBeginExclusive())
 	assert.Nil(t, request.EndInclusive)
@@ -270,30 +354,112 @@ func TestSubscribeCoreContractUpdatesDeliversInOrder(t *testing.T) {
 	checkFiltersTheDisclosedCoreTemplates(t, transactionFormat.GetEventFormat())
 	checkFiltersTheDisclosedCoreTemplates(t, request.GetUpdateFormat().GetIncludeReassignments())
 
-	require.Len(t, updates, 3)
-	assert.Equal(t, []int64{5, 8, 8}, []int64{updates[0].Offset(), updates[1].Offset(), updates[2].Offset()})
+	require.Len(t, advances, 4)
+	assert.Equal(t, []int64{5, 6, 8, 11}, []int64{advances[0].Offset(), advances[1].Offset(), advances[2].Offset(), advances[3].Offset()})
+	assert.Equal(t, []bool{false, true, false, true}, []bool{advances[0].IsOffsetCheckpoint(), advances[1].IsOffsetCheckpoint(), advances[2].IsOffsetCheckpoint(), advances[3].IsOffsetCheckpoint()})
+	assert.Empty(t, advances[1].Updates())
+	assert.Empty(t, advances[3].Updates())
 
-	created, isCreated := updates[0].Created()
+	firstUpdates := advances[0].Updates()
+	require.Len(t, firstUpdates, 1)
+	created, isCreated := firstUpdates[0].Created()
 	require.True(t, isCreated)
-	assert.Equal(t, CoreContractUpdateKindCreated, updates[0].Kind())
+	assert.Equal(t, int64(5), firstUpdates[0].Offset())
+	assert.Equal(t, CoreContractUpdateKindCreated, firstUpdates[0].Kind())
 	assert.Equal(t, testCoreContractIDHex, created.ContractID().String())
-	_, isArchived := updates[0].Archived()
+	_, isArchived := firstUpdates[0].Archived()
 	assert.False(t, isArchived)
 
-	archived, isArchived := updates[1].Archived()
+	splitUpdates := advances[2].Updates()
+	require.Len(t, splitUpdates, 2)
+	assert.Equal(t, []int64{8, 8}, []int64{splitUpdates[0].Offset(), splitUpdates[1].Offset()})
+	archived, isArchived := splitUpdates[0].Archived()
 	require.True(t, isArchived)
-	assert.Equal(t, CoreContractUpdateKindArchived, updates[1].Kind())
+	assert.Equal(t, CoreContractUpdateKindArchived, splitUpdates[0].Kind())
 	assert.Equal(t, testCoreContractIDHex, archived.ContractID().String())
 	assert.Equal(t, CoreContractTemplateReplayNode, archived.TemplateID().Template())
-	_, isCreated = updates[1].Created()
+	_, isCreated = splitUpdates[0].Created()
 	assert.False(t, isCreated)
 
-	created, isCreated = updates[2].Created()
+	created, isCreated = splitUpdates[1].Created()
 	require.True(t, isCreated)
 	replayNodeKey, isReplayNode := created.ReplayNodeKey()
 	require.True(t, isReplayNode)
 	assert.Equal(t, "a70", replayNodeKey.Prefix().String())
 	assert.Equal(t, testSynchronizerID, created.SynchronizerID().String())
+}
+
+func TestCoreContractLedgerAdvanceUpdatesIsACopy(t *testing.T) {
+	advances, _, _ := subscribeAndCollectCoreUpdates(t, 4,
+		coreTransaction(5, createdLedgerEvent(createdCoreEvent(CoreContractTemplateCoreState, 5, testCoreContractIDHex, nil))),
+	)
+	require.Len(t, advances, 1)
+	updates := advances[0].Updates()
+	updates[0] = CoreContractUpdate{}
+	require.Equal(t, CoreContractUpdateKindCreated, advances[0].Updates()[0].Kind())
+}
+
+func TestSubscribeCoreContractUpdatesOffsetCheckpointOrder(t *testing.T) {
+	cases := []struct {
+		name             string
+		beginExclusive   int64
+		responses        []*apiv2.GetUpdatesResponse
+		expectedOffsets  []int64
+		expectedErrorMsg string
+	}{
+		{name: "checkpoint after the begin offset", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{offsetCheckpointResponse(5)}, expectedOffsets: []int64{5}},
+		{name: "checkpoint at the begin offset is skipped", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{offsetCheckpointResponse(4), offsetCheckpointResponse(7)}, expectedOffsets: []int64{7}},
+		{name: "repeated checkpoint is skipped", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{offsetCheckpointResponse(7), offsetCheckpointResponse(7)}, expectedOffsets: []int64{7}},
+		{name: "checkpoint below the begin offset", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{offsetCheckpointResponse(3)}, expectedErrorMsg: "offset checkpoint 3 is below offset 4"},
+		{name: "checkpoint below the previous transaction", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{
+			coreTransaction(9, createdLedgerEvent(createdCoreEvent(CoreContractTemplateCoreState, 9, testCoreContractIDHex, nil))),
+			offsetCheckpointResponse(8),
+		}, expectedOffsets: []int64{9}, expectedErrorMsg: "offset checkpoint 8 is below offset 9"},
+		{name: "transaction at the previous checkpoint", beginExclusive: 4, responses: []*apiv2.GetUpdatesResponse{
+			offsetCheckpointResponse(9),
+			coreTransaction(9, createdLedgerEvent(createdCoreEvent(CoreContractTemplateCoreState, 9, testCoreContractIDHex, nil))),
+		}, expectedOffsets: []int64{9}, expectedErrorMsg: "does not follow offset 9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			advances, streamErr, _ := subscribeAndCollectCoreUpdates(t, tc.beginExclusive, tc.responses...)
+			offsets := []int64{}
+			for _, advance := range advances {
+				offsets = append(offsets, advance.Offset())
+			}
+			if len(tc.expectedOffsets) == 0 {
+				assert.Empty(t, offsets)
+			} else {
+				assert.Equal(t, tc.expectedOffsets, offsets)
+			}
+			if tc.expectedErrorMsg == "" {
+				require.ErrorIs(t, streamErr, io.EOF)
+				return
+			}
+			require.ErrorContains(t, streamErr, tc.expectedErrorMsg)
+		})
+	}
+}
+
+func TestIsPrunedOffsetError(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		isPruned bool
+	}{
+		{name: "pruned data accessed", err: status.Error(codes.FailedPrecondition, "PARTICIPANT_PRUNED_DATA_ACCESSED(9,0): Command completions request from 3 is beyond pruned offset 10"), isPruned: true},
+		{name: "wrapped pruned data accessed", err: fmt.Errorf("GetUpdates stream ended: %w", status.Error(codes.FailedPrecondition, "PARTICIPANT_PRUNED_DATA_ACCESSED(9,0): pruned")), isPruned: true},
+		{name: "other failed precondition", err: status.Error(codes.FailedPrecondition, "OFFSET_OUT_OF_RANGE"), isPruned: false},
+		{name: "pruned id under another code", err: status.Error(codes.Unavailable, "PARTICIPANT_PRUNED_DATA_ACCESSED"), isPruned: false},
+		{name: "unavailable", err: status.Error(codes.Unavailable, "connection refused"), isPruned: false},
+		{name: "plain error", err: errors.New("PARTICIPANT_PRUNED_DATA_ACCESSED"), isPruned: false},
+		{name: "nil", err: nil, isPruned: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.isPruned, IsPrunedOffsetError(tc.err))
+		})
+	}
 }
 
 func TestSubscribeCoreContractUpdatesRejects(t *testing.T) {
@@ -327,10 +493,11 @@ func TestSubscribeCoreContractUpdatesRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			updates, streamErr, _ := subscribeAndCollectCoreUpdates(t, 4, validFirst, tc.second)
+			advances, streamErr, _ := subscribeAndCollectCoreUpdates(t, 4, validFirst, tc.second)
 			require.ErrorContains(t, streamErr, tc.wantErr)
-			require.Len(t, updates, 1)
-			assert.Equal(t, int64(5), updates[0].Offset())
+			require.ErrorIs(t, streamErr, ErrCoreContractStreamDecode)
+			require.Len(t, advances, 1)
+			assert.Equal(t, int64(5), advances[0].Offset())
 		})
 	}
 }
@@ -345,7 +512,7 @@ func TestSubscribeCoreContractUpdatesRejectsFirstTransactionAtBegin(t *testing.T
 
 func TestSubscribeCoreContractUpdatesRejectsNegativeBegin(t *testing.T) {
 	reader := &grpcCoreContractReader{update: &fakeCoreUpdatesService{}, decoder: testCoreContractDecoder(t)}
-	_, err := reader.SubscribeCoreContractUpdates(context.Background(), -1, make(chan CoreContractUpdate, 1))
+	_, err := reader.SubscribeCoreContractUpdates(context.Background(), -1, make(chan CoreContractLedgerAdvance, 1))
 	require.ErrorContains(t, err, "negative begin offset")
 }
 
@@ -357,7 +524,7 @@ func TestSubscribeCoreContractUpdatesCancellationIsSilent(t *testing.T) {
 	}}
 	reader := &grpcCoreContractReader{update: &fakeCoreUpdatesService{stream: stream}, decoder: testCoreContractDecoder(t)}
 	ctx, cancel := context.WithCancel(context.Background())
-	subscription, err := reader.SubscribeCoreContractUpdates(ctx, 0, make(chan CoreContractUpdate, 1))
+	subscription, err := reader.SubscribeCoreContractUpdates(ctx, 0, make(chan CoreContractLedgerAdvance, 1))
 	require.NoError(t, err)
 	cancel()
 	close(release)
@@ -380,9 +547,10 @@ func TestSubscribeCoreContractUpdatesStopsOnCancellationWhileBlocked(t *testing.
 			createdLedgerEvent(createdCoreEvent(CoreContractTemplateCoreState, 5, testCoreContractIDHex, nil)),
 			archivedLedgerEvent(archivedCoreEvent(CoreContractTemplateEmitterRegistry, 5, testOtherContractIDHex)),
 		),
+		coreTransaction(6, createdLedgerEvent(createdCoreEvent(CoreContractTemplateCoreState, 6, testThirdContractIDHex, nil))),
 	}}}
 	reader := &grpcCoreContractReader{update: service, decoder: testCoreContractDecoder(t)}
-	out := make(chan CoreContractUpdate, 1)
+	out := make(chan CoreContractLedgerAdvance, 1)
 	subscription, err := reader.SubscribeCoreContractUpdates(context.Background(), 0, out)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return len(out) == 1 }, 2*time.Second, time.Millisecond)
@@ -398,6 +566,36 @@ func TestSubscribeCoreContractUpdatesStopsOnCancellationWhileBlocked(t *testing.
 	default:
 	}
 	first := <-out
-	assert.Equal(t, CoreContractUpdateKindCreated, first.Kind())
+	assert.Equal(t, int64(5), first.Offset())
+	assert.Len(t, first.Updates(), 2)
 	assert.Empty(t, out)
+}
+
+func TestSubscribeCoreContractUpdatesBoundsTheUpdatesOfOneTransaction(t *testing.T) {
+	cases := []struct {
+		name          string
+		eventCount    int
+		expectRefused bool
+	}{
+		{name: "maximum", eventCount: maxCoreContractUpdatesPerTransaction},
+		{name: "maximum plus one", eventCount: maxCoreContractUpdatesPerTransaction + 1, expectRefused: true},
+	}
+	require.Equal(t, 65536, maxCoreContractUpdatesPerTransaction)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make([]*apiv2.Event, 0, tc.eventCount)
+			for eventIndex := 0; eventIndex < tc.eventCount; eventIndex++ {
+				events = append(events, archivedLedgerEvent(archivedCoreEvent(CoreContractTemplateReplayNode, 5, testCoreContractIDHex)))
+			}
+			advance, advances, err := testCoreContractDecoder(t).decodeUpdatesResponse(coreTransaction(5, events...), 4)
+			if tc.expectRefused {
+				require.ErrorContains(t, err, "65537 core contract updates")
+				require.False(t, advances)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, advances)
+			require.Len(t, advance.Updates(), tc.eventCount)
+		})
+	}
 }

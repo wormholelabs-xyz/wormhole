@@ -20,7 +20,8 @@ const (
 	IndexReadinessSingletonMissing
 	// IndexReadinessSingletonConflict: a singleton template has two or more live instances.
 	IndexReadinessSingletonConflict
-	// IndexReadinessByteCapReached: a create was refused at the byte cap. Terminal: rebuild the index.
+	// IndexReadinessByteCapReached: a create reached the byte cap, and the index dropped every ReplayNode.
+	// Singleton lookups serve; ReplayNode lookups fail until a rebuild.
 	IndexReadinessByteCapReached
 	// IndexReadinessInconsistent: an update contradicts the index. Terminal: rebuild the index.
 	IndexReadinessInconsistent
@@ -47,8 +48,13 @@ func (readiness IndexReadiness) String() string {
 	}
 }
 
-// ServesLookups is true only for the ready states.
-func (readiness IndexReadiness) ServesLookups() bool {
+// ServesSingletonLookups is true for the ready states and IndexReadinessByteCapReached.
+func (readiness IndexReadiness) ServesSingletonLookups() bool {
+	return readiness.ServesReplayNodeLookups() || readiness == IndexReadinessByteCapReached
+}
+
+// ServesReplayNodeLookups is true only for the ready states.
+func (readiness IndexReadiness) ServesReplayNodeLookups() bool {
 	return readiness == IndexReadinessReady || readiness == IndexReadinessReadyNearByteCap
 }
 
@@ -65,6 +71,8 @@ var (
 	ErrMultipleCoveringReplayNodes = errors.New("cantondisclosure: more than one live replay node covers the digest")
 	ErrReservedReplayNamespace     = errors.New("cantondisclosure: replay namespace is reserved for the claimed-roots tree")
 	ErrSnapshotOffsetMismatch      = errors.New("cantondisclosure: snapshot offset is not the index offset")
+	ErrSnapshotRepeatsContractID   = errors.New("cantondisclosure: snapshot repeats a contract id")
+	ErrReplayNodesDroppedAtByteCap = errors.New("cantondisclosure: index dropped its replay nodes at the byte cap")
 )
 
 // IndexNotReadyError is returned by every lookup while the readiness does not serve lookups.
