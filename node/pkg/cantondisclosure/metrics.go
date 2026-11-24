@@ -87,6 +87,7 @@ func allServiceReadinessStatuses() []ServiceReadinessStatus {
 		ServiceReadinessStatusBootstrapping,
 		ServiceReadinessStatusStreamDisconnected,
 		ServiceReadinessStatusLedgerLagAboveBound,
+		ServiceReadinessStatusReadPartyNotHosted,
 	}
 	for _, indexReadiness := range allIndexReadinessValues {
 		if indexReadiness == IndexReadinessBootstrapping || indexReadiness.ServesSingletonLookups() {
@@ -144,9 +145,17 @@ func init() {
 		}
 		return float64(served.LedgerOffsetsBehind())
 	})
+	serviceReadinessGaugeFunc(prometheus.GaugeOpts{
+		Name: "wormhole_canton_disclosure_read_party_hosted",
+		Help: "1 while a connected synchronizer hosts the read party on the participant",
+	}, func(readiness ServiceReadiness) float64 { return gaugeValueOf(!readiness.ReadPartyUnhosted) })
 }
 
 var (
+	readPartyHostingReadFailuresCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "wormhole_canton_disclosure_read_party_hosting_read_failures_total",
+		Help: "Failed reads of the hosting of the read party",
+	})
 	indexRebuildsCounter = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_index_rebuilds_total",
 		Help: "Core disclosure index rebuilds by reason",

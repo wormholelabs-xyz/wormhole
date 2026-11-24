@@ -26,8 +26,9 @@ const ledgerEndObservationCapacity = int(maxLedgerLagBound/ProductionLedgerEndPo
 // Compile-time assertion: minLedgerLagBound >= 2 * ProductionLedgerEndPollInterval.
 const _ uint64 = uint64(minLedgerLagBound - 2*ProductionLedgerEndPollInterval)
 
-// DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz.
-const DefaultLedgerLagBound = time.Minute
+// DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz. Without core traffic, the index offset moves only
+// on offset checkpoints; on Canton 3.7.3 the lag then reaches about 75 s (LocalNet measurement).
+const DefaultLedgerLagBound = 3 * time.Minute
 
 // CheckLedgerLagBound requires ledgerLagBound in [10s, 1h] and at least twice ProductionLedgerEndPollInterval.
 func CheckLedgerLagBound(ledgerLagBound time.Duration) error {
@@ -49,13 +50,16 @@ const (
 	ServiceReadinessStatusBootstrapping       ServiceReadinessStatus = "bootstrapping"
 	ServiceReadinessStatusStreamDisconnected  ServiceReadinessStatus = "stream_disconnected"
 	ServiceReadinessStatusLedgerLagAboveBound ServiceReadinessStatus = "ledger_lag_above_bound"
+	ServiceReadinessStatusReadPartyNotHosted  ServiceReadinessStatus = "read_party_not_hosted"
 	serviceReadinessStatusIndexPrefix                                = "index_"
 )
 
 // ServiceReadiness is a point-in-time copy of the service state that /v1/readyz reports.
 type ServiceReadiness struct {
 	BootstrapCompleted bool
-	StreamConnected    bool
+	// ReadPartyUnhosted is true after the latest hosting read found no connected synchronizer that hosts the read party.
+	ReadPartyUnhosted bool
+	StreamConnected   bool
 	// LedgerLag is the age of the newest ledger end read that the index offset reached: an upper bound
 	// of the time since the index last held every core contract update of the ledger.
 	LedgerLag      time.Duration
@@ -63,12 +67,14 @@ type ServiceReadiness struct {
 	IndexReadiness IndexReadiness
 }
 
-// Status is ready only after the bootstrap, with a connected stream, a ledger lag
+// Status is ready only after the bootstrap, with a hosted read party, a connected stream, a ledger lag
 // within the bound, and an index that serves singleton lookups.
 func (readiness ServiceReadiness) Status() ServiceReadinessStatus {
 	switch {
 	case !readiness.BootstrapCompleted:
 		return ServiceReadinessStatusBootstrapping
+	case readiness.ReadPartyUnhosted:
+		return ServiceReadinessStatusReadPartyNotHosted
 	case !readiness.StreamConnected:
 		return ServiceReadinessStatusStreamDisconnected
 	case readiness.LedgerLag > readiness.LedgerLagBound:
@@ -100,8 +106,9 @@ type ServedIndex struct {
 	ledgerLagBound time.Duration
 	now            func() time.Time
 
-	mutex           sync.Mutex
-	streamConnected bool
+	mutex             sync.Mutex
+	streamConnected   bool
+	readPartyUnhosted bool
 	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnds holds the reads above the index offset,
 	// oldest first, with strictly increasing offsets, at most ledgerEndObservationCapacity.
 	// newestReachedLedgerEnd is the newest read at or below the index offset.
@@ -163,6 +170,15 @@ func (served *ServedIndex) setStreamConnected(connected bool) {
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
 	served.streamConnected = connected
+}
+
+// setReadPartyHosted returns true when the hosting state changes.
+func (served *ServedIndex) setReadPartyHosted(hosted bool) bool {
+	served.mutex.Lock()
+	defer served.mutex.Unlock()
+	changed := served.readPartyUnhosted == hosted
+	served.readPartyUnhosted = !hosted
+	return changed
 }
 
 // recordLedgerEnd stores a ledger end read at observedAt. A full queue merges the read into its newest entry,
@@ -254,9 +270,10 @@ func (served *ServedIndex) ServiceReadiness() ServiceReadiness {
 	defer served.mutex.Unlock()
 	index := served.currentIndex.Load()
 	readiness := ServiceReadiness{
-		StreamConnected: served.streamConnected,
-		LedgerLagBound:  served.ledgerLagBound,
-		IndexReadiness:  IndexReadinessBootstrapping,
+		StreamConnected:   served.streamConnected,
+		ReadPartyUnhosted: served.readPartyUnhosted,
+		LedgerLagBound:    served.ledgerLagBound,
+		IndexReadiness:    IndexReadinessBootstrapping,
 	}
 	if index == nil {
 		return readiness

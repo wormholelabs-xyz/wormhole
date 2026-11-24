@@ -111,7 +111,7 @@ func TestCantonDisclosureServiceCommandFlags(t *testing.T) {
 		{flagName: "cantonReadAsParty", required: true},
 		{flagName: "listenAddress", required: true},
 		{flagName: "indexByteCapBytes", defaultValue: "4294967296"},
-		{flagName: "ledgerLagBound", defaultValue: "1m0s"},
+		{flagName: "ledgerLagBound", defaultValue: "3m0s"},
 		{flagName: "resnapshotInterval", defaultValue: "1h0m0s"},
 		{flagName: "statusAddr", defaultValue: "127.0.0.1:6061"},
 		{flagName: "unsafePlaintext", defaultValue: "false"},
@@ -135,6 +135,8 @@ func TestCantonDisclosureServiceCommandFlags(t *testing.T) {
 type emptyLedgerReader struct{}
 
 func (emptyLedgerReader) GetLedgerEnd(context.Context) (int64, error) { return 5, nil }
+
+func (emptyLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) { return true, nil }
 
 func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, int) (cantonclient.ActiveCoreContracts, error) {
 	return cantonclient.ActiveCoreContracts{}, nil

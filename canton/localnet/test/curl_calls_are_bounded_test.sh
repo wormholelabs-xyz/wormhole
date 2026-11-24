@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Table-driven test: each curl call of gg_lib.sh, watcher_harness_lib.sh and publish_message_scan.sh has a maximum time.
+# Table-driven test: each curl call of gg_lib.sh, watcher_harness_lib.sh, disclosure_service_check.sh and
+# publish_message_scan.sh has a maximum time.
 # A "helper" file calls curl through curl_bounded of gg_lib.sh. Each curl call of a "standalone" file sets its own
 # --connect-timeout and --max-time.
 # Usage: canton/localnet/test/curl_calls_are_bounded_test.sh
@@ -13,6 +14,7 @@ readonly CANTON_DIR="$LOCALNET_TEST_DIR/../.."
 readonly CHECKED_FILES=(
   "$LOCALNET_DIR/gg_lib.sh standalone"
   "$LOCALNET_DIR/watcher_harness_lib.sh helper"
+  "$LOCALNET_DIR/disclosure_service_check.sh helper"
   "$CANTON_DIR/tools/publish_message_scan.sh standalone"
 )
 

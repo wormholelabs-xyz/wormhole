@@ -17,6 +17,7 @@ import (
 // CoreContractLedgerReader is the Ledger API surface of the index writer. cantonclient.CoreContractReader implements it.
 type CoreContractLedgerReader interface {
 	GetLedgerEnd(ctx context.Context) (int64, error)
+	ReadPartyIsHosted(ctx context.Context) (bool, error)
 	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error)
 	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error)
 }
@@ -291,6 +292,7 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 				continue
 			}
 			writer.served.recordLedgerEnd(ledgerEnd, time.Now())
+			writer.recordReadPartyHosting(ctx)
 		}
 	}
 }
@@ -345,6 +347,11 @@ func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (f
 	if built.bootstrapLedgerEnd.offset < servedOffset {
 		return followedIndex{}, fmt.Errorf("cantondisclosure: ledger end %d is below the served index offset %d", built.bootstrapLedgerEnd.offset, servedOffset)
 	}
+	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
+	if err != nil {
+		return followedIndex{}, err
+	}
+	writer.served.setReadPartyHosted(readPartyHosted)
 	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd)
 	return built, nil
 }
@@ -690,6 +697,24 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 		panic("cantondisclosure: applied advance did not move the index offset to the advance offset")
 	}
 	return "", nil
+}
+
+// recordReadPartyHosting keeps the last known hosting state when the read fails.
+// SECURITY: a participant that stops hosting the read party keeps its ACS and its offset checkpoints, so neither the
+// ledger lag nor the resnapshot comparison detects the frozen index. Only this check makes /v1/readyz fail.
+func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Context) {
+	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		readPartyHostingReadFailuresCounter.Inc()
+		writer.logger.Warn("read party hosting read failed", zap.Error(err))
+		return
+	}
+	if writer.served.setReadPartyHosted(readPartyHosted) && !readPartyHosted {
+		writer.logger.Warn("the participant no longer hosts the read party; /v1/readyz reports read_party_not_hosted", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+	}
 }
 
 // resnapshotAndCompare reads the active contracts at the index offset and compares them with the index.
