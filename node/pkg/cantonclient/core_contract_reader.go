@@ -5,9 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	apiv2 "github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen/com/daml/ledger/api/v2"
 )
@@ -23,10 +27,11 @@ type CoreContractReader interface {
 	// Maps to StateService.GetActiveContracts.
 	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxContracts int) ([]CreatedCoreContract, error)
 
-	// SubscribeCoreContractUpdates delivers on out, in ledger order, every
-	// create and archive of a disclosed core contract after beginExclusive.
+	// SubscribeCoreContractUpdates delivers on out, in ledger order, one
+	// CoreContractLedgerAdvance per transaction with core contract events and
+	// per offset checkpoint after beginExclusive. Offsets strictly increase.
 	// Maps to UpdateService.GetUpdates in the ACS_DELTA shape.
-	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- CoreContractUpdate) (*Subscription, error)
+	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- CoreContractLedgerAdvance) (*Subscription, error)
 
 	Close() error
 }
@@ -71,6 +76,27 @@ func (update CoreContractUpdate) Archived() (ArchivedCoreContract, bool) {
 	}
 	return update.archived, true
 }
+
+// maxCoreContractUpdatesPerTransaction bounds the core contract events of one delivered transaction.
+const maxCoreContractUpdatesPerTransaction = 1 << 16
+
+// CoreContractLedgerAdvance is the ledger progress of one stream element: the
+// core contract updates of one transaction, or an offset checkpoint without updates.
+type CoreContractLedgerAdvance struct {
+	offset  int64
+	updates []CoreContractUpdate
+}
+
+// Offset is the participant offset that the stream reached.
+func (advance CoreContractLedgerAdvance) Offset() int64 { return advance.offset }
+
+// Updates is a copy of the transaction updates, in event order. Empty for an offset checkpoint.
+func (advance CoreContractLedgerAdvance) Updates() []CoreContractUpdate {
+	return slices.Clone(advance.updates)
+}
+
+// IsOffsetCheckpoint is true when the advance carries no core contract update.
+func (advance CoreContractLedgerAdvance) IsOffsetCheckpoint() bool { return len(advance.updates) == 0 }
 
 type grpcCoreContractReader struct {
 	conn    *grpc.ClientConn
@@ -205,7 +231,7 @@ func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Contex
 	}
 }
 
-func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- CoreContractUpdate) (*Subscription, error) {
+func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- CoreContractLedgerAdvance) (*Subscription, error) {
 	if beginExclusive < 0 {
 		return nil, fmt.Errorf("GetUpdates: negative begin offset %d", beginExclusive)
 	}
@@ -239,32 +265,61 @@ func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.C
 				subscription.Fail(fmt.Errorf("GetUpdates stream ended: %w", err))
 				return
 			}
-			var transaction *apiv2.Transaction
-			switch update := response.GetUpdate().(type) {
-			case *apiv2.GetUpdatesResponse_Transaction:
-				transaction = update.Transaction
-			case *apiv2.GetUpdatesResponse_OffsetCheckpoint:
-				continue
-			default:
-				subscription.Fail(fmt.Errorf("GetUpdates: unexpected update %T after offset %d", update, previousOffset))
-				return
-			}
-			updates, err := reader.decoder.decodeTransactionCoreContractUpdates(transaction, previousOffset)
+			advance, advances, err := reader.decoder.decodeUpdatesResponse(response, previousOffset)
 			if err != nil {
 				subscription.Fail(fmt.Errorf("GetUpdates: %w", err))
 				return
 			}
-			previousOffset = transaction.GetOffset()
-			for _, update := range updates {
-				select {
-				case <-streamCtx.Done():
-					return
-				case out <- update:
-				}
+			if !advances {
+				continue
+			}
+			previousOffset = advance.offset
+			select {
+			case <-streamCtx.Done():
+				return
+			case out <- advance:
 			}
 		}
 	}()
 	return subscription, nil
+}
+
+// decodeUpdatesResponse returns advances false for a checkpoint at previousOffset, which adds no progress.
+func (decoder coreContractDecoder) decodeUpdatesResponse(response *apiv2.GetUpdatesResponse, previousOffset int64) (advance CoreContractLedgerAdvance, advances bool, err error) {
+	switch update := response.GetUpdate().(type) {
+	case *apiv2.GetUpdatesResponse_Transaction:
+		updates, err := decoder.decodeTransactionCoreContractUpdates(update.Transaction, previousOffset)
+		if err != nil {
+			return CoreContractLedgerAdvance{}, false, err
+		}
+		if len(updates) == 0 || len(updates) > maxCoreContractUpdatesPerTransaction {
+			return CoreContractLedgerAdvance{}, false, fmt.Errorf("transaction at offset %d has %d core contract updates, expected [1, %d]", update.Transaction.GetOffset(), len(updates), maxCoreContractUpdatesPerTransaction)
+		}
+		return CoreContractLedgerAdvance{offset: update.Transaction.GetOffset(), updates: updates}, true, nil
+	case *apiv2.GetUpdatesResponse_OffsetCheckpoint:
+		checkpointOffset := update.OffsetCheckpoint.GetOffset()
+		if checkpointOffset < previousOffset {
+			return CoreContractLedgerAdvance{}, false, fmt.Errorf("offset checkpoint %d is below offset %d", checkpointOffset, previousOffset)
+		}
+		if checkpointOffset == previousOffset {
+			return CoreContractLedgerAdvance{}, false, nil
+		}
+		return CoreContractLedgerAdvance{offset: checkpointOffset}, true, nil
+	default:
+		return CoreContractLedgerAdvance{}, false, fmt.Errorf("unexpected update %T after offset %d", update, previousOffset)
+	}
+}
+
+// prunedDataAccessedErrorID is the Canton error id of a read below the pruning offset (state_service.proto).
+const prunedDataAccessedErrorID = "PARTICIPANT_PRUNED_DATA_ACCESSED"
+
+// IsPrunedOffsetError is true for FAILED_PRECONDITION/PARTICIPANT_PRUNED_DATA_ACCESSED anywhere in the error chain.
+func IsPrunedOffsetError(err error) bool {
+	grpcStatus, hasStatus := status.FromError(err)
+	if !hasStatus || err == nil {
+		return false
+	}
+	return grpcStatus.Code() == codes.FailedPrecondition && strings.Contains(grpcStatus.Message(), prunedDataAccessedErrorID)
 }
 
 // decodeTransactionCoreContractUpdates decodes every event of an ACS_DELTA
