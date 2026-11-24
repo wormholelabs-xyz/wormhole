@@ -26,7 +26,6 @@ type indexLifecycle int
 const (
 	indexLifecycleAwaitingBootstrap indexLifecycle = iota + 1
 	indexLifecycleLive
-	indexLifecycleByteCapReached
 	indexLifecycleInconsistent
 )
 
@@ -46,6 +45,9 @@ type CoreContractIndex struct {
 	replayNodeContractIDsByLocation map[replayNodeLocation][]cantonclient.ContractID
 	liveReplayNodeCount             int
 	ignoredUnknownArchiveCount      uint64
+	// replayNodesDroppedAtByteCap: a create reached the byte cap. The index holds singletons only from then on.
+	replayNodesDroppedAtByteCap  bool
+	droppedReplayNodeUpdateCount uint64
 }
 
 // IndexStatus is a point-in-time copy of the index counters.
@@ -57,7 +59,10 @@ type IndexStatus struct {
 	LiveContractCount   int
 	LiveReplayNodeCount int
 	// IgnoredUnknownArchiveCount counts archives of unknown contract ids.
-	IgnoredUnknownArchiveCount uint64
+	IgnoredUnknownArchiveCount  uint64
+	ReplayNodesDroppedAtByteCap bool
+	// DroppedReplayNodeUpdateCount counts the ReplayNode creates and archives skipped at the byte cap.
+	DroppedReplayNodeUpdateCount uint64
 }
 
 // CoreContractLookupResult is a live contract and the index offset at which it is live.
@@ -111,8 +116,10 @@ func (index *CoreContractIndex) ApplyBootstrapSnapshot(offset int64, snapshot []
 // ApplyTransaction applies every update of the transaction at offset in one step.
 // offset must exceed the index offset, and every update must carry offset.
 //
-// SECURITY: a refused create (duplicate contract id, byte cap) makes the index
-// terminal, and every lookup then fails.
+// SECURITY: a duplicate create, an archive whose template differs from the live
+// entry, or a singleton above the byte cap makes the index terminal (inconsistent),
+// and every lookup then fails. A create at the byte cap drops every ReplayNode;
+// singleton lookups continue.
 func (index *CoreContractIndex) ApplyTransaction(offset int64, updates []cantonclient.CoreContractUpdate) error {
 	if len(updates) < 1 || len(updates) > maxCoreContractUpdatesPerTransaction {
 		return fmt.Errorf("%w: %d updates at offset %d, expected [1, %d]", ErrTransactionUpdateCount, len(updates), offset, maxCoreContractUpdatesPerTransaction)
@@ -126,6 +133,22 @@ func (index *CoreContractIndex) ApplyTransaction(offset int64, updates []cantonc
 		indexUpdates = append(indexUpdates, indexUpdate)
 	}
 	return index.applyTransactionUpdates(offset, indexUpdates)
+}
+
+// AdvanceOffset moves the index offset to offset without an update: an offset
+// checkpoint, or a transaction without core contract events.
+func (index *CoreContractIndex) AdvanceOffset(offset int64) error {
+	index.mutex.Lock()
+	defer index.mutex.Unlock()
+	if err := index.checkAcceptsTransactionsLocked(); err != nil {
+		return err
+	}
+	if offset <= index.offset {
+		return fmt.Errorf("%w: offset %d after index offset %d", ErrOffsetNotIncreasing, offset, index.offset)
+	}
+	index.offset = offset
+	index.checkInvariantsLocked()
+	return nil
 }
 
 // CompareWithSnapshot compares the live index with a snapshot read at the index offset.
@@ -174,11 +197,25 @@ func (index *CoreContractIndex) applyBootstrapSnapshot(offset int64, contracts [
 	}
 	index.offset = offset
 	index.lifecycle = indexLifecycleLive
-	if len(index.contractsByID) != len(contracts) {
+	expectedLiveContractCount := len(contracts)
+	if index.replayNodesDroppedAtByteCap {
+		expectedLiveContractCount = countSingletonContracts(contracts)
+	}
+	if len(index.contractsByID) != expectedLiveContractCount {
 		panic("cantondisclosure: bootstrap live contract count differs from the snapshot")
 	}
 	index.checkInvariantsLocked()
 	return nil
+}
+
+func countSingletonContracts(contracts []IndexedCoreContract) int {
+	singletonCount := 0
+	for _, contract := range contracts {
+		if isSingletonTemplate(contract.template) {
+			singletonCount++
+		}
+	}
+	return singletonCount
 }
 
 func (index *CoreContractIndex) applyTransactionUpdates(offset int64, updates []coreContractIndexUpdate) error {
@@ -220,27 +257,41 @@ func (index *CoreContractIndex) checkAcceptsTransactionsLocked() error {
 		return ErrIndexNotBootstrapped
 	case indexLifecycleLive:
 		return nil
-	case indexLifecycleByteCapReached, indexLifecycleInconsistent:
+	case indexLifecycleInconsistent:
 		return IndexNotReadyError{Readiness: index.readinessLocked()}
 	default:
 		panic(fmt.Sprintf("cantondisclosure: unknown index lifecycle %d", int(index.lifecycle)))
 	}
 }
 
-// insertContractLocked refuses a live contract id or an entry above the byte cap, and then makes the index terminal.
+// insertContractLocked refuses a live contract id and makes the index terminal.
+// A ReplayNode create at the byte cap drops every ReplayNode. A singleton create
+// at the byte cap drops every ReplayNode, and makes the index terminal if it still does not fit.
 func (index *CoreContractIndex) insertContractLocked(contract IndexedCoreContract) error {
 	if _, isLive := index.contractsByID[contract.contractID]; isLive {
 		index.lifecycle = indexLifecycleInconsistent
 		return fmt.Errorf("%w: %s %s", ErrDuplicateCreate, contract.template, contract.contractID)
 	}
+	location, isReplayNode := contract.replayNodeLocationOf()
+	if isReplayNode && index.replayNodesDroppedAtByteCap {
+		index.droppedReplayNodeUpdateCount++
+		return nil
+	}
 	entryBytes := contract.indexEntryByteCount()
 	if entryBytes > index.byteCapBytes-index.usedBytes {
-		index.lifecycle = indexLifecycleByteCapReached
-		return ByteCapExceededError{UsedBytes: index.usedBytes, EntryBytes: entryBytes, CapBytes: index.byteCapBytes}
+		index.dropReplayNodesLocked()
+		if isReplayNode {
+			index.droppedReplayNodeUpdateCount++
+			return nil
+		}
+		if entryBytes > index.byteCapBytes-index.usedBytes {
+			index.lifecycle = indexLifecycleInconsistent
+			return ByteCapExceededError{UsedBytes: index.usedBytes, EntryBytes: entryBytes, CapBytes: index.byteCapBytes}
+		}
 	}
 	index.contractsByID[contract.contractID] = contract
 	index.usedBytes += entryBytes
-	if location, isReplayNode := contract.replayNodeLocationOf(); isReplayNode {
+	if isReplayNode {
 		index.replayNodeContractIDsByLocation[location] = append(index.replayNodeContractIDsByLocation[location], contract.contractID)
 		index.liveReplayNodeCount++
 	} else {
@@ -252,11 +303,37 @@ func (index *CoreContractIndex) insertContractLocked(contract IndexedCoreContrac
 	return nil
 }
 
+// dropReplayNodesLocked removes every live ReplayNode and stops ReplayNode tracking until a rebuild.
+func (index *CoreContractIndex) dropReplayNodesLocked() {
+	droppedContractCount := 0
+	for contractID, contract := range index.contractsByID {
+		if _, isReplayNode := contract.replayNodeLocationOf(); !isReplayNode {
+			continue
+		}
+		delete(index.contractsByID, contractID)
+		index.usedBytes -= contract.indexEntryByteCount()
+		droppedContractCount++
+	}
+	if droppedContractCount != index.liveReplayNodeCount {
+		panic(fmt.Sprintf("cantondisclosure: dropped %d replay nodes, but %d were live", droppedContractCount, index.liveReplayNodeCount))
+	}
+	clear(index.replayNodeContractIDsByLocation)
+	index.liveReplayNodeCount = 0
+	index.replayNodesDroppedAtByteCap = true
+	if index.usedBytes < 0 {
+		panic("cantondisclosure: used bytes are negative after dropping the replay nodes")
+	}
+}
+
 // removeArchivedContractLocked matches by contract id. An unknown contract id is counted and ignored:
 // the index serves only the contracts it holds, and the snapshot comparison reports any drift.
 func (index *CoreContractIndex) removeArchivedContractLocked(archived archivedCoreContract) error {
 	contract, isLive := index.contractsByID[archived.contractID]
 	if !isLive {
+		if index.replayNodesDroppedAtByteCap && archived.template == cantonclient.CoreContractTemplateReplayNode {
+			index.droppedReplayNodeUpdateCount++
+			return nil
+		}
 		index.ignoredUnknownArchiveCount++
 		return nil
 	}
@@ -310,14 +387,26 @@ func (index *CoreContractIndex) checkInvariantsLocked() {
 	if len(index.singletonContractIDsByTemplate) != len(singletonTemplates) {
 		panic("cantondisclosure: singleton template set changed")
 	}
+	if index.replayNodesDroppedAtByteCap && index.liveReplayNodeCount != 0 {
+		panic("cantondisclosure: replay nodes are live after the index dropped them")
+	}
+}
+
+// checkUsedBytesMatchLiveContractsLocked recomputes the used bytes from every live entry.
+func (index *CoreContractIndex) checkUsedBytesMatchLiveContractsLocked() {
+	recomputedUsedBytes := int64(0)
+	for _, contract := range index.contractsByID {
+		recomputedUsedBytes += contract.indexEntryByteCount()
+	}
+	if recomputedUsedBytes != index.usedBytes {
+		panic(fmt.Sprintf("cantondisclosure: used bytes %d, but the live entries sum to %d", index.usedBytes, recomputedUsedBytes))
+	}
 }
 
 func (index *CoreContractIndex) readinessLocked() IndexReadiness {
 	switch index.lifecycle {
 	case indexLifecycleAwaitingBootstrap:
 		return IndexReadinessBootstrapping
-	case indexLifecycleByteCapReached:
-		return IndexReadinessByteCapReached
 	case indexLifecycleInconsistent:
 		return IndexReadinessInconsistent
 	case indexLifecycleLive:
@@ -337,15 +426,26 @@ func (index *CoreContractIndex) readinessLocked() IndexReadiness {
 	if hasMissingSingleton {
 		return IndexReadinessSingletonMissing
 	}
+	if index.replayNodesDroppedAtByteCap {
+		return IndexReadinessByteCapReached
+	}
 	if index.usedBytes*100 >= index.byteCapBytes*byteCapWarningPercent {
 		return IndexReadinessReadyNearByteCap
 	}
 	return IndexReadinessReady
 }
 
-func (index *CoreContractIndex) checkServesLookupsLocked() error {
+func (index *CoreContractIndex) checkServesSingletonLookupsLocked() error {
 	readiness := index.readinessLocked()
-	if !readiness.ServesLookups() {
+	if !readiness.ServesSingletonLookups() {
+		return IndexNotReadyError{Readiness: readiness}
+	}
+	return nil
+}
+
+func (index *CoreContractIndex) checkServesReplayNodeLookupsLocked() error {
+	readiness := index.readinessLocked()
+	if !readiness.ServesReplayNodeLookups() {
 		return IndexNotReadyError{Readiness: readiness}
 	}
 	return nil
@@ -356,13 +456,15 @@ func (index *CoreContractIndex) Status() IndexStatus {
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
 	return IndexStatus{
-		Readiness:                  index.readinessLocked(),
-		Offset:                     index.offset,
-		UsedBytes:                  index.usedBytes,
-		ByteCapBytes:               index.byteCapBytes,
-		LiveContractCount:          len(index.contractsByID),
-		LiveReplayNodeCount:        index.liveReplayNodeCount,
-		IgnoredUnknownArchiveCount: index.ignoredUnknownArchiveCount,
+		Readiness:                    index.readinessLocked(),
+		Offset:                       index.offset,
+		UsedBytes:                    index.usedBytes,
+		ByteCapBytes:                 index.byteCapBytes,
+		LiveContractCount:            len(index.contractsByID),
+		LiveReplayNodeCount:          index.liveReplayNodeCount,
+		IgnoredUnknownArchiveCount:   index.ignoredUnknownArchiveCount,
+		ReplayNodesDroppedAtByteCap:  index.replayNodesDroppedAtByteCap,
+		DroppedReplayNodeUpdateCount: index.droppedReplayNodeUpdateCount,
 	}
 }
 
@@ -373,7 +475,7 @@ func (index *CoreContractIndex) LookupSingleton(template cantonclient.CoreContra
 	}
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
-	if err := index.checkServesLookupsLocked(); err != nil {
+	if err := index.checkServesSingletonLookupsLocked(); err != nil {
 		return CoreContractLookupResult{}, err
 	}
 	contractIDs := index.singletonContractIDsByTemplate[template]
@@ -393,7 +495,7 @@ func (index *CoreContractIndex) LookupCoveringReplayNode(consumer cantonclient.P
 	}
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
-	if err := index.checkServesLookupsLocked(); err != nil {
+	if err := index.checkServesReplayNodeLookupsLocked(); err != nil {
 		return CoreContractLookupResult{}, err
 	}
 	return index.lookupCoveringReplayNodeLocked(consumer, namespace, digest)
@@ -415,7 +517,7 @@ func (index *CoreContractIndex) LookupClaimedRootsNode(consumer cantonclient.Par
 	pairDigest := ClaimedRootDigest(consumer, namespace)
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
-	if err := index.checkServesLookupsLocked(); err != nil {
+	if err := index.checkServesReplayNodeLookupsLocked(); err != nil {
 		return CoreContractLookupResult{}, err
 	}
 	return index.lookupCoveringReplayNodeLocked(index.guardianGovernance, claimedRootsReplayNamespace, pairDigest)
@@ -477,8 +579,12 @@ func (index *CoreContractIndex) compareWithIndexedSnapshot(snapshotOffset int64,
 	if index.lifecycle == indexLifecycleAwaitingBootstrap {
 		return SnapshotComparison{}, ErrIndexNotBootstrapped
 	}
+	if index.replayNodesDroppedAtByteCap {
+		return SnapshotComparison{}, ErrReplayNodesDroppedAtByteCap
+	}
 	if snapshotOffset != index.offset {
 		return SnapshotComparison{}, fmt.Errorf("%w: snapshot offset %d, index offset %d", ErrSnapshotOffsetMismatch, snapshotOffset, index.offset)
 	}
+	index.checkUsedBytesMatchLiveContractsLocked()
 	return compareSnapshotWithLiveContracts(snapshotOffset, snapshot, index.contractsByID)
 }

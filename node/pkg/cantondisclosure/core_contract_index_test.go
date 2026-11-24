@@ -487,16 +487,17 @@ func TestByteCapBoundaries(t *testing.T) {
 			require.Equal(t, testCase.expectedReadiness, status.Readiness)
 			lookupResult, lookupErr := index.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
 			if testCase.expectRefused {
-				require.ErrorIs(t, err, ErrByteCapExceeded)
-				var exceeded ByteCapExceededError
-				require.ErrorAs(t, err, &exceeded)
-				require.Equal(t, genesisUsedBytes, exceeded.UsedBytes)
-				require.Equal(t, blobByteCount+indexEntryOverheadBytes, exceeded.EntryBytes)
-				require.Equal(t, byteCapBytes, exceeded.CapBytes)
+				require.NoError(t, err)
 				require.Equal(t, genesisUsedBytes, status.UsedBytes)
+				require.Equal(t, 0, status.LiveReplayNodeCount)
+				require.True(t, status.ReplayNodesDroppedAtByteCap)
+				require.Equal(t, uint64(1), status.DroppedReplayNodeUpdateCount)
 				requireIndexNotReady(t, lookupErr, IndexReadinessByteCapReached)
-				err = index.applyTransactionUpdates(12, []coreContractIndexUpdate{archivedIndexUpdate(node)})
-				requireIndexNotReady(t, err, IndexReadinessByteCapReached)
+				_, singletonErr := index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+				require.NoError(t, singletonErr)
+				require.NoError(t, index.applyTransactionUpdates(12, []coreContractIndexUpdate{archivedIndexUpdate(node)}))
+				require.Equal(t, uint64(2), index.Status().DroppedReplayNodeUpdateCount)
+				require.Equal(t, uint64(0), index.Status().IgnoredUnknownArchiveCount)
 				return
 			}
 			require.NoError(t, err)
@@ -507,13 +508,13 @@ func TestByteCapBoundaries(t *testing.T) {
 	}
 }
 
-func TestBootstrapSnapshotAboveByteCap(t *testing.T) {
+func TestBootstrapSingletonsAboveByteCapMakeIndexInconsistent(t *testing.T) {
 	index := newTestIndex(t, genesisUsedBytes-1)
 	err := index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t))
 	require.ErrorIs(t, err, ErrByteCapExceeded)
-	require.Equal(t, IndexReadinessByteCapReached, index.Status().Readiness)
+	require.Equal(t, IndexReadinessInconsistent, index.Status().Readiness)
 	_, err = index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
-	requireIndexNotReady(t, err, IndexReadinessByteCapReached)
+	requireIndexNotReady(t, err, IndexReadinessInconsistent)
 }
 
 func TestArchiveReleasesBytes(t *testing.T) {
