@@ -267,7 +267,7 @@ func (reader *grpcCoreContractReader) SubscribeCoreContractUpdates(ctx context.C
 			}
 			advance, advances, err := reader.decoder.decodeUpdatesResponse(response, previousOffset)
 			if err != nil {
-				subscription.Fail(fmt.Errorf("GetUpdates: %w", err))
+				subscription.Fail(fmt.Errorf("GetUpdates: %w: %w", ErrCoreContractStreamDecode, err))
 				return
 			}
 			if !advances {
@@ -309,6 +309,10 @@ func (decoder coreContractDecoder) decodeUpdatesResponse(response *apiv2.GetUpda
 		return CoreContractLedgerAdvance{}, false, fmt.Errorf("unexpected update %T after offset %d", update, previousOffset)
 	}
 }
+
+// ErrCoreContractStreamDecode wraps a SubscribeCoreContractUpdates failure on an update that the decoder refuses.
+// A reconnect from the same offset receives the same update.
+var ErrCoreContractStreamDecode = errors.New("cantonclient: core contract update refused by the decoder")
 
 // prunedDataAccessedErrorID is the Canton error id of a read below the pruning offset (state_service.proto).
 const prunedDataAccessedErrorID = "PARTICIPANT_PRUNED_DATA_ACCESSED"

@@ -267,6 +267,7 @@ func TestSubscribeCoreContractUpdatesDeliversOneAdvancePerTransaction(t *testing
 	)
 	require.ErrorContains(t, streamErr, "GetUpdates stream ended")
 	require.ErrorIs(t, streamErr, io.EOF)
+	require.NotErrorIs(t, streamErr, ErrCoreContractStreamDecode)
 
 	assert.Equal(t, int64(4), request.GetBeginExclusive())
 	assert.Nil(t, request.EndInclusive)
@@ -416,6 +417,7 @@ func TestSubscribeCoreContractUpdatesRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			advances, streamErr, _ := subscribeAndCollectCoreUpdates(t, 4, validFirst, tc.second)
 			require.ErrorContains(t, streamErr, tc.wantErr)
+			require.ErrorIs(t, streamErr, ErrCoreContractStreamDecode)
 			require.Len(t, advances, 1)
 			assert.Equal(t, int64(5), advances[0].Offset())
 		})
@@ -489,4 +491,33 @@ func TestSubscribeCoreContractUpdatesStopsOnCancellationWhileBlocked(t *testing.
 	assert.Equal(t, int64(5), first.Offset())
 	assert.Len(t, first.Updates(), 2)
 	assert.Empty(t, out)
+}
+
+func TestSubscribeCoreContractUpdatesBoundsTheUpdatesOfOneTransaction(t *testing.T) {
+	cases := []struct {
+		name          string
+		eventCount    int
+		expectRefused bool
+	}{
+		{name: "maximum", eventCount: maxCoreContractUpdatesPerTransaction},
+		{name: "maximum plus one", eventCount: maxCoreContractUpdatesPerTransaction + 1, expectRefused: true},
+	}
+	require.Equal(t, 65536, maxCoreContractUpdatesPerTransaction)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make([]*apiv2.Event, 0, tc.eventCount)
+			for eventIndex := 0; eventIndex < tc.eventCount; eventIndex++ {
+				events = append(events, archivedLedgerEvent(archivedCoreEvent(CoreContractTemplateReplayNode, 5, testCoreContractIDHex)))
+			}
+			advance, advances, err := testCoreContractDecoder(t).decodeUpdatesResponse(coreTransaction(5, events...), 4)
+			if tc.expectRefused {
+				require.ErrorContains(t, err, "65537 core contract updates")
+				require.False(t, advances)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, advances)
+			require.Len(t, advance.Updates(), tc.eventCount)
+		})
+	}
 }
