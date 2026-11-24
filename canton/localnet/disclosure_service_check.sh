@@ -667,6 +667,9 @@ measure_idle_lag() {
     '. + {measuredSeconds: $seconds, indexOffsetAdvance: ($last.indexOffset - $first.indexOffset)}')"
   write_evidence_json "idle-lag-$name.json" "$summary"
   echo "idle lag $name: $summary"
+  summary="$(jq -c --slurpfile samples "$samples_file" '. + {minLagSeconds: ([$samples[].lagSeconds] | min)}' <<<"$summary")"
+  check_or_record D7 "$name: the lag gauge is present at each sample and the index offset advanced $(jq -r .indexOffsetAdvance <<<"$summary") offsets by checkpoints" \
+    check_json_matches '.minLagSeconds >= 0 and .indexOffsetAdvance > 0' "$summary"
   if check_idle_lag_summary "$summary" $((IDLE_LAG_SECONDS / IDLE_LAG_SAMPLE_SECONDS)) "$LEDGER_LAG_BOUND_SECONDS"; then
     record_check D7 PASS "$name: ${IDLE_LAG_SECONDS}s without core traffic, /v1/readyz 200 at each sample, largest lag $(jq -r .maxLagSeconds <<<"$summary")s below ${LEDGER_LAG_BOUND_SECONDS}s" "$summary"
   else
@@ -722,6 +725,31 @@ check_core_package_count() {
   else
     record_check D7 NOT_TESTED "package upgrade: $approved_count approved core packages; the suite has no upgrade step"
   fi
+}
+
+# measure_replay_node_blob_sizes: createdEventBlob bytes of each active ReplayNode of guardianGovernance on sv, with the
+# size of its consumed set. Writes replay-node-blob-sizes.json. The intercept of the least-squares line is the fixed
+# bytes per node.
+measure_replay_node_blob_sizes() {
+  local rows_file node_events summary
+  rows_file="$gg_work_dir/replay-node-blob-sizes.jsonl"
+  : > "$rows_file"
+  node_events="$(active_contracts_with_blobs "$SUBMITTING_VALIDATOR" "$GG_PARTY" "$REPLAY_NODE_SUFFIX")"
+  while IFS=$'\t' read -r consumed_count namespace blob; do
+    jq -cn --argjson consumed "$consumed_count" --arg namespace "$namespace" \
+      --argjson bytes "$(printf '%s' "$blob" | base64 -d | wc -c | tr -d ' ')" \
+      '{consumedCount: $consumed, namespaceBytes: ($namespace | utf8bytelength), blobBytes: $bytes}' >> "$rows_file"
+  done < <(jq -r '.[] | [(.createArgument.consumed | if type == "object" then (.map | length) else length end),
+    .createArgument.namespace, .createdEventBlob] | @tsv' <<<"$node_events")
+  summary="$(jq -sc '(map(.blobBytes) | sort) as $sizes | (length) as $count
+    | (map(.consumedCount) | add / $count) as $meanConsumed | (map(.blobBytes) | add / $count) as $meanBytes
+    | (map((.consumedCount - $meanConsumed) * (.consumedCount - $meanConsumed)) | add) as $consumedVariance
+    | (if $consumedVariance > 0 then (map((.consumedCount - $meanConsumed) * (.blobBytes - $meanBytes)) | add) / $consumedVariance else null end) as $slope
+    | {nodeCount: $count, minBlobBytes: $sizes[0], medianBlobBytes: $sizes[($count / 2 | floor)], maxBlobBytes: $sizes[-1],
+       bytesPerConsumedDigest: $slope, fixedBytesPerNode: (if $slope == null then null else $meanBytes - $slope * $meanConsumed end),
+       rows: .}' "$rows_file")"
+  write_evidence_json replay-node-blob-sizes.json "$summary"
+  record_check D7 OBSERVED "ReplayNode createdEventBlob bytes: $(jq -c 'del(.rows)' <<<"$summary")" "$(jq -c 'del(.rows)' <<<"$summary")"
 }
 
 # --- D8, D9 ---
@@ -859,6 +887,7 @@ run_check() {
   measure_idle_lag sv-main
   check_resnapshots_match sv-main
   check_core_package_count
+  measure_replay_node_blob_sizes
 
   echo "== D8. Restart"
   check_restart_serves_same_answers || true
