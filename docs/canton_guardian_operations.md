@@ -1247,6 +1247,8 @@ To serve disclosures from a guardian participant:
 3. Give the `templateId`, `contractId`, `createdEventBlob` and `synchronizerId` of each contract to the submitter.
 4. Do not give a submitter a token of this user.
 
+The command `guardiand canton-disclosure-service` does steps 2 and 3 over HTTP (Section 7.12).
+
 A disclosure gives visibility only. It gives no authority.
 A stale disclosure fails the transaction. It cannot make a wrong transaction commit.
 
@@ -1277,6 +1279,90 @@ Before you sign a registration VAA:
 5. Compare your binding with the binding in the VAA payload. Sign the VAA only if the two values are equal.
 
 Do not copy `rootIdentity` from the request. Read it from your own participant.
+
+### 7.12 Disclosure service
+
+The command `guardiand canton-disclosure-service` serves the core disclosures of Section 7.10 over HTTP.
+It reads your participant as `gg`, keeps an in-memory index, and serves the routes of `canton/README.md` §4.7.
+The Guardians choose who runs the public instance.
+Each guardian can also run an instance for its own submitters.
+
+The ledger checks each disclosure. A wrong or stale disclosure makes the transaction fail.
+Thus the service affects liveness only.
+
+#### 7.12.1 Flags
+
+| Flag | Value |
+| - | - |
+| `--cantonRPC` | Mandatory. gRPC endpoint of the Ledger API v2 of your participant (`host:port`). |
+| `--cantonReadAsParty` | Mandatory. The `guardianGovernance` party ID. |
+| `--cantonAuthTokenURL` | OAuth2 token endpoint. Use an absolute `https` URL. |
+| `--cantonAuthClientID` | OAuth2 client ID. Put the secret in the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
+| `--cantonAuthAudience` | Optional. The same value as for the watcher (Section 8). |
+| `--unsafePlaintext` | Local sandbox only. OAuth2 cannot use it. |
+| `--listenAddress` | Mandatory. HTTP listen address of the routes (`host:port`). |
+| `--statusAddr` | Listen address of `/metrics`. The default is `127.0.0.1:6061`. An empty value disables it. |
+| `--indexByteCapBytes` | Byte cap of the index. The default is 4 GiB. |
+| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 1 minute. |
+| `--resnapshotInterval` | Interval of the snapshot comparison, from 1 minute to 168 hours. The default is 1 hour. |
+
+The command refuses to start if a flag is not valid.
+It uses the same checks as the watcher for TLS, OAuth2 and the party ID.
+It accepts only the core package IDs of the approved list in `guardiand`.
+It stops on `SIGINT` or `SIGTERM`, and completes the requests in progress for up to 10 seconds.
+
+Use a Ledger API user that has only the right `CanReadAs` for `gg` (Section 7.10).
+
+#### 7.12.2 Edge proxy
+
+The service serves plain HTTP. Its request limit applies to all clients together. Put an edge proxy in front of it.
+
+1. End the TLS connections at the proxy.
+2. Set a request rate limit for each client address.
+3. Send only `GET` requests for paths that start with `/v1/` to `--listenAddress`.
+4. Set a request timeout of 10 seconds or less.
+5. Do not send requests to `--statusAddr` through the proxy.
+6. Use `GET /v1/readyz` for the health check of the proxy.
+
+The service also has its own limits:
+
+- At most 256 lookups at the same time. Each lookup above this limit gets 503.
+- A request URI of at most 4096 bytes, and headers of at most 16 KiB.
+- Read timeout 10 seconds, write timeout 10 seconds, idle timeout 60 seconds.
+
+#### 7.12.3 Readiness and memory
+
+`GET /v1/readyz` gives 200 when the service can serve current disclosures. The `status` field shows the cause of a 503:
+
+| Status | Meaning |
+| - | - |
+| `bootstrapping` | The first snapshot is not complete. |
+| `stream_disconnected` | The update stream is not connected. |
+| `ledger_lag_above_bound` | The index is behind the ledger end for more than `--ledgerLagBound`. |
+| `index_singleton_missing` | A singleton has no live instance. |
+| `index_singleton_conflict` | A singleton has two or more live instances. |
+| `index_inconsistent` | The index refused an update. The service builds a new index. |
+
+The status `ready_byte_cap_reached` gives 200. In this state, the service serves the singletons only.
+`/v1/replay-node` and `/v1/claimed-roots-node` give 503.
+At each `--resnapshotInterval`, the service builds a new index and tries again.
+To serve the nodes again, increase `--indexByteCapBytes`.
+
+The index uses the blob bytes plus 1536 bytes for each contract.
+During a rebuild, the old index, the snapshot and the new index are in memory together.
+Thus the peak memory is about 3 times the used bytes of the index.
+
+#### 7.12.4 Monitoring
+
+| Metric | Alert condition |
+| - | - |
+| `wormhole_canton_disclosure_index_readiness{readiness="byte_cap_reached"}` | The value is 1. |
+| `wormhole_canton_disclosure_index_used_bytes` | The value is more than 80 % of `wormhole_canton_disclosure_index_byte_cap_bytes`. |
+| `wormhole_canton_disclosure_ledger_lag_seconds` | The value is more than `--ledgerLagBound`. |
+| `wormhole_canton_disclosure_stream_connected` | The value is 0 for 1 minute. |
+| `wormhole_canton_disclosure_index_rebuilds_total` | The value increases. The `reason` label shows the cause. |
+| `wormhole_canton_disclosure_resnapshot_differences_total` | The value increases. The `kind` label shows the difference. |
+| `wormhole_canton_disclosure_index_ignored_unknown_archives` | The value increases. |
 
 ## 8. Watcher configuration
 

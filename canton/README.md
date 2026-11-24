@@ -530,7 +530,9 @@ needs `CoreState` explicitly disclosed to reference it at all, via Daml's
 [Explicit Contract
 Disclosure](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html)
 feature — a data attachment, not a signature — servable by any party with read
-access. In Daml Script, `submitWithDisclosures` is the idiom. Proven both
+access. The command `guardiand canton-disclosure-service` serves the `CoreState`
+disclosure at `GET /v1/core-state` (§4.7).
+In Daml Script, `submitWithDisclosures` is the idiom. Proven both
 in-memory
 (`test/daml/Test/TestCore.daml:testParseAndVerifyVAAByExternalVerifier`) and
 against a live sandbox/participant
@@ -752,9 +754,13 @@ Properties:
 - **Cost.** `defaultSplitThreshold = 128`: suffixes are ≤64-char hex (~66 B
   serialized), so nodes top out ~8.5 KB, the average consume rewrites ~4 KB,
   and the split transaction redistributes the same bytes across 16 creates
-  (~15 KB) — all far below Canton's request caps. Total ACS bytes stay ~66 B
-  per digest; 10 M digests ≈ 150 k nodes at depth 3–4. Larger thresholds thin
-  the ACS but amplify every write.
+  (~15 KB) — all far below Canton's request caps. Digests are uniform, so a
+  node at depth d holds about N / 16^d of N digests. For N = 10 M, a depth-4
+  node holds about 10 M / 65 536 ≈ 153 digests. This is more than 128, thus
+  each depth-4 node splits. The trie then has about 16^5 ≈ 1.05 M live leaf
+  nodes at depth 5, with about 10 digests each. The ACS bytes are about 66 B
+  per digest plus the fixed bytes of each node. Larger thresholds thin the
+  ACS but amplify every write.
 - **Privacy.** Nodes are integrator-private safety state, outside the guardian
   view (§4.1): target-chain consumption is the integrator's concern, and the
   attestation surface is `CoreState` and `Emitter`.
@@ -804,10 +810,11 @@ the covering node's cid plus its explicit disclosure — alongside the
 `CoreState` disclosure it already serves (§4.3). It is **untrusted for
 safety**: the worst it can do is serve a wrong or stale node, which fails the
 transaction. It is trusted for _liveness_ only, like any RPC endpoint. §4.7
-aggregates every resolution the service must provide. (Go implementation is
-future work; the Daml tests simulate it with a script helper,
-`Test.TestReplay.coveringNode`, which also asserts the partition invariant on
-every use.)
+aggregates every resolution the service must provide.
+The command `guardiand canton-disclosure-service` serves the covering node at
+`GET /v1/replay-node` and the claimed-roots node at `GET /v1/claimed-roots-node` (§4.7).
+The Daml tests simulate the service with the script helper
+`Test.TestReplay.coveringNode`. This helper also asserts the partition invariant on each use.
 
 **Integrating — direct and user-submitted.** The executable reference is
 [`test/daml/Test/ExampleIntegrator.daml`](test/daml/Test/ExampleIntegrator.daml)
@@ -876,10 +883,75 @@ Two properties make this safe to outsource:
   serving participant. The onboarding fee admin is not an observer: it gets the
   registry disclosure from a guardian participant.
 
-Concrete implementation (interface: `(template, index) → (cid,
-created_event_blob)` over the state-service ACS plus the update stream) is
-future work; the Daml tests simulate it with `Test.TestReplay.coveringNode` /
-`queryDisclosure`.
+**Implementation: `guardiand canton-disclosure-service`.** The command reads the
+Ledger API of a guardian participant as `guardianGovernance`. It keeps an
+in-memory index of the live `CoreState`, `EmitterRegistry`,
+`ReplayRootRegistry` and `ReplayNode` contracts, with their created event
+blobs. The Daml tests simulate the service with `Test.TestReplay.coveringNode`
+and `queryDisclosure`.
+
+The index operates as follows:
+
+1. At start, the index reads the ledger end. Then it reads the active core contracts at that offset (`StateService.GetActiveContracts`).
+2. The index follows `UpdateService.GetUpdates` (ACS delta) from that offset. It applies each transaction in one step. An offset checkpoint moves the index offset without a change.
+3. After a stream error, the index connects again from its offset, with a bounded number of attempts.
+4. The index builds a new index from a new snapshot, and then replaces the old index in one step, after one of these events:
+   - The index becomes inconsistent.
+   - The participant pruned the offset (`FAILED_PRECONDITION`, `PARTICIPANT_PRUNED_DATA_ACCESSED`).
+   - The decoder refuses an update.
+   - The connection attempts stop.
+   - A periodic snapshot finds a contract that is missing from the index, or a contract that is stale in the index.
+5. The index accepts only the package IDs of the approved list in `guardiand`.
+
+All routes accept `GET` only:
+
+| Route | Contract |
+| - | - |
+| `GET /v1/core-state` | The one live `CoreState` |
+| `GET /v1/emitter-registry` | The one live `EmitterRegistry` |
+| `GET /v1/replay-root-registry` | The one live `ReplayRootRegistry` |
+| `GET /v1/replay-node?consumer=&namespace=&digest=` | The live `ReplayNode` of the (consumer, namespace) trie that covers the digest |
+| `GET /v1/claimed-roots-node?consumer=&namespace=` | The live node of the claimed-roots tree that covers `claimedRootDigest consumer namespace` |
+| `GET /v1/healthz` | Liveness |
+| `GET /v1/readyz` | Readiness |
+
+Each lookup returns this JSON object:
+
+```json
+{
+  "templateId": "<package id>:<module>:<entity>",
+  "contractId": "<hex>",
+  "createdEventBlob": "<base64>",
+  "synchronizerId": "<synchronizer id>",
+  "activeAtOffset": 123
+}
+```
+
+The contract is active at the participant offset `activeAtOffset`.
+The service parses each parameter strictly:
+
+- `consumer` is a party ID, `<hint>::1220` followed by 64 lowercase hexadecimal characters.
+- `namespace` has 1 to 128 code points.
+- `digest` has exactly 64 lowercase hexadecimal characters.
+
+An unknown parameter, a repeated parameter or a request body gives 400.
+An error body is `{"error": "<fixed message>", "requestId": "<id>"}`. It contains no internal detail.
+If no live node covers the digest, the answer is 404.
+If the index is not ready, the answer is 503.
+
+`/v1/readyz` gives 200 only when all of these conditions are true:
+
+- The bootstrap is complete.
+- The service has a connection to the update stream.
+- The ledger lag is not more than `--ledgerLagBound`.
+- The index is consistent, and it has exactly one live instance of each singleton.
+
+The index has a byte cap (`--indexByteCapBytes`, default 4 GiB). The cap applies to the blob bytes plus 1536 bytes for each contract.
+When a create reaches the cap, the index removes each `ReplayNode`. It continues to serve the three singletons.
+`/v1/replay-node` and `/v1/claimed-roots-node` then give 503.
+`/v1/readyz` gives 200 with the status `ready_byte_cap_reached`.
+At each `--resnapshotInterval`, the service builds a new index, and serves the nodes again if they fit.
+The flags and the operation behind an edge proxy are in [`docs/canton_guardian_operations.md`](../docs/canton_guardian_operations.md) §7.12.
 
 ---
 

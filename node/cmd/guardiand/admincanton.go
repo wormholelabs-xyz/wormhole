@@ -131,16 +131,16 @@ func listCantonPublishes(ctx context.Context, client cantonclient.CantonClient, 
 	return listing, nil
 }
 
-// cantonListPublishesOAuthFlags are the raw OAuth inputs of canton-list-publishes.
-type cantonListPublishesOAuthFlags struct {
+// cantonOAuthFlags are the raw OAuth inputs of canton-list-publishes and canton-disclosure-service.
+type cantonOAuthFlags struct {
 	tokenURL     string
 	clientID     string
 	clientSecret string
 	audience     string
 }
 
-// cantonListPublishesOAuthCredentials returns nil when every OAuth input is empty.
-func cantonListPublishesOAuthCredentials(oauthFlags cantonListPublishesOAuthFlags, unsafePlaintext bool) (*cantonclient.OAuthClientCredentials, error) {
+// parseCantonOAuthClientCredentials returns nil when every OAuth input is empty.
+func parseCantonOAuthClientCredentials(oauthFlags cantonOAuthFlags, unsafePlaintext bool) (*cantonclient.OAuthClientCredentials, error) {
 	audience, err := cantonclient.ParseOAuthAudience(oauthFlags.audience)
 	if err != nil {
 		return nil, fmt.Errorf("--cantonAuthAudience: %w", err)
@@ -182,7 +182,7 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 	if *cantonListPublishesPlaintext {
 		transportCreds = insecure.NewCredentials()
 	}
-	oauthClientCredentials, err := cantonListPublishesOAuthCredentials(cantonListPublishesOAuthFlags{
+	oauthClientCredentials, err := parseCantonOAuthClientCredentials(cantonOAuthFlags{
 		tokenURL:     *cantonListPublishesAuthTokenURL,
 		clientID:     *cantonListPublishesAuthClientID,
 		clientSecret: os.Getenv("GUARDIAND_CANTONAUTHCLIENTSECRET"),
