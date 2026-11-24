@@ -53,7 +53,8 @@ readonly LOOKUP_CATCH_UP_POLLS=120
 readonly LOOKUP_CATCH_UP_POLL_SECONDS=0.5
 readonly RESNAPSHOT_INTERVAL="1m"
 readonly RESNAPSHOT_INTERVAL_SECONDS=60
-readonly LEDGER_LAG_BOUND_SECONDS=60
+# DefaultLedgerLagBound of node/pkg/cantondisclosure. The suite runs the service with its default bound.
+readonly LEDGER_LAG_BOUND_SECONDS=180
 # Wormhole.Core.Replay.defaultSplitThreshold: the 129th consume in one namespace splits the root.
 readonly REPLAY_SPLIT_THRESHOLD=128
 readonly CONSUMES_AFTER_SPLIT=8
@@ -239,7 +240,6 @@ start_service_instance() {
     --unsafePlaintext \
     --listenAddress "127.0.0.1:$((SERVICE_LISTEN_PORT_BASE + instance_index))" \
     --statusAddr "127.0.0.1:$((SERVICE_STATUS_PORT_BASE + instance_index))" \
-    --ledgerLagBound "${LEDGER_LAG_BOUND_SECONDS}s" \
     --resnapshotInterval "$RESNAPSHOT_INTERVAL" \
     "$@" >> "$(service_log_of "$name")" 2>&1 &
   service_pid=$!
