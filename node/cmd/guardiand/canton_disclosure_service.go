@@ -99,6 +99,7 @@ type cantonDisclosureServiceConfig struct {
 	indexByteCapBytes      int64
 	ledgerLagBound         time.Duration
 	resnapshotInterval     time.Duration
+	writerTiming           cantondisclosure.IndexWriterTiming
 	logLevel               zapcore.Level
 }
 
@@ -166,6 +167,7 @@ func parseCantonDisclosureServiceFlags(flags cantonDisclosureServiceFlags) (cant
 		indexByteCapBytes:      flags.indexByteCapBytes,
 		ledgerLagBound:         flags.ledgerLagBound,
 		resnapshotInterval:     flags.resnapshotInterval,
+		writerTiming:           cantondisclosure.ProductionIndexWriterTiming(flags.resnapshotInterval),
 		logLevel:               logLevel,
 	}, nil
 }
@@ -244,7 +246,8 @@ func newCantonDisclosureComponents(config cantonDisclosureServiceConfig, reader 
 	if err != nil {
 		return nil, nil, err
 	}
-	writer, err := cantondisclosure.NewCoreContractIndexWriter(reader, served, config.guardianGovernance, config.indexByteCapBytes, cantondisclosure.ProductionIndexWriterTiming(config.resnapshotInterval), logger)
+	served.ExportMetrics()
+	writer, err := cantondisclosure.NewCoreContractIndexWriter(reader, served, config.guardianGovernance, config.indexByteCapBytes, config.writerTiming, logger)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -155,8 +155,7 @@ func (index *CoreContractIndex) ApplyTransaction(offset int64, updates []cantonc
 	return index.applyTransactionUpdates(offset, indexUpdates)
 }
 
-// AdvanceOffset moves the index offset to offset without an update: an offset
-// checkpoint, or a transaction without core contract events.
+// AdvanceOffset moves the index offset to an offset checkpoint. The stream refuses a transaction without core contract events.
 func (index *CoreContractIndex) AdvanceOffset(offset int64) error {
 	index.mutex.Lock()
 	defer index.mutex.Unlock()

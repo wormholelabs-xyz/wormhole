@@ -1305,6 +1305,7 @@ Thus the service affects liveness only.
 | `--indexByteCapBytes` | Byte cap of the index. The default is 4 GiB. |
 | `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 1 minute. |
 | `--resnapshotInterval` | Interval of the snapshot comparison, from 1 minute to 168 hours. The default is 1 hour. |
+| `--logLevel` | Log level: `debug`, `info`, `warn` or `error`. The default is `info`. |
 
 The command refuses to start if a flag is not valid.
 It uses the same checks as the watcher for TLS, OAuth2 and the party ID.
@@ -1356,13 +1357,24 @@ After other rebuild causes, the status is `stream_disconnected` until the new in
 The service reads the ledger end every 5 seconds, also during a build.
 
 The index uses the blob bytes plus 1536 bytes for each contract.
+A `ReplayNode` blob has about 66 bytes for each digest, plus the fixed bytes of the node.
+From 8.4 M to 134 M digests in one trie, the trie has about 1.05 M live nodes (`canton/README.md` §4.6).
+Thus the index uses about 1.05 M x (1536 + F) bytes plus 66 bytes for each digest. F is the fixed blob bytes of a node.
+With F = 1 KiB, the default cap of 4 GiB holds about 24 M digests.
+Measure F on your participant, and set `--indexByteCapBytes` from the result.
+
 During a rebuild, the old index, the snapshot and the new index are in memory together.
-Thus the peak memory is about 3 times the used bytes of the index.
+Thus plan for a peak memory of about 3 times `--indexByteCapBytes`. For the default cap, this is 12 GiB.
+
+A lookup that gets 503 because of the byte cap has no `Retry-After` header. The cap continues until the next `--resnapshotInterval`.
+Other 503 answers have `Retry-After: 1`.
+The service writes at most one warning log each second for 503 answers. The log field `suppressedUnavailableLogs` gives the number of skipped logs.
 
 #### 7.12.4 Monitoring
 
 | Metric | Alert condition |
 | - | - |
+| `wormhole_canton_disclosure_service_readiness{status="ready"}` | The value is 0 for 1 minute. The `status` label with the value 1 shows the `/v1/readyz` status. |
 | `wormhole_canton_disclosure_index_readiness{readiness="byte_cap_reached"}` | The value is 1. |
 | `wormhole_canton_disclosure_index_used_bytes` | The value is more than 80 % of `wormhole_canton_disclosure_index_byte_cap_bytes`. |
 | `wormhole_canton_disclosure_ledger_lag_seconds` | The value is more than `--ledgerLagBound`. |
@@ -1370,6 +1382,8 @@ Thus the peak memory is about 3 times the used bytes of the index.
 | `wormhole_canton_disclosure_index_rebuilds_total` | The value increases. The `reason` label shows the cause. |
 | `wormhole_canton_disclosure_resnapshot_differences_total` | The value increases. The `kind` label shows the difference. |
 | `wormhole_canton_disclosure_index_ignored_unknown_archives` | The value increases. |
+
+The service calculates each gauge when Prometheus reads `/metrics`. Thus the ledger lag increases also while the index writer waits.
 
 ## 8. Watcher configuration
 

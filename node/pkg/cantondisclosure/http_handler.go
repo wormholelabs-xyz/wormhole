@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -47,8 +48,10 @@ const (
 	httpWriteTimeout                   = 10 * time.Second
 	httpIdleTimeout                    = 60 * time.Second
 	httpMaxHeaderBytes                 = 16 << 10
-	// httpRetryAfterSeconds is the Retry-After of a 503.
+	// httpRetryAfterSeconds is the Retry-After of a 503 that a short wait can clear.
 	httpRetryAfterSeconds = 1
+	// unavailableLogInterval bounds the 503 warn logs to one per interval.
+	unavailableLogInterval = time.Second
 )
 
 // Fixed public messages of the error bodies.
@@ -111,6 +114,30 @@ type DisclosureHTTPHandler struct {
 	lookups            CoreContractLookups
 	lookupRequestSlots chan struct{}
 	logger             *zap.Logger
+	unavailableLogs    *unavailableLogLimiter
+}
+
+// unavailableLogLimiter admits one 503 warn log per unavailableLogInterval and counts the others.
+type unavailableLogLimiter struct {
+	now             func() time.Time
+	mutex           sync.Mutex
+	lastAdmittedAt  time.Time
+	suppressedCount uint64
+}
+
+// admitLog returns true at most once per unavailableLogInterval, with the count suppressed since the last admitted log.
+func (limiter *unavailableLogLimiter) admitLog() (admitted bool, suppressedCount uint64) {
+	limiter.mutex.Lock()
+	defer limiter.mutex.Unlock()
+	now := limiter.now()
+	if !limiter.lastAdmittedAt.IsZero() && now.Sub(limiter.lastAdmittedAt) < unavailableLogInterval {
+		limiter.suppressedCount++
+		return false, 0
+	}
+	suppressedCount = limiter.suppressedCount
+	limiter.lastAdmittedAt = now
+	limiter.suppressedCount = 0
+	return true, suppressedCount
 }
 
 // NewDisclosureHTTPHandler bounds the lookups in progress to maxConcurrentLookupRequests.
@@ -125,6 +152,7 @@ func NewDisclosureHTTPHandler(lookups CoreContractLookups, maxConcurrentLookupRe
 		lookups:            lookups,
 		lookupRequestSlots: make(chan struct{}, maxConcurrentLookupRequests),
 		logger:             logger,
+		unavailableLogs:    &unavailableLogLimiter{now: time.Now},
 	}, nil
 }
 
@@ -241,7 +269,11 @@ func (handler *DisclosureHTTPHandler) writeLookupResult(writer http.ResponseWrit
 	switch {
 	case lookupErr == nil:
 	case errors.Is(lookupErr, ErrIndexNotReady):
-		writer.Header().Set("Retry-After", strconv.Itoa(httpRetryAfterSeconds))
+		// A byte cap lasts until the rebuild at the next resnapshot interval.
+		var notReady IndexNotReadyError
+		if !errors.As(lookupErr, &notReady) || notReady.Readiness != IndexReadinessByteCapReached {
+			writer.Header().Set("Retry-After", strconv.Itoa(httpRetryAfterSeconds))
+		}
 		handler.writeServerError(writer, request, http.StatusServiceUnavailable, publicMessageIndexNotReady, lookupErr)
 		return
 	case errors.Is(lookupErr, ErrNoCoveringReplayNode):
@@ -255,7 +287,7 @@ func (handler *DisclosureHTTPHandler) writeLookupResult(writer http.ResponseWrit
 		return
 	}
 	contract := result.Contract()
-	if contract.contractID == (cantonclient.ContractID{}) || result.LiveAtIndexOffset() < 0 {
+	if contract.ContractID() == (cantonclient.ContractID{}) || result.LiveAtIndexOffset() < 0 {
 		handler.writeServerError(writer, request, http.StatusInternalServerError, publicMessageInternalError, errors.New("lookup returned no contract"))
 		return
 	}
@@ -286,6 +318,7 @@ func (handler *DisclosureHTTPHandler) writeClientError(writer http.ResponseWrite
 }
 
 // writeServerError logs internalErr with the request id and writes publicMessage only.
+// The 503 logs are rate limited by unavailableLogs.
 func (handler *DisclosureHTTPHandler) writeServerError(writer http.ResponseWriter, request *http.Request, statusCode int, publicMessage string, internalErr error) {
 	if statusCode < 500 || statusCode > 599 {
 		panic(fmt.Sprintf("cantondisclosure: server error with status %d", statusCode))
@@ -293,7 +326,15 @@ func (handler *DisclosureHTTPHandler) writeServerError(writer http.ResponseWrite
 	requestID := newRequestID()
 	writer.Header().Set(requestIDHeaderName, requestID)
 	writeJSONBody(writer, statusCode, publicErrorBody{Error: publicMessage, RequestID: requestID})
-	handler.logger.Warn("disclosure request failed", zap.String("requestId", requestID), zap.String("path", request.URL.Path), zap.Int("status", statusCode), zap.Error(internalErr))
+	logFields := []zap.Field{zap.String("requestId", requestID), zap.String("path", request.URL.Path), zap.Int("status", statusCode), zap.Error(internalErr)}
+	if statusCode == http.StatusServiceUnavailable {
+		admitted, suppressedCount := handler.unavailableLogs.admitLog()
+		if !admitted {
+			return
+		}
+		logFields = append(logFields, zap.Uint64("suppressedUnavailableLogs", suppressedCount))
+	}
+	handler.logger.Warn("disclosure request failed", logFields...)
 }
 
 func writeJSONBody(writer http.ResponseWriter, statusCode int, body any) {

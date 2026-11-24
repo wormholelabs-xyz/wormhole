@@ -104,6 +104,13 @@ linters:
             - pkg: "github.com/pkg/errors"
               desc: Should be replaced by standard lib errors package
 
+        canton-test-support:
+          files:
+            - "!$test"
+          deny:
+            - pkg: "github.com/certusone/wormhole/node/pkg/cantonclient/cantonclienttest"
+              desc: Test support only. Import it from _test.go files.
+
     errorlint:
       errorf: false
     exhaustive:
@@ -136,6 +143,8 @@ linters:
           msg: "method can cause DoS for large user-controlled inputs. Use common.SafeRead instead."
         - pattern: 'time\.Sleep'
           msg: "time.Sleep blocks the goroutine unconditionally. Use time.After with select, context.WithTimeout, or time.Ticker instead."
+        - pattern: 'ForTest$'
+          msg: "test support only. Call it from _test.go files."
       exclude-godoc-examples: true
       analyze-types: true
     gocritic:
@@ -228,6 +237,11 @@ linters:
       - legacy
       - std-error-handling
     rules:
+        # The ForTest functions are test support; their declarations and the test support package call them.
+      - linters:
+          - forbidigo
+        path: _test\.go|node/pkg/cantonclient/core_contracts_test_support\.go|node/pkg/cantonclient/cantonclienttest/
+        text: 'ForTest'
         # node/hack/ scripts are allowed to use time.Sleep.
       - linters:
           - forbidigo

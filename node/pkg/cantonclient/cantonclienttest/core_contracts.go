@@ -149,9 +149,9 @@ func (ledger CoreContractLedger) DecodeTransaction(t *testing.T, previousOffset 
 		SynchronizerId: ledger.SynchronizerIDText,
 		Events:         events,
 	}}}
-	advance, advances, err := cantonclient.DecodeCoreContractUpdatesResponseForTest(ledger.readScope(t), ledger.approvedCorePackages(t), response, previousOffset)
+	advance, movesTheOffset, err := cantonclient.DecodeCoreContractUpdatesResponseForTest(ledger.readScope(t), ledger.approvedCorePackages(t), response, previousOffset)
 	require.NoError(t, err)
-	require.True(t, advances)
+	require.True(t, movesTheOffset)
 	require.Len(t, advance.Updates(), len(changes))
 	return advance
 }
@@ -160,9 +160,9 @@ func (ledger CoreContractLedger) DecodeTransaction(t *testing.T, previousOffset 
 func (ledger CoreContractLedger) DecodeOffsetCheckpoint(t *testing.T, previousOffset int64, offset int64) cantonclient.CoreContractLedgerAdvance {
 	t.Helper()
 	response := &apiv2.GetUpdatesResponse{Update: &apiv2.GetUpdatesResponse_OffsetCheckpoint{OffsetCheckpoint: &apiv2.OffsetCheckpoint{Offset: offset}}}
-	advance, advances, err := cantonclient.DecodeCoreContractUpdatesResponseForTest(ledger.readScope(t), ledger.approvedCorePackages(t), response, previousOffset)
+	advance, movesTheOffset, err := cantonclient.DecodeCoreContractUpdatesResponseForTest(ledger.readScope(t), ledger.approvedCorePackages(t), response, previousOffset)
 	require.NoError(t, err)
-	require.True(t, advances)
+	require.True(t, movesTheOffset)
 	require.True(t, advance.IsOffsetCheckpoint())
 	return advance
 }

@@ -1,7 +1,6 @@
 package cantondisclosure
 
 import (
-	"errors"
 	"net/url"
 	"slices"
 
@@ -42,19 +41,19 @@ func parseExactQueryParameters(rawQuery string, allowedNames []string) (map[stri
 	if len(allowedNames) > maxQueryParameterCount {
 		panic("cantondisclosure: more allowed query parameters than maxQueryParameterCount")
 	}
-	values, err := url.ParseQuery(rawQuery)
+	decodedQuery, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		return nil, errQueryMalformed
 	}
-	parameters := make(map[string]string, len(values))
-	for name, nameValues := range values {
+	parameters := make(map[string]string, len(decodedQuery))
+	for name, occurrences := range decodedQuery {
 		if !slices.Contains(allowedNames, name) {
 			return nil, errQueryUnknownParameter
 		}
-		if len(nameValues) != 1 {
+		if len(occurrences) != 1 {
 			return nil, errQueryRepeatedParameter
 		}
-		parameters[name] = nameValues[0]
+		parameters[name] = occurrences[0]
 	}
 	if len(parameters) > len(allowedNames) {
 		panic("cantondisclosure: parsed more query parameters than allowed")
@@ -134,7 +133,7 @@ func parseEmptyQuery(rawQuery string) error {
 		return err
 	}
 	if len(parameters) != 0 {
-		return errors.New("cantondisclosure: empty query parse returned parameters")
+		panic("cantondisclosure: empty query parse returned parameters")
 	}
 	return nil
 }

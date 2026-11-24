@@ -291,7 +291,6 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 				continue
 			}
 			writer.served.recordLedgerEnd(ledgerEnd, time.Now())
-			publishIndexMetrics(writer.served)
 		}
 	}
 }
@@ -347,7 +346,6 @@ func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (f
 		return followedIndex{}, fmt.Errorf("cantondisclosure: ledger end %d is below the served index offset %d", built.bootstrapLedgerEnd.offset, servedOffset)
 	}
 	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd)
-	publishIndexMetrics(writer.served)
 	return built, nil
 }
 
@@ -435,7 +433,6 @@ func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, followe
 		subscription, err := writer.reader.SubscribeCoreContractUpdates(ctx, followed.index.Status().Offset, advances)
 		if err != nil {
 			writer.served.setStreamConnected(false)
-			publishIndexMetrics(writer.served)
 			if ctx.Err() != nil {
 				return followOutcome{err: ctx.Err()}
 			}
@@ -447,7 +444,6 @@ func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, followe
 			continue
 		}
 		writer.served.setStreamConnected(true)
-		publishIndexMetrics(writer.served)
 		session.stallStartedAt = time.Time{}
 		outcome := session.consumeSubscription(ctx, subscription, advances, resnapshotTicker.C, stallCheckTicker.C)
 		subscription.Unsubscribe()
@@ -455,7 +451,6 @@ func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, followe
 		if outcome.replacement == nil {
 			// A replacement subscribes at once; the readiness keeps the stream connected through the handover.
 			writer.served.setStreamConnected(false)
-			publishIndexMetrics(writer.served)
 		}
 		if ctx.Err() != nil {
 			return followOutcome{err: ctx.Err()}
@@ -505,24 +500,7 @@ func (session *ledgerFollowSession) consumeSubscription(
 			}
 			outcome.appliedAdvanceCount++
 		case <-subscription.Done():
-			// The stream goroutine sends every decoded advance before it fails.
-			for bufferedAdvanceCount := len(advances); bufferedAdvanceCount > 0; bufferedAdvanceCount-- {
-				if rebuildReason, err := session.applyAdvance(<-advances); rebuildReason != "" {
-					return subscriptionOutcome{rebuildReason: rebuildReason, err: err, appliedAdvanceCount: outcome.appliedAdvanceCount}
-				}
-				outcome.appliedAdvanceCount++
-			}
-			streamErr := errors.New("cantondisclosure: core contract update stream ended without an error")
-			select {
-			case subscriptionErr := <-subscription.Err():
-				streamErr = subscriptionErr
-			default:
-			}
-			if action, rebuildReason := classifyStreamFailure(streamErr); action == streamFailureActionRebuild {
-				outcome.rebuildReason = rebuildReason
-			}
-			outcome.err = streamErr
-			return outcome
+			return session.applyAdvancesBufferedBeforeDone(subscription, advances, outcome.appliedAdvanceCount)
 		case checkedAt := <-stallCheckTicks:
 			if session.streamStalled(checkedAt) {
 				outcome.err = errStalledStream
@@ -551,6 +529,35 @@ func (session *ledgerFollowSession) consumeSubscription(
 	}
 }
 
+// applyAdvancesBufferedBeforeDone applies every advance buffered in advances after subscription ended, then
+// classifies the stream error. The stream goroutine sends every decoded advance before it fails.
+func (session *ledgerFollowSession) applyAdvancesBufferedBeforeDone(subscription *cantonclient.Subscription, advances <-chan cantonclient.CoreContractLedgerAdvance, appliedAdvanceCount int) subscriptionOutcome {
+	select {
+	case <-subscription.Done():
+	default:
+		panic("cantondisclosure: drain the advances of a running subscription")
+	}
+	for bufferedAdvanceCount := len(advances); bufferedAdvanceCount > 0; bufferedAdvanceCount-- {
+		if rebuildReason, err := session.applyAdvance(<-advances); rebuildReason != "" {
+			return subscriptionOutcome{rebuildReason: rebuildReason, err: err, appliedAdvanceCount: appliedAdvanceCount}
+		}
+		appliedAdvanceCount++
+	}
+	if len(advances) != 0 {
+		panic("cantondisclosure: advances arrived after the subscription ended")
+	}
+	outcome := subscriptionOutcome{appliedAdvanceCount: appliedAdvanceCount, err: errors.New("cantondisclosure: core contract update stream ended without an error")}
+	select {
+	case subscriptionErr := <-subscription.Err():
+		outcome.err = subscriptionErr
+	default:
+	}
+	if action, rebuildReason := classifyStreamFailure(outcome.err); action == streamFailureActionRebuild {
+		outcome.rebuildReason = rebuildReason
+	}
+	return outcome
+}
+
 // applyAdvance applies advance to the followed index and swaps it in once it reaches the served offset.
 func (session *ledgerFollowSession) applyAdvance(advance cantonclient.CoreContractLedgerAdvance) (IndexRebuildReason, error) {
 	rebuildReason, err := session.writer.applyAdvance(session.followed.index, advance)
@@ -571,7 +578,6 @@ func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
 	}
 	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd)
 	session.followed.swapPending = false
-	publishIndexMetrics(session.writer.served)
 	session.writer.logger.Info("replacement core disclosure index serves", zap.Int64("indexOffset", session.followed.index.Status().Offset))
 }
 
@@ -673,7 +679,6 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 	} else {
 		err = index.ApplyTransaction(advance.Offset(), advance.Updates())
 	}
-	publishIndexMetrics(writer.served)
 	status := index.Status()
 	if status.Readiness == IndexReadinessInconsistent {
 		return IndexRebuildReasonInconsistentIndex, err
@@ -736,7 +741,6 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 	)
 	if comparison.MissingFromIndexCount() > 0 || comparison.StaleInIndexCount() > 0 {
 		index.SuspendLookupsUntilReplaced()
-		publishIndexMetrics(writer.served)
 		return IndexRebuildReasonResnapshotDifference, nil
 	}
 	return "", nil

@@ -33,7 +33,7 @@ func ParseReplayDigest(hexText string) (ReplayDigest, error) {
 	if len(hexText) != replayDigestNibbleCount {
 		return ReplayDigest{}, fmt.Errorf("replay digest length %d is not %d", len(hexText), replayDigestNibbleCount)
 	}
-	if !isLowercaseHex(hexText) {
+	if !cantonclient.IsLowercaseHex(hexText) {
 		return ReplayDigest{}, fmt.Errorf("replay digest %q is not lowercase hex", hexText)
 	}
 	return ReplayDigest{hexText: hexText}, nil
@@ -97,13 +97,4 @@ func appendLengthPrefixed(preimage []byte, field []byte) []byte {
 		panic("cantondisclosure: length-prefixed field has a wrong byte count")
 	}
 	return preimage
-}
-
-func isLowercaseHex(text string) bool {
-	for _, character := range []byte(text) {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return true
 }
