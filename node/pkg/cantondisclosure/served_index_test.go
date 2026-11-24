@@ -17,6 +17,11 @@ type testClock struct {
 
 func (clock *testClock) now() time.Time { return clock.current }
 
+// swapTestIndex serves index with a bootstrap ledger end read at its offset and the clock time.
+func swapTestIndex(served *ServedIndex, index *CoreContractIndex, clock *testClock) {
+	served.swapIndex(index, observedLedgerEnd{offset: index.Status().Offset, observedAt: clock.current})
+}
+
 func newTestServedIndex(t *testing.T) (*ServedIndex, *testClock) {
 	t.Helper()
 	clock := &testClock{current: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
@@ -66,7 +71,7 @@ func TestServiceReadinessStates(t *testing.T) {
 		{
 			name: "stream disconnected",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 			},
 			expectedStatus: ServiceReadinessStatusStreamDisconnected,
@@ -74,7 +79,7 @@ func TestServiceReadinessStates(t *testing.T) {
 		{
 			name: "ready at the ledger end",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 				clock.current = clock.current.Add(testLedgerLagBound)
@@ -83,17 +88,18 @@ func TestServiceReadinessStates(t *testing.T) {
 			expectReady:    true,
 		},
 		{
-			name: "no ledger end read",
+			name: "no ledger end read since a bootstrap older than the bound",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
+				clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
 			},
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
 		{
 			name: "latest ledger end read is older than the bound",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 				clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
@@ -103,7 +109,7 @@ func TestServiceReadinessStates(t *testing.T) {
 		{
 			name: "unreached ledger end within the bound",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
 				clock.current = clock.current.Add(testLedgerLagBound / 2)
@@ -116,7 +122,7 @@ func TestServiceReadinessStates(t *testing.T) {
 		{
 			name: "unreached ledger end above the bound while newer reads continue",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
-				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
 				clock.current = clock.current.Add(testLedgerLagBound)
@@ -126,15 +132,29 @@ func TestServiceReadinessStates(t *testing.T) {
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
 		{
-			name: "index reaches the unreached ledger end",
+			name: "index reaches an old ledger end read but not a newer one",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
-				served.swapIndex(index)
+				swapTestIndex(served, index, clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
 				clock.current = clock.current.Add(testLedgerLagBound)
 				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
 				require.NoError(t, index.AdvanceOffset(testBootstrapOffset+5))
+				clock.current = clock.current.Add(time.Second)
+			},
+			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
+		},
+		{
+			name: "index reaches the newest ledger end read",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+				swapTestIndex(served, index, clock)
+				served.setStreamConnected(true)
+				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
+				clock.current = clock.current.Add(testLedgerLagBound)
+				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
+				require.NoError(t, index.AdvanceOffset(testBootstrapOffset+9))
 				clock.current = clock.current.Add(time.Second)
 			},
 			expectedStatus: ServiceReadinessStatusReady,
@@ -145,7 +165,7 @@ func TestServiceReadinessStates(t *testing.T) {
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				index := newTestIndex(t, testLargeIndexByteCap)
 				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, nil, false))
-				served.swapIndex(index)
+				swapTestIndex(served, index, clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 			},
@@ -157,7 +177,7 @@ func TestServiceReadinessStates(t *testing.T) {
 				node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
 				index := newBootstrappedTestIndex(t, testLargeIndexByteCap, node)
 				require.Error(t, index.applyTransactionUpdates(testBootstrapOffset+1, []coreContractIndexUpdate{createdIndexUpdate(node)}))
-				served.swapIndex(index)
+				swapTestIndex(served, index, clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 			},
@@ -167,7 +187,7 @@ func TestServiceReadinessStates(t *testing.T) {
 			name: "byte cap reached",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				const byteCapBytes = int64(20_000)
-				served.swapIndex(newBootstrappedTestIndex(t, byteCapBytes, newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", int(byteCapBytes))))
+				swapTestIndex(served, newBootstrappedTestIndex(t, byteCapBytes, newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", int(byteCapBytes))), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
 			},
@@ -202,67 +222,96 @@ func TestServedIndexLookupsBeforeTheBootstrap(t *testing.T) {
 func TestServedIndexSwapServesTheNewIndex(t *testing.T) {
 	served, clock := newTestServedIndex(t)
 	first := newBootstrappedTestIndex(t, testLargeIndexByteCap)
-	served.swapIndex(first)
+	swapTestIndex(served, first, clock)
 	served.recordLedgerEnd(testBootstrapOffset+7, clock.current)
 	require.Equal(t, int64(7), served.LedgerOffsetsBehind())
 
 	replacement := newTestIndex(t, testLargeIndexByteCap)
 	node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
 	require.NoError(t, replacement.applyBootstrapSnapshot(testBootstrapOffset+7, append(testGenesisSingletons(t), node), false))
-	served.swapIndex(replacement)
+	swapTestIndex(served, replacement, clock)
 	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
 	require.NoError(t, err)
 	require.Equal(t, node.ContractID(), result.Contract().ContractID())
 	require.Equal(t, int64(0), served.LedgerOffsetsBehind())
 
-	require.Panics(t, func() { served.swapIndex(newTestIndex(t, testLargeIndexByteCap)) })
-	require.Panics(t, func() { served.swapIndex(nil) })
+	require.Panics(t, func() { swapTestIndex(served, newTestIndex(t, testLargeIndexByteCap), clock) })
+	require.Panics(t, func() { served.swapIndex(nil, observedLedgerEnd{}) })
+	require.Panics(t, func() { swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock) }, "offset below the served offset")
+	aboveTheBootstrap := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+	require.NoError(t, aboveTheBootstrap.AdvanceOffset(testBootstrapOffset+7))
+	require.Panics(t, func() {
+		served.swapIndex(aboveTheBootstrap, observedLedgerEnd{offset: testBootstrapOffset + 8, observedAt: clock.current})
+	}, "bootstrap ledger end above the index offset")
 }
 
-// simulateConstantLedgerLag polls every ProductionLedgerEndPollInterval for runDuration. The ledger end grows by one
-// per poll; the index reaches each ledger end constantLag after its poll. It returns the readiness after each poll.
-// The reported lag is the age of the oldest unreached read: constantLag minus one poll interval.
-func simulateConstantLedgerLag(t *testing.T, served *ServedIndex, clock *testClock, index *CoreContractIndex, constantLag time.Duration, runDuration time.Duration) []ServiceReadiness {
+// simulateConstantLedgerLag steps the clock by one second for runDuration. Every ProductionLedgerEndPollInterval
+// the ledger end grows by one and the writer reads it; the index reaches each read ledger end constantLag after
+// the read. It returns the elapsed time and the readiness after each step.
+func simulateConstantLedgerLag(t *testing.T, served *ServedIndex, clock *testClock, index *CoreContractIndex, constantLag time.Duration, runDuration time.Duration) ([]time.Duration, []ServiceReadiness) {
 	t.Helper()
 	startedAt := clock.current
-	readinessAfterEachPoll := []ServiceReadiness{}
-	pollCount := int(runDuration / ProductionLedgerEndPollInterval)
-	for pollIndex := 1; pollIndex <= pollCount; pollIndex++ {
-		clock.current = startedAt.Add(time.Duration(pollIndex) * ProductionLedgerEndPollInterval)
-		reachedPollIndex := pollIndex - int(constantLag/ProductionLedgerEndPollInterval)
-		if reachedPollIndex >= 1 {
-			require.NoError(t, index.AdvanceOffset(testBootstrapOffset+int64(reachedPollIndex)))
+	elapsedTimes := []time.Duration{}
+	readinessAfterEachStep := []ServiceReadiness{}
+	readCount := 0
+	reachedCount := 0
+	for elapsed := time.Second; elapsed <= runDuration; elapsed += time.Second {
+		clock.current = startedAt.Add(elapsed)
+		for reachedCount < readCount && time.Duration(reachedCount+1)*ProductionLedgerEndPollInterval+constantLag <= elapsed {
+			reachedCount++
+			require.NoError(t, index.AdvanceOffset(testBootstrapOffset+int64(reachedCount)))
 		}
-		served.recordLedgerEnd(testBootstrapOffset+int64(pollIndex), clock.current)
-		readinessAfterEachPoll = append(readinessAfterEachPoll, served.ServiceReadiness())
+		if elapsed%ProductionLedgerEndPollInterval == 0 {
+			readCount++
+			served.recordLedgerEnd(testBootstrapOffset+int64(readCount), clock.current)
+		}
+		elapsedTimes = append(elapsedTimes, elapsed)
+		readinessAfterEachStep = append(readinessAfterEachStep, served.ServiceReadiness())
 	}
-	return readinessAfterEachPoll
+	return elapsedTimes, readinessAfterEachStep
 }
 
 func TestLedgerLagUnderAConstantLag(t *testing.T) {
 	testCases := []struct {
-		name                 string
-		constantLag          time.Duration
-		expectAboveTheBound  bool
-		expectedReportedLags time.Duration
+		name        string
+		constantLag time.Duration
+		expectReady func(ledgerLag time.Duration) bool
 	}{
-		{name: "constant lag above the bound", constantLag: 90 * time.Second, expectAboveTheBound: true, expectedReportedLags: 85 * time.Second},
-		{name: "constant lag below the bound", constantLag: 30 * time.Second, expectedReportedLags: 25 * time.Second},
+		{name: "lag at the bound", constantLag: testLedgerLagBound, expectReady: func(ledgerLag time.Duration) bool { return ledgerLag == testLedgerLagBound }},
+		{name: "lag one second above the bound", constantLag: testLedgerLagBound + time.Second, expectReady: func(time.Duration) bool { return false }},
+		{name: "lag one poll interval above the bound", constantLag: testLedgerLagBound + ProductionLedgerEndPollInterval, expectReady: func(time.Duration) bool { return false }},
+		{name: "lag far above the bound", constantLag: 90 * time.Second, expectReady: func(time.Duration) bool { return false }},
+		{name: "lag below the bound by more than one poll interval", constantLag: 30 * time.Second, expectReady: func(time.Duration) bool { return true }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			served, clock := newTestServedIndex(t)
 			index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
-			served.swapIndex(index)
+			swapTestIndex(served, index, clock)
 			served.setStreamConnected(true)
-			readinessAfterEachPoll := simulateConstantLedgerLag(t, served, clock, index, testCase.constantLag, 400*time.Second)
-			for pollIndex, readiness := range readinessAfterEachPoll {
-				elapsed := time.Duration(pollIndex+1) * ProductionLedgerEndPollInterval
-				if elapsed < testCase.constantLag {
+			elapsedTimes, readinessAfterEachStep := simulateConstantLedgerLag(t, served, clock, index, testCase.constantLag, 400*time.Second)
+			checkedStepCount := 0
+			readyStepCount := 0
+			for stepIndex, readiness := range readinessAfterEachStep {
+				elapsed := elapsedTimes[stepIndex]
+				if elapsed < testCase.constantLag+ProductionLedgerEndPollInterval {
 					continue
 				}
-				require.Equal(t, testCase.expectedReportedLags, readiness.LedgerLag, "after %s", elapsed)
-				require.Equal(t, testCase.expectAboveTheBound, readiness.Status() == ServiceReadinessStatusLedgerLagAboveBound, "after %s", elapsed)
+				checkedStepCount++
+				require.GreaterOrEqual(t, readiness.LedgerLag, testCase.constantLag, "after %s", elapsed)
+				require.Less(t, readiness.LedgerLag, testCase.constantLag+ProductionLedgerEndPollInterval, "after %s", elapsed)
+				require.Equal(t, testCase.expectReady(readiness.LedgerLag), readiness.IsReady(), "after %s with lag %s", elapsed, readiness.LedgerLag)
+				if readiness.IsReady() {
+					readyStepCount++
+				}
+			}
+			require.Greater(t, checkedStepCount, 200)
+			if testCase.constantLag > testLedgerLagBound {
+				require.Zero(t, readyStepCount)
+			}
+			if testCase.constantLag == testLedgerLagBound {
+				require.Greater(t, readyStepCount, 0)
+				require.Less(t, readyStepCount, checkedStepCount)
 			}
 		})
 	}
@@ -271,12 +320,12 @@ func TestLedgerLagUnderAConstantLag(t *testing.T) {
 func TestLedgerLagRecoversWhenTheIndexCatchesUp(t *testing.T) {
 	served, clock := newTestServedIndex(t)
 	index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
-	served.swapIndex(index)
+	swapTestIndex(served, index, clock)
 	served.setStreamConnected(true)
-	readinessAfterEachPoll := simulateConstantLedgerLag(t, served, clock, index, 90*time.Second, 200*time.Second)
-	require.Equal(t, ServiceReadinessStatusLedgerLagAboveBound, readinessAfterEachPoll[len(readinessAfterEachPoll)-1].Status())
+	_, readinessAfterEachStep := simulateConstantLedgerLag(t, served, clock, index, 90*time.Second, 200*time.Second)
+	require.Equal(t, ServiceReadinessStatusLedgerLagAboveBound, readinessAfterEachStep[len(readinessAfterEachStep)-1].Status())
 
-	latestLedgerEnd := testBootstrapOffset + int64(len(readinessAfterEachPoll))
+	latestLedgerEnd := testBootstrapOffset + int64(200*time.Second/ProductionLedgerEndPollInterval)
 	require.NoError(t, index.AdvanceOffset(latestLedgerEnd))
 	readiness := served.ServiceReadiness()
 	require.Equal(t, ServiceReadinessStatusReady, readiness.Status())
@@ -286,7 +335,7 @@ func TestLedgerLagRecoversWhenTheIndexCatchesUp(t *testing.T) {
 
 func TestLedgerEndObservationQueueFullMergesIntoTheNewestEntry(t *testing.T) {
 	served, clock := newTestServedIndex(t)
-	served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+	swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 	served.setStreamConnected(true)
 	firstObservedAt := clock.current
 	readCount := ledgerEndObservationCapacity + 50
@@ -305,7 +354,7 @@ func TestLedgerEndObservationQueueFullMergesIntoTheNewestEntry(t *testing.T) {
 
 func TestLedgerEndAtOrBelowTheNewestEntryKeepsItsTime(t *testing.T) {
 	served, clock := newTestServedIndex(t)
-	served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap))
+	swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 	firstObservedAt := clock.current
 	served.recordLedgerEnd(testBootstrapOffset+3, clock.current)
 	clock.current = clock.current.Add(ProductionLedgerEndPollInterval)
@@ -320,4 +369,6 @@ func TestCheckLedgerLagBoundAgainstThePollInterval(t *testing.T) {
 	require.Greater(t, minLedgerLagBound, ProductionLedgerEndPollInterval)
 	require.Equal(t, int(maxLedgerLagBound/ProductionLedgerEndPollInterval)+1, ledgerEndObservationCapacity)
 	require.Error(t, CheckLedgerLagBound(ProductionLedgerEndPollInterval))
+	require.Error(t, CheckLedgerLagBound(2*ProductionLedgerEndPollInterval-time.Nanosecond))
+	require.NoError(t, CheckLedgerLagBound(2*ProductionLedgerEndPollInterval))
 }

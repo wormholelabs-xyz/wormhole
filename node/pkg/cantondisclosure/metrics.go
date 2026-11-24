@@ -97,6 +97,7 @@ var allIndexReadinessValues = [...]IndexReadiness{
 	IndexReadinessSingletonConflict,
 	IndexReadinessByteCapReached,
 	IndexReadinessInconsistent,
+	IndexReadinessResnapshotDifference,
 }
 
 // publishIndexMetrics sets every disclosure gauge from served.

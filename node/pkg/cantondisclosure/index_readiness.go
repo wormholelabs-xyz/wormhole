@@ -25,6 +25,9 @@ const (
 	IndexReadinessByteCapReached
 	// IndexReadinessInconsistent: an update contradicts the index. Terminal: rebuild the index.
 	IndexReadinessInconsistent
+	// IndexReadinessResnapshotDifference: a resnapshot found a stale or missing contract. Every lookup fails
+	// until a replacement index serves.
+	IndexReadinessResnapshotDifference
 )
 
 func (readiness IndexReadiness) String() string {
@@ -43,6 +46,8 @@ func (readiness IndexReadiness) String() string {
 		return "byte_cap_reached"
 	case IndexReadinessInconsistent:
 		return "inconsistent"
+	case IndexReadinessResnapshotDifference:
+		return "resnapshot_difference"
 	default:
 		return fmt.Sprintf("unknown_index_readiness_%d", int(readiness))
 	}
