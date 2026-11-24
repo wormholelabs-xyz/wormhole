@@ -213,15 +213,15 @@ func TestParseListPublishesReadScope(t *testing.T) {
 
 func TestCantonListPublishesOAuthCredentials(t *testing.T) {
 	const spliceAudience = "https://canton.network.global"
-	fullOAuth := cantonListPublishesOAuthFlags{tokenURL: "https://idp.example/token", clientID: "cid", clientSecret: "sec"}
-	withAudience := func(audience string) cantonListPublishesOAuthFlags {
+	fullOAuth := cantonOAuthFlags{tokenURL: "https://idp.example/token", clientID: "cid", clientSecret: "sec"}
+	withAudience := func(audience string) cantonOAuthFlags {
 		oauthFlags := fullOAuth
 		oauthFlags.audience = audience
 		return oauthFlags
 	}
 	testCases := []struct {
 		name                 string
-		oauthFlags           cantonListPublishesOAuthFlags
+		oauthFlags           cantonOAuthFlags
 		unsafePlaintext      bool
 		expectedOAuth        bool
 		expectedAudience     string
@@ -231,18 +231,18 @@ func TestCantonListPublishesOAuthCredentials(t *testing.T) {
 		{name: "no OAuth over plaintext", unsafePlaintext: true},
 		{name: "full OAuth", oauthFlags: fullOAuth, expectedOAuth: true},
 		{name: "full OAuth with audience", oauthFlags: withAudience(spliceAudience), expectedOAuth: true, expectedAudience: spliceAudience},
-		{name: "audience without OAuth", oauthFlags: cantonListPublishesOAuthFlags{audience: spliceAudience}, expectedErrorMessage: "--cantonAuthAudience requires"},
+		{name: "audience without OAuth", oauthFlags: cantonOAuthFlags{audience: spliceAudience}, expectedErrorMessage: "--cantonAuthAudience requires"},
 		{name: "whitespace-only audience", oauthFlags: withAudience(" "), expectedErrorMessage: "whitespace"},
 		{name: "audience with a control character", oauthFlags: withAudience("https://canton.network\x00.global"), expectedErrorMessage: "control character"},
-		{name: "token URL without secret", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
-		{name: "lone client secret", oauthFlags: cantonListPublishesOAuthFlags{clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "must all be set together"},
+		{name: "token URL without secret", oauthFlags: cantonOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
+		{name: "lone client secret", oauthFlags: cantonOAuthFlags{clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "must all be set together"},
 		{name: "full OAuth over plaintext", oauthFlags: fullOAuth, unsafePlaintext: true, expectedErrorMessage: "OAuth requires TLS"},
-		{name: "http token URL", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: "http://idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "--cantonAuthTokenURL: OAuth token URL"},
-		{name: "token URL with user information", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: "https://cid:sec@idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "user information"},
+		{name: "http token URL", oauthFlags: cantonOAuthFlags{tokenURL: "http://idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "--cantonAuthTokenURL: OAuth token URL"},
+		{name: "token URL with user information", oauthFlags: cantonOAuthFlags{tokenURL: "https://cid:sec@idp.example/token", clientID: fullOAuth.clientID, clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "user information"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			oauthClientCredentials, err := cantonListPublishesOAuthCredentials(testCase.oauthFlags, testCase.unsafePlaintext)
+			oauthClientCredentials, err := parseCantonOAuthClientCredentials(testCase.oauthFlags, testCase.unsafePlaintext)
 			if testCase.expectedErrorMessage != "" {
 				require.ErrorContains(t, err, testCase.expectedErrorMessage)
 				require.Nil(t, oauthClientCredentials)
