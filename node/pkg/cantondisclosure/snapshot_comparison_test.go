@@ -96,7 +96,7 @@ func TestCompareWithSnapshotPreconditions(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			index := newTestIndex(t, testLargeIndexByteCap)
 			if testCase.bootstrap {
-				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t)))
+				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t), false))
 			}
 			_, err := index.compareWithIndexedSnapshot(testCase.snapshotOffset, testCase.snapshot)
 			require.ErrorIs(t, err, testCase.expectedError)

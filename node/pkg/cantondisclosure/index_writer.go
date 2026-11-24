@@ -17,7 +17,7 @@ import (
 // CoreContractLedgerReader is the Ledger API surface of the index writer. cantonclient.CoreContractReader implements it.
 type CoreContractLedgerReader interface {
 	GetLedgerEnd(ctx context.Context) (int64, error)
-	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxContracts int) ([]cantonclient.CreatedCoreContract, error)
+	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error)
 	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error)
 }
 
@@ -164,8 +164,8 @@ func NewCoreContractIndexWriter(reader CoreContractLedgerReader, served *ServedI
 	}, nil
 }
 
-// maxSnapshotContracts is the largest contract count that fits the byte cap, at most MaxActiveCoreContractsPerSnapshot.
-func (writer *CoreContractIndexWriter) maxSnapshotContracts() int {
+// maxSnapshotReplayNodes is the largest ReplayNode count that fits the byte cap, at most MaxActiveCoreContractsPerSnapshot.
+func (writer *CoreContractIndexWriter) maxSnapshotReplayNodes() int {
 	return int(min(writer.byteCapBytes/indexEntryOverheadBytes, int64(cantonclient.MaxActiveCoreContractsPerSnapshot)))
 }
 
@@ -174,7 +174,7 @@ var ErrRebuildAttemptsExhausted = errors.New("cantondisclosure: index rebuild at
 
 // Run builds and follows indexes until ctx ends. It returns nil when ctx ends, and
 // ErrRebuildAttemptsExhausted after MaxConsecutiveRebuildAttempts consecutive builds that failed
-// or followed the ledger for less than StableFollowDuration.
+// or followed the ledger for less than StableFollowDuration. A byte cap retry counts as stable.
 func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
 	consecutiveUnstableBuilds := 0
 	// Runs until ctx ends; consecutiveUnstableBuilds bounds the failures.
@@ -203,7 +203,7 @@ func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
 			return nil
 		}
 		indexRebuildsCounter.WithLabelValues(string(rebuildReason)).Inc()
-		if time.Since(followStartedAt) >= writer.timing.StableFollowDuration {
+		if rebuildReason == IndexRebuildReasonByteCapRetry || time.Since(followStartedAt) >= writer.timing.StableFollowDuration {
 			consecutiveUnstableBuilds = 0
 		} else {
 			consecutiveUnstableBuilds++
@@ -224,7 +224,7 @@ func (writer *CoreContractIndexWriter) buildIndex(ctx context.Context) (*CoreCon
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.maxSnapshotContracts())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.maxSnapshotReplayNodes())
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,13 @@ func (writer *CoreContractIndexWriter) buildIndex(ctx context.Context) (*CoreCon
 	if err != nil {
 		return nil, err
 	}
-	if err := index.ApplyBootstrapSnapshot(ledgerEnd, snapshot); err != nil {
+	if snapshot.ReplayNodesTruncated() {
+		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodes", writer.maxSnapshotReplayNodes()))
+		err = index.ApplyBootstrapSnapshotWithoutReplayNodes(ledgerEnd, snapshot.Contracts())
+	} else {
+		err = index.ApplyBootstrapSnapshot(ledgerEnd, snapshot.Contracts())
+	}
+	if err != nil {
 		return nil, err
 	}
 	status := index.Status()
@@ -438,7 +444,7 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.maxSnapshotContracts())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.maxSnapshotReplayNodes())
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil
@@ -450,7 +456,11 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 		writer.logger.Warn("resnapshot read failed", zap.Int64("indexOffset", indexStatus.Offset), zap.Error(err))
 		return "", nil
 	}
-	comparison, err := index.CompareWithSnapshot(indexStatus.Offset, snapshot)
+	if snapshot.ReplayNodesTruncated() {
+		return IndexRebuildReasonSnapshotReplayNodeLimit, nil
+	}
+	snapshotContracts := snapshot.Contracts()
+	comparison, err := index.CompareWithSnapshot(indexStatus.Offset, snapshotContracts)
 	if err != nil {
 		resnapshotFailuresCounter.Inc()
 		writer.logger.Error("resnapshot comparison failed", zap.Int64("indexOffset", indexStatus.Offset), zap.Error(err))
@@ -461,7 +471,7 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 	}
 	recordSnapshotComparisonMetrics(comparison)
 	if comparison.MatchesIndex() {
-		writer.logger.Info("resnapshot matches the index", zap.Int64("indexOffset", indexStatus.Offset), zap.Int("snapshotContracts", len(snapshot)))
+		writer.logger.Info("resnapshot matches the index", zap.Int64("indexOffset", indexStatus.Offset), zap.Int("snapshotContracts", len(snapshotContracts)))
 		return "", nil
 	}
 	writer.logger.Warn("resnapshot differs from the index",

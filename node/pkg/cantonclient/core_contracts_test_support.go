@@ -23,3 +23,18 @@ func DecodeCoreContractUpdatesResponseForTest(readScope ReadScope, approved Appr
 	}
 	return decoder.decodeUpdatesResponse(response, previousOffset)
 }
+
+// CollectActiveCoreContractsForTest applies the ReadActiveCoreContracts limits to contracts in order.
+// Do not call it outside tests: it exists so that fake readers in other packages enforce the same limits.
+func CollectActiveCoreContractsForTest(contracts []CreatedCoreContract, maxReplayNodes int) (ActiveCoreContracts, error) {
+	collector, err := newActiveCoreContractCollector(maxReplayNodes)
+	if err != nil {
+		return ActiveCoreContracts{}, err
+	}
+	for _, contract := range contracts {
+		if err := collector.add(contract); err != nil {
+			return ActiveCoreContracts{}, err
+		}
+	}
+	return collector.snapshot(), nil
+}

@@ -110,7 +110,25 @@ func (index *CoreContractIndex) ApplyBootstrapSnapshot(offset int64, snapshot []
 	if err != nil {
 		return fmt.Errorf("cantondisclosure: bootstrap snapshot at offset %d: %w", offset, err)
 	}
-	return index.applyBootstrapSnapshot(offset, contracts)
+	return index.applyBootstrapSnapshot(offset, contracts, false)
+}
+
+// ApplyBootstrapSnapshotWithoutReplayNodes applies the singletons of a snapshot that has more
+// ReplayNodes than the byte cap admits. The index starts with its ReplayNodes dropped (IndexReadinessByteCapReached).
+func (index *CoreContractIndex) ApplyBootstrapSnapshotWithoutReplayNodes(offset int64, singletons []cantonclient.CreatedCoreContract) error {
+	if len(singletons) > cantonclient.MaxActiveCoreContractsPerSnapshot {
+		return fmt.Errorf("cantondisclosure: bootstrap snapshot of %d contracts exceeds %d", len(singletons), cantonclient.MaxActiveCoreContractsPerSnapshot)
+	}
+	contracts, err := index.indexedContractsFromSnapshot(singletons)
+	if err != nil {
+		return fmt.Errorf("cantondisclosure: bootstrap snapshot at offset %d: %w", offset, err)
+	}
+	for contractIndex, contract := range contracts {
+		if !isSingletonTemplate(contract.template) {
+			return fmt.Errorf("cantondisclosure: bootstrap snapshot at offset %d: contract %d: %s in a snapshot without replay nodes", offset, contractIndex, contract.template.EntityName())
+		}
+	}
+	return index.applyBootstrapSnapshot(offset, contracts, true)
 }
 
 // ApplyTransaction applies every update of the transaction at offset in one step.
@@ -178,7 +196,7 @@ func (index *CoreContractIndex) indexedContractsFromSnapshot(snapshot []cantoncl
 	return contracts, nil
 }
 
-func (index *CoreContractIndex) applyBootstrapSnapshot(offset int64, contracts []IndexedCoreContract) error {
+func (index *CoreContractIndex) applyBootstrapSnapshot(offset int64, contracts []IndexedCoreContract, replayNodesDropped bool) error {
 	index.mutex.Lock()
 	defer index.mutex.Unlock()
 	if index.lifecycle != indexLifecycleAwaitingBootstrap {
@@ -190,6 +208,10 @@ func (index *CoreContractIndex) applyBootstrapSnapshot(offset int64, contracts [
 	if len(contracts) > cantonclient.MaxActiveCoreContractsPerSnapshot {
 		return fmt.Errorf("cantondisclosure: bootstrap snapshot of %d contracts exceeds %d", len(contracts), cantonclient.MaxActiveCoreContractsPerSnapshot)
 	}
+	if replayNodesDropped && countSingletonContracts(contracts) != len(contracts) {
+		panic("cantondisclosure: bootstrap without replay nodes received a replay node")
+	}
+	index.replayNodesDroppedAtByteCap = replayNodesDropped
 	for contractIndex, contract := range contracts {
 		if err := index.insertContractLocked(contract); err != nil {
 			return fmt.Errorf("cantondisclosure: bootstrap snapshot at offset %d: contract %d: %w", offset, contractIndex, err)

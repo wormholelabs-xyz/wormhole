@@ -21,11 +21,11 @@ type CoreContractReader interface {
 	// GetLedgerEnd maps to StateService.GetLedgerEnd.
 	GetLedgerEnd(ctx context.Context) (int64, error)
 
-	// ReadActiveCoreContracts returns every active disclosed core contract at
-	// activeAtOffset, with its created event blob, or an error when there are
-	// more than maxContracts.
+	// ReadActiveCoreContracts returns the active disclosed core contracts at
+	// activeAtOffset, with their created event blobs. Above maxReplayNodes
+	// ReplayNodes, the result keeps the singletons only and reports ReplayNodesTruncated.
 	// Maps to StateService.GetActiveContracts.
-	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxContracts int) ([]CreatedCoreContract, error)
+	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (ActiveCoreContracts, error)
 
 	// SubscribeCoreContractUpdates delivers on out, in ledger order, one
 	// CoreContractLedgerAdvance per transaction with core contract events and
@@ -36,8 +36,103 @@ type CoreContractReader interface {
 	Close() error
 }
 
-// MaxActiveCoreContractsPerSnapshot bounds the maxContracts of one ReadActiveCoreContracts call.
+// MaxActiveCoreContractsPerSnapshot bounds the maxReplayNodes of one ReadActiveCoreContracts call.
 const MaxActiveCoreContractsPerSnapshot = 1 << 23
+
+// maxActiveSingletonContractsPerTemplate bounds the kept instances of each singleton template; two show a conflict.
+const maxActiveSingletonContractsPerTemplate = 3
+
+// maxActiveContractEntriesReadPerSnapshot bounds the entries that one snapshot read receives, kept or skipped.
+const maxActiveContractEntriesReadPerSnapshot = 1 << 27
+
+// ActiveCoreContracts is the active core contracts at one offset. With ReplayNodesTruncated, it holds the singletons only.
+type ActiveCoreContracts struct {
+	contracts            []CreatedCoreContract
+	replayNodesTruncated bool
+}
+
+// Contracts is a copy of the kept contracts in snapshot order.
+func (snapshot ActiveCoreContracts) Contracts() []CreatedCoreContract {
+	return slices.Clone(snapshot.contracts)
+}
+
+// ReplayNodesTruncated is true when the snapshot had more than maxReplayNodes ReplayNodes.
+func (snapshot ActiveCoreContracts) ReplayNodesTruncated() bool {
+	return snapshot.replayNodesTruncated
+}
+
+// activeCoreContractCollector keeps at most maxReplayNodes ReplayNodes and
+// maxActiveSingletonContractsPerTemplate instances of each singleton template.
+type activeCoreContractCollector struct {
+	maxReplayNodes            int
+	contracts                 []CreatedCoreContract
+	keptContractIDs           map[ContractID]bool
+	replayNodeCount           int
+	singletonCountsByTemplate map[CoreContractTemplate]int
+	replayNodesTruncated      bool
+}
+
+func newActiveCoreContractCollector(maxReplayNodes int) (*activeCoreContractCollector, error) {
+	if maxReplayNodes < 1 || maxReplayNodes > MaxActiveCoreContractsPerSnapshot {
+		return nil, fmt.Errorf("maximum replay node count %d is outside [1, %d]", maxReplayNodes, MaxActiveCoreContractsPerSnapshot)
+	}
+	return &activeCoreContractCollector{
+		maxReplayNodes:            maxReplayNodes,
+		contracts:                 []CreatedCoreContract{},
+		keptContractIDs:           map[ContractID]bool{},
+		singletonCountsByTemplate: map[CoreContractTemplate]int{},
+	}, nil
+}
+
+// add keeps contract, skips a ReplayNode after the truncation, and truncates at the first ReplayNode above the limit.
+func (collector *activeCoreContractCollector) add(contract CreatedCoreContract) error {
+	template := contract.TemplateID().Template()
+	if template == CoreContractTemplateReplayNode {
+		if collector.replayNodesTruncated {
+			return nil
+		}
+		if collector.replayNodeCount == collector.maxReplayNodes {
+			collector.truncateReplayNodes()
+			return nil
+		}
+		collector.replayNodeCount++
+	} else {
+		if collector.singletonCountsByTemplate[template] == maxActiveSingletonContractsPerTemplate {
+			return fmt.Errorf("more than %d active %s", maxActiveSingletonContractsPerTemplate, template)
+		}
+		collector.singletonCountsByTemplate[template]++
+	}
+	if collector.keptContractIDs[contract.ContractID()] {
+		return fmt.Errorf("repeats contract id %s on synchronizer %s", contract.ContractID(), contract.SynchronizerID())
+	}
+	collector.keptContractIDs[contract.ContractID()] = true
+	collector.contracts = append(collector.contracts, contract)
+	return nil
+}
+
+func (collector *activeCoreContractCollector) truncateReplayNodes() {
+	singletons := make([]CreatedCoreContract, 0, len(collector.contracts)-collector.replayNodeCount)
+	for _, contract := range collector.contracts {
+		if contract.TemplateID().Template() == CoreContractTemplateReplayNode {
+			delete(collector.keptContractIDs, contract.ContractID())
+			continue
+		}
+		singletons = append(singletons, contract)
+	}
+	if len(singletons)+collector.replayNodeCount != len(collector.contracts) {
+		panic("cantonclient: replay node truncation lost a singleton")
+	}
+	collector.contracts = singletons
+	collector.replayNodeCount = 0
+	collector.replayNodesTruncated = true
+}
+
+func (collector *activeCoreContractCollector) snapshot() ActiveCoreContracts {
+	if collector.replayNodesTruncated && collector.replayNodeCount != 0 {
+		panic("cantonclient: truncated snapshot keeps replay nodes")
+	}
+	return ActiveCoreContracts{contracts: collector.contracts, replayNodesTruncated: collector.replayNodesTruncated}
+}
 
 // corePackageNameReference is the package-name reference format that template filters require since Canton 3.5.
 const corePackageNameReference = "#" + CorePackageName
@@ -179,12 +274,13 @@ func (decoder coreContractDecoder) eventFormat() *apiv2.EventFormat {
 	}
 }
 
-func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxContracts int) ([]CreatedCoreContract, error) {
+func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (ActiveCoreContracts, error) {
 	if activeAtOffset < 0 {
-		return nil, fmt.Errorf("GetActiveContracts: negative offset %d", activeAtOffset)
+		return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts: negative offset %d", activeAtOffset)
 	}
-	if maxContracts < 1 || maxContracts > MaxActiveCoreContractsPerSnapshot {
-		return nil, fmt.Errorf("GetActiveContracts: maximum contract count %d is outside [1, %d]", maxContracts, MaxActiveCoreContractsPerSnapshot)
+	collector, err := newActiveCoreContractCollector(maxReplayNodes)
+	if err != nil {
+		return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts: %w", err)
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -194,40 +290,35 @@ func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Contex
 		IncludeIncompleteReassignments: false,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
+		return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
 	}
-	contracts := []CreatedCoreContract{}
-	// The snapshot has one entry per synchronizer that a contract is active on.
-	seenContractIDs := map[ContractID]bool{}
-	// Terminates: each response appends one contract or returns, and the append count stops at maxContracts.
-	for {
+	// The snapshot has one entry per synchronizer that a contract is active on; the collector refuses a repeated kept contract id.
+	for entryIndex := 0; ; entryIndex++ {
 		response, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			return contracts, nil
+			return collector.snapshot(), nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
+		}
+		if entryIndex == maxActiveContractEntriesReadPerSnapshot {
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): more than %d entries", activeAtOffset, maxActiveContractEntriesReadPerSnapshot)
 		}
 		activeContract := response.GetActiveContract()
 		if activeContract == nil {
-			return nil, fmt.Errorf("GetActiveContracts(%d): entry %d is not an active contract", activeAtOffset, len(contracts))
-		}
-		if len(contracts) == maxContracts {
-			return nil, fmt.Errorf("GetActiveContracts(%d): more than %d active core contracts", activeAtOffset, maxContracts)
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): entry %d is not an active contract", activeAtOffset, entryIndex)
 		}
 		createdEvent := activeContract.GetCreatedEvent()
 		if createdEvent.GetOffset() <= 0 || createdEvent.GetOffset() > activeAtOffset {
-			return nil, fmt.Errorf("GetActiveContracts(%d): created event offset %d is outside [1, %d]", activeAtOffset, createdEvent.GetOffset(), activeAtOffset)
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): created event offset %d is outside [1, %d]", activeAtOffset, createdEvent.GetOffset(), activeAtOffset)
 		}
 		contract, err := reader.decoder.decodeCreatedCoreContract(createdEvent, activeContract.GetSynchronizerId())
 		if err != nil {
-			return nil, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
 		}
-		if seenContractIDs[contract.ContractID()] {
-			return nil, fmt.Errorf("GetActiveContracts(%d): repeats contract id %s on synchronizer %s", activeAtOffset, contract.ContractID(), contract.SynchronizerID())
+		if err := collector.add(contract); err != nil {
+			return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts(%d): %w", activeAtOffset, err)
 		}
-		seenContractIDs[contract.ContractID()] = true
-		contracts = append(contracts, contract)
 	}
 }
 

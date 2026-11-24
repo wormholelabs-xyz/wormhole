@@ -80,10 +80,10 @@ func TestBootstrapAndTransactionOrdering(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			index := newTestIndex(t, testLargeIndexByteCap)
 			if testCase.bootstrap {
-				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t)))
+				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t), false))
 			}
 			if testCase.secondBoot {
-				err := index.applyBootstrapSnapshot(testBootstrapOffset+1, testGenesisSingletons(t))
+				err := index.applyBootstrapSnapshot(testBootstrapOffset+1, testGenesisSingletons(t), false)
 				require.ErrorIs(t, err, testCase.expectedError)
 				return
 			}
@@ -108,13 +108,13 @@ func TestBootstrapAndTransactionOrdering(t *testing.T) {
 
 func TestBootstrapRejectsNegativeOffset(t *testing.T) {
 	index := newTestIndex(t, testLargeIndexByteCap)
-	require.Error(t, index.applyBootstrapSnapshot(-1, testGenesisSingletons(t)))
+	require.Error(t, index.applyBootstrapSnapshot(-1, testGenesisSingletons(t), false))
 	require.Equal(t, IndexReadinessBootstrapping, index.Status().Readiness)
 }
 
 func TestBootstrapAtOffsetZeroOfAnEmptyLedger(t *testing.T) {
 	index := newTestIndex(t, testLargeIndexByteCap)
-	require.NoError(t, index.applyBootstrapSnapshot(0, nil))
+	require.NoError(t, index.applyBootstrapSnapshot(0, nil, false))
 	status := index.Status()
 	require.Equal(t, int64(0), status.Offset)
 	require.Equal(t, IndexReadinessSingletonMissing, status.Readiness)
@@ -375,7 +375,7 @@ func TestDuplicateCreateMakesIndexInconsistent(t *testing.T) {
 func TestDuplicateContractIDInBootstrapSnapshot(t *testing.T) {
 	node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
 	index := newTestIndex(t, testLargeIndexByteCap)
-	err := index.applyBootstrapSnapshot(testBootstrapOffset, append(testGenesisSingletons(t), node, node))
+	err := index.applyBootstrapSnapshot(testBootstrapOffset, append(testGenesisSingletons(t), node, node), false)
 	require.ErrorIs(t, err, ErrDuplicateCreate)
 	require.Equal(t, IndexReadinessInconsistent, index.Status().Readiness)
 }
@@ -419,7 +419,7 @@ func TestSingletonMissingAndRecovery(t *testing.T) {
 			}
 			require.Len(t, snapshot, len(singletonTemplates)-1)
 			index := newTestIndex(t, testLargeIndexByteCap)
-			require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, snapshot))
+			require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, snapshot, false))
 			require.Equal(t, IndexReadinessSingletonMissing, index.Status().Readiness)
 			_, err := index.LookupSingleton(missingTemplate)
 			requireIndexNotReady(t, err, IndexReadinessSingletonMissing)
@@ -510,7 +510,7 @@ func TestByteCapBoundaries(t *testing.T) {
 
 func TestBootstrapSingletonsAboveByteCapMakeIndexInconsistent(t *testing.T) {
 	index := newTestIndex(t, genesisUsedBytes-1)
-	err := index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t))
+	err := index.applyBootstrapSnapshot(testBootstrapOffset, testGenesisSingletons(t), false)
 	require.ErrorIs(t, err, ErrByteCapExceeded)
 	require.Equal(t, IndexReadinessInconsistent, index.Status().Readiness)
 	_, err = index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)

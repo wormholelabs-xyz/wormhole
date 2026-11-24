@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
+	"github.com/certusone/wormhole/node/pkg/cantonclient/cantonclienttest"
 )
 
 func TestByteCapDropsReplayNodesAndKeepsServingSingletons(t *testing.T) {
@@ -230,6 +231,47 @@ func TestIndexReadinessServesLookups(t *testing.T) {
 		t.Run(testCase.readiness.String(), func(t *testing.T) {
 			require.Equal(t, testCase.servesSingletonLookups, testCase.readiness.ServesSingletonLookups())
 			require.Equal(t, testCase.servesReplayNodeLookups, testCase.readiness.ServesReplayNodeLookups())
+		})
+	}
+}
+
+func TestBootstrapWithoutReplayNodes(t *testing.T) {
+	ledger := testDecodingLedger()
+	testCases := []struct {
+		name              string
+		snapshot          func(t *testing.T) []cantonclient.CreatedCoreContract
+		expectedErrorText string
+	}{
+		{name: "singletons", snapshot: func(t *testing.T) []cantonclient.CreatedCoreContract { return decodedGenesisSnapshot(t, ledger) }},
+		{name: "a replay node", snapshot: func(t *testing.T) []cantonclient.CreatedCoreContract {
+			return decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))
+		}, expectedErrorText: "ReplayNode in a snapshot without replay nodes"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			index := newTestIndex(t, testLargeIndexByteCap)
+			err := index.ApplyBootstrapSnapshotWithoutReplayNodes(testBootstrapOffset, testCase.snapshot(t))
+			if testCase.expectedErrorText != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorText)
+				require.Equal(t, IndexReadinessBootstrapping, index.Status().Readiness)
+				return
+			}
+			require.NoError(t, err)
+			status := index.Status()
+			require.Equal(t, IndexReadinessByteCapReached, status.Readiness)
+			require.True(t, status.ReplayNodesDroppedAtByteCap)
+			require.Equal(t, testBootstrapOffset, status.Offset)
+			for _, template := range singletonTemplates {
+				_, lookupErr := index.LookupSingleton(template)
+				require.NoError(t, lookupErr, template.String())
+			}
+			_, err = index.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+			requireIndexNotReady(t, err, IndexReadinessByteCapReached)
+
+			node := ledger.DecodeTransaction(t, testBootstrapOffset, 11, cantonclienttest.Created(decodedReplayNodeEvent(2, "")))
+			require.NoError(t, index.ApplyTransaction(node.Offset(), node.Updates()))
+			require.Equal(t, uint64(1), index.Status().DroppedReplayNodeUpdateCount)
+			require.Equal(t, 0, index.Status().LiveReplayNodeCount)
 		})
 	}
 }

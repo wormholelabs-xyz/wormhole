@@ -17,6 +17,8 @@ const (
 	IndexRebuildReasonReconnectsExhausted  IndexRebuildReason = "reconnects_exhausted"
 	IndexRebuildReasonResnapshotDifference IndexRebuildReason = "resnapshot_difference"
 	IndexRebuildReasonByteCapRetry         IndexRebuildReason = "byte_cap_retry"
+	// IndexRebuildReasonSnapshotReplayNodeLimit: a resnapshot had more ReplayNodes than the byte cap admits.
+	IndexRebuildReasonSnapshotReplayNodeLimit IndexRebuildReason = "snapshot_replay_node_limit"
 )
 
 var (

@@ -101,8 +101,10 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 10, testOtherContractIDHex, nil)),
 	)
-	contracts, err := reader.ReadActiveCoreContracts(context.Background(), 10, 2)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 2)
 	require.NoError(t, err)
+	assert.False(t, snapshot.ReplayNodesTruncated())
+	contracts := snapshot.Contracts()
 	require.Len(t, contracts, 2)
 	assert.Equal(t, CoreContractTemplateCoreState, contracts[0].TemplateID().Template())
 	assert.Equal(t, testCoreContractIDHex, contracts[0].ContractID().String())
@@ -117,44 +119,120 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 
 func TestReadActiveCoreContractsEmptySnapshot(t *testing.T) {
 	reader, _ := testCoreContractReaderWithSnapshot(t)
-	contracts, err := reader.ReadActiveCoreContracts(context.Background(), 10, 1)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 1)
 	require.NoError(t, err)
-	assert.Empty(t, contracts)
+	assert.Empty(t, snapshot.Contracts())
+	assert.False(t, snapshot.ReplayNodesTruncated())
 }
 
-func TestReadActiveCoreContractsCap(t *testing.T) {
-	threeContracts := []*apiv2.GetActiveContractsResponse{
+func TestReadActiveCoreContractsReplayNodeLimit(t *testing.T) {
+	snapshotResponses := []*apiv2.GetActiveContractsResponse{
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 2, testOtherContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testThirdContractIDHex, nil)),
 	}
 	cases := []struct {
-		name          string
-		maxContracts  int
-		wantContracts int
-		wantErr       string
+		name               string
+		maxReplayNodes     int
+		wantContractIDs    []string
+		wantReplayTruncate bool
+		wantErr            string
 	}{
-		{name: "cap above the count", maxContracts: 4, wantContracts: 3},
-		{name: "cap equal to the count", maxContracts: 3, wantContracts: 3},
-		{name: "cap one below the count", maxContracts: 2, wantErr: "more than 2 active core contracts"},
-		{name: "cap of one", maxContracts: 1, wantErr: "more than 1 active core contracts"},
-		{name: "zero cap", maxContracts: 0, wantErr: "outside [1, 8388608]"},
-		{name: "negative cap", maxContracts: -1, wantErr: "outside [1, 8388608]"},
-		{name: "cap above the upper bound", maxContracts: MaxActiveCoreContractsPerSnapshot + 1, wantErr: "outside [1, 8388608]"},
+		{name: "limit above the replay node count", maxReplayNodes: 3, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
+		{name: "limit equal to the replay node count", maxReplayNodes: 2, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
+		{name: "limit one below the replay node count keeps the singletons", maxReplayNodes: 1, wantContractIDs: []string{testThirdContractIDHex}, wantReplayTruncate: true},
+		{name: "zero limit", maxReplayNodes: 0, wantErr: "outside [1, 8388608]"},
+		{name: "negative limit", maxReplayNodes: -1, wantErr: "outside [1, 8388608]"},
+		{name: "limit above the upper bound", maxReplayNodes: MaxActiveCoreContractsPerSnapshot + 1, wantErr: "outside [1, 8388608]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reader, _ := testCoreContractReaderWithSnapshot(t, threeContracts...)
-			contracts, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxContracts)
+			reader, _ := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxReplayNodes)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				assert.Nil(t, contracts)
+				assert.Equal(t, ActiveCoreContracts{}, snapshot)
 				return
 			}
 			require.NoError(t, err)
-			assert.Len(t, contracts, tc.wantContracts)
+			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
+			contractIDs := []string{}
+			for _, contract := range snapshot.Contracts() {
+				contractIDs = append(contractIDs, contract.ContractID().String())
+			}
+			assert.Equal(t, tc.wantContractIDs, contractIDs)
 		})
 	}
+}
+
+func snapshotContractIDHex(serial int) string {
+	return fmt.Sprintf("00%064x", serial)
+}
+
+func decodedSnapshotContract(t *testing.T, template CoreContractTemplate, serial int) CreatedCoreContract {
+	t.Helper()
+	contract, err := testCoreContractDecoder(t).decodeCreatedCoreContract(createdCoreEvent(template, 1, snapshotContractIDHex(serial), nil), testSynchronizerID)
+	require.NoError(t, err)
+	return contract
+}
+
+func TestCollectActiveCoreContracts(t *testing.T) {
+	cases := []struct {
+		name               string
+		templates          []CoreContractTemplate
+		maxReplayNodes     int
+		wantTemplates      []CoreContractTemplate
+		wantReplayTruncate bool
+		wantErr            string
+	}{
+		{
+			name:           "singletons after the truncation are kept",
+			templates:      []CoreContractTemplate{CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateEmitterRegistry, CoreContractTemplateReplayNode, CoreContractTemplateCoreState},
+			maxReplayNodes: 2, wantTemplates: []CoreContractTemplate{CoreContractTemplateEmitterRegistry, CoreContractTemplateCoreState}, wantReplayTruncate: true,
+		},
+		{
+			name:           "three instances of one singleton",
+			templates:      []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+			maxReplayNodes: 1, wantTemplates: []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+		},
+		{
+			name:           "four instances of one singleton",
+			templates:      []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState, CoreContractTemplateCoreState},
+			maxReplayNodes: 1, wantErr: "more than 3 active Wormhole.Core.State:CoreState",
+		},
+		{
+			name:           "four singleton instances after the truncation",
+			templates:      []CoreContractTemplate{CoreContractTemplateReplayNode, CoreContractTemplateReplayNode, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry, CoreContractTemplateReplayRootRegistry},
+			maxReplayNodes: 1, wantErr: "more than 3 active Wormhole.Core.State:ReplayRootRegistry",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contracts := make([]CreatedCoreContract, 0, len(tc.templates))
+			for serial, template := range tc.templates {
+				contracts = append(contracts, decodedSnapshotContract(t, template, serial+1))
+			}
+			snapshot, err := CollectActiveCoreContractsForTest(contracts, tc.maxReplayNodes)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, ActiveCoreContracts{}, snapshot)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
+			gotTemplates := []CoreContractTemplate{}
+			for _, contract := range snapshot.Contracts() {
+				gotTemplates = append(gotTemplates, contract.TemplateID().Template())
+			}
+			assert.Equal(t, tc.wantTemplates, gotTemplates)
+		})
+	}
+}
+
+func TestCollectActiveCoreContractsRejectsARepeatedKeptContractID(t *testing.T) {
+	coreState := decodedSnapshotContract(t, CoreContractTemplateCoreState, 1)
+	_, err := CollectActiveCoreContractsForTest([]CreatedCoreContract{coreState, coreState}, 1)
+	require.ErrorContains(t, err, "repeats contract id")
 }
 
 func TestReadActiveCoreContractsRejects(t *testing.T) {
@@ -186,9 +264,9 @@ func TestReadActiveCoreContractsRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, service := testCoreContractReaderWithSnapshot(t, tc.responses...)
 			service.stream.finalErr = tc.finalErr
-			contracts, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, 10)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, 10)
 			require.ErrorContains(t, err, tc.wantErr)
-			assert.Nil(t, contracts)
+			assert.Equal(t, ActiveCoreContracts{}, snapshot)
 		})
 	}
 }

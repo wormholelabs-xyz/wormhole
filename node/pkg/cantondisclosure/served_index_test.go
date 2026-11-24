@@ -144,7 +144,7 @@ func TestServiceReadinessStates(t *testing.T) {
 			name: "singleton missing",
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				index := newTestIndex(t, testLargeIndexByteCap)
-				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, nil))
+				require.NoError(t, index.applyBootstrapSnapshot(testBootstrapOffset, nil, false))
 				served.swapIndex(index)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
@@ -208,7 +208,7 @@ func TestServedIndexSwapServesTheNewIndex(t *testing.T) {
 
 	replacement := newTestIndex(t, testLargeIndexByteCap)
 	node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
-	require.NoError(t, replacement.applyBootstrapSnapshot(testBootstrapOffset+7, append(testGenesisSingletons(t), node)))
+	require.NoError(t, replacement.applyBootstrapSnapshot(testBootstrapOffset+7, append(testGenesisSingletons(t), node), false))
 	served.swapIndex(replacement)
 	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
 	require.NoError(t, err)
