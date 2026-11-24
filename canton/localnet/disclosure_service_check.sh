@@ -365,6 +365,16 @@ ledger_end_of() {
   curl_bounded -sSf "$(json_api_url "$1")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
 }
 
+# instance_ledger_end_of <name>: the ledger end of the participant that the instance reads. Offsets are per participant.
+instance_ledger_end_of() {
+  ledger_end_of "${SERVICE_VALIDATOR_OF[$1]}"
+}
+
+# check_json_matches <jq-filter> <json>
+check_json_matches() {
+  jq -e "$1" <<<"$2" > /dev/null
+}
+
 # ledger_replay_nodes: the ReplayNode created events that guardianGovernance sees on sv.
 ledger_replay_nodes() {
   active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" "$REPLAY_NODE_SUFFIX"
@@ -389,7 +399,7 @@ compare_singletons_with_ledger() {
   local check_id="$1" name="$2" route_entry route template_suffix ledger_offset served ledger comparison
   for route_entry in "${SINGLETON_ROUTES[@]}"; do
     IFS='|' read -r route template_suffix <<<"$route_entry"
-    ledger_offset="$(ledger_end_of "$SUBMITTING_VALIDATOR")"
+    ledger_offset="$(instance_ledger_end_of "$name")"
     ledger="$(ledger_singleton_with_blob "$template_suffix")" || { record_check "$check_id" FAIL "$name $route: no single ledger contract"; continue; }
     served="$(service_lookup_at_offset "$name" "$route" "$ledger_offset")" || { record_check "$check_id" FAIL "$name $route: no answer"; continue; }
     comparison="$(jq -cn --argjson served "$served" --argjson ledger "$ledger" --arg route "$route" '{route: $route,
@@ -550,7 +560,7 @@ compare_covering_nodes_after_split() {
   local check_id="$1" name="$2" ledger_offset replay_nodes digest nibble served ledger_node rows_file mismatches archived_rows
   rows_file="$gg_work_dir/covering-rows-$name.jsonl"
   : > "$rows_file"
-  ledger_offset="$(ledger_end_of "$SUBMITTING_VALIDATOR")"
+  ledger_offset="$(instance_ledger_end_of "$name")"
   replay_nodes="$(ledger_replay_nodes)"
   for digest in $(cat "$consumed_digests_file"; for nibble in 0 1 2 3 4 5 6 7 8 9 a b c d e f; do synthetic_digest_with_first_nibble "$nibble"; done); do
     served="$(service_lookup_at_offset "$name" "$(replay_node_query_path "$integrator_party" "$replay_namespace" "$digest")" "$ledger_offset")" \
@@ -718,7 +728,7 @@ check_core_package_count() {
 # capture_answers <name>: the contract ids of each singleton route and of the covering node of each consumed digest.
 capture_answers() {
   local name="$1" route_entry digest minimum_offset
-  minimum_offset="$(ledger_end_of "$SUBMITTING_VALIDATOR")"
+  minimum_offset="$(instance_ledger_end_of "$name")"
   {
     for route_entry in "${SINGLETON_ROUTES[@]}"; do
       printf '%s %s\n' "${route_entry%%|*}" "$(service_lookup_at_offset "$name" "${route_entry%%|*}" "$minimum_offset" | jq -r .contractId)"
@@ -754,7 +764,7 @@ check_small_byte_cap() {
   await_service_ready byte-cap D9 || return 1
   readiness="$(service_readyz byte-cap)"
   check_or_record D9 "byte cap $byte_cap: /v1/readyz $(jq -c . <<<"$readiness"), expected 200 ready_byte_cap_reached" \
-    jq -e '.httpStatus == 200 and .status == "ready_byte_cap_reached"' <<<"$readiness"
+    check_json_matches '.httpStatus == 200 and .status == "ready_byte_cap_reached"' "$readiness"
   response="$(service_get byte-cap /v1/core-state)"
   check_or_record D9 "byte cap: /v1/core-state HTTP $(tail -n 1 <<<"$response")" test "$(tail -n 1 <<<"$response")" == 200
   response="$(service_get byte-cap "$(replay_node_query_path "$integrator_party" "$replay_namespace" "$(head -n 1 "$consumed_digests_file")")")"
@@ -818,7 +828,9 @@ run_check() {
   guardian_key_indices="${1:-1}"
   [[ "$guardian_key_indices" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "key indices must be comma-separated integers: $guardian_key_indices"
   prepare_run
-  guardian_set_index="$(jq -er .createArgument.guardianSetIndex <<<"$(gg_root :Wormhole.Core.State:CoreState)")"
+  guardian_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Core.State:CoreState \
+    | jq -er --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]
+        | if length == 1 then .[0].createArgument.guardianSetIndex else error("expected one CoreState, found \(length)") end')"
   integrator_party="$(allocate_local_party "$SUBMITTING_VALIDATOR" "DisclosureIntegrator-$run_label")"
   replay_namespace="disclosure-service-$run_label"
   echo "integrator $integrator_party, namespace $replay_namespace, guardian set $guardian_set_index keys $guardian_key_indices"
