@@ -52,6 +52,7 @@ func init() {
 	rootCmd.AddCommand(ccq.QueryServerCmd)
 	rootCmd.AddCommand(guardiand.KeygenCmd)
 	rootCmd.AddCommand(guardiand.AdminCmd)
+	rootCmd.AddCommand(guardiand.CantonDisclosureServiceCmd)
 	rootCmd.AddCommand(guardiand.TemplateCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(debug.DebugCmd)
