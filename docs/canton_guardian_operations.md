@@ -1303,7 +1303,7 @@ Thus the service affects liveness only.
 | `--listenAddress` | Mandatory. HTTP listen address of the routes (`host:port`). |
 | `--statusAddr` | Listen address of `/metrics`. The default is `127.0.0.1:6061`. An empty value disables it. |
 | `--indexByteCapBytes` | Byte cap of the index. The default is 4 GiB. |
-| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 1 minute. |
+| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 3 minutes. Without core transactions, the index moves only on offset checkpoints. Then the lag can be 75 seconds on Canton 3.7.3. |
 | `--resnapshotInterval` | Interval of the snapshot comparison, from 1 minute to 168 hours. The default is 1 hour. |
 | `--logLevel` | Log level: `debug`, `info`, `warn` or `error`. The default is `info`. |
 

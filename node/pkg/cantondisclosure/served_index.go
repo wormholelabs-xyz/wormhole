@@ -26,8 +26,9 @@ const ledgerEndObservationCapacity = int(maxLedgerLagBound/ProductionLedgerEndPo
 // Compile-time assertion: minLedgerLagBound >= 2 * ProductionLedgerEndPollInterval.
 const _ uint64 = uint64(minLedgerLagBound - 2*ProductionLedgerEndPollInterval)
 
-// DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz.
-const DefaultLedgerLagBound = time.Minute
+// DefaultLedgerLagBound is the default ledger lag bound of /v1/readyz. Without core traffic, the index offset moves only
+// on offset checkpoints; on Canton 3.7.3 the lag then reaches about 75 s (LocalNet measurement).
+const DefaultLedgerLagBound = 3 * time.Minute
 
 // CheckLedgerLagBound requires ledgerLagBound in [10s, 1h] and at least twice ProductionLedgerEndPollInterval.
 func CheckLedgerLagBound(ledgerLagBound time.Duration) error {

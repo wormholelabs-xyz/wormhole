@@ -111,7 +111,7 @@ func TestCantonDisclosureServiceCommandFlags(t *testing.T) {
 		{flagName: "cantonReadAsParty", required: true},
 		{flagName: "listenAddress", required: true},
 		{flagName: "indexByteCapBytes", defaultValue: "4294967296"},
-		{flagName: "ledgerLagBound", defaultValue: "1m0s"},
+		{flagName: "ledgerLagBound", defaultValue: "3m0s"},
 		{flagName: "resnapshotInterval", defaultValue: "1h0m0s"},
 		{flagName: "statusAddr", defaultValue: "127.0.0.1:6061"},
 		{flagName: "unsafePlaintext", defaultValue: "false"},
