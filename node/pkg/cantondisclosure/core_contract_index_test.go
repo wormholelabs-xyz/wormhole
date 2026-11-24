@@ -729,3 +729,30 @@ func TestConcurrentLookupsDuringUpdates(t *testing.T) {
 	}
 	require.Equal(t, 1, index.Status().LiveReplayNodeCount)
 }
+
+func TestSuspendLookupsUntilReplaced(t *testing.T) {
+	node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
+	index := newBootstrappedTestIndex(t, testLargeIndexByteCap, node)
+	_, err := index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	require.NoError(t, err)
+
+	index.SuspendLookupsUntilReplaced()
+	require.Equal(t, IndexReadinessResnapshotDifference, index.Status().Readiness)
+	require.False(t, IndexReadinessResnapshotDifference.ServesSingletonLookups())
+	require.False(t, IndexReadinessResnapshotDifference.ServesReplayNodeLookups())
+	_, err = index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
+	_, err = index.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
+	_, err = index.LookupClaimedRootsNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace))
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
+
+	require.NoError(t, index.applyTransactionUpdates(testBootstrapOffset+1, []coreContractIndexUpdate{archivedIndexUpdate(node)}))
+	require.NoError(t, index.AdvanceOffset(testBootstrapOffset+2))
+	status := index.Status()
+	require.Equal(t, testBootstrapOffset+2, status.Offset)
+	require.Equal(t, 0, status.LiveReplayNodeCount)
+	require.Equal(t, IndexReadinessResnapshotDifference, status.Readiness)
+
+	require.Panics(t, func() { newTestIndex(t, testLargeIndexByteCap).SuspendLookupsUntilReplaced() })
+}

@@ -30,6 +30,8 @@ const (
 	advanceChannelCapacity = 64
 	// subscriptionStopTimeout bounds the wait for the stream goroutine after Unsubscribe.
 	subscriptionStopTimeout = 10 * time.Second
+	// backgroundStopTimeout bounds the wait for the ledger end poller and a replacement build after cancellation.
+	backgroundStopTimeout = 10 * time.Second
 )
 
 // ProductionResnapshotInterval is the default interval of the periodic snapshot comparison.
@@ -50,6 +52,9 @@ type IndexWriterTiming struct {
 	MaxConsecutiveRebuildAttempts int
 	// StableFollowDuration is how long an index must follow the ledger before its rebuild resets the rebuild attempt count.
 	StableFollowDuration time.Duration
+	// StalledStreamTimeout is how long the ledger lag stays above the bound, with no index offset progress,
+	// before the writer reconnects an open stream.
+	StalledStreamTimeout time.Duration
 }
 
 // ProductionIndexWriterTiming is the production timing with resnapshotInterval.
@@ -65,6 +70,7 @@ func ProductionIndexWriterTiming(resnapshotInterval time.Duration) IndexWriterTi
 		RebuildMaxDelay:                 2 * time.Minute,
 		MaxConsecutiveRebuildAttempts:   8,
 		StableFollowDuration:            10 * time.Minute,
+		StalledStreamTimeout:            2 * time.Minute,
 	}
 }
 
@@ -89,6 +95,7 @@ func (timing IndexWriterTiming) check() error {
 		{"rebuild initial delay", timing.RebuildInitialDelay},
 		{"rebuild maximum delay", timing.RebuildMaxDelay},
 		{"stable follow duration", timing.StableFollowDuration},
+		{"stalled stream timeout", timing.StalledStreamTimeout},
 	}
 	for _, named := range durations {
 		if named.duration <= 0 {
@@ -154,8 +161,8 @@ func NewCoreContractIndexWriter(reader CoreContractLedgerReader, served *ServedI
 	if err := timing.check(); err != nil {
 		return nil, err
 	}
-	if timing.LedgerEndPollInterval >= served.ledgerLagBound {
-		return nil, fmt.Errorf("cantondisclosure: ledger end poll interval %s is not below the ledger lag bound %s", timing.LedgerEndPollInterval, served.ledgerLagBound)
+	if 2*timing.LedgerEndPollInterval > served.ledgerLagBound {
+		return nil, fmt.Errorf("cantondisclosure: ledger end poll interval %s is above half the ledger lag bound %s", timing.LedgerEndPollInterval, served.ledgerLagBound)
 	}
 	return &CoreContractIndexWriter{
 		reader:             reader,
@@ -175,11 +182,35 @@ func (writer *CoreContractIndexWriter) maxSnapshotReplayNodes() int {
 // ErrRebuildAttemptsExhausted: the writer stopped after MaxConsecutiveRebuildAttempts unstable rebuilds.
 var ErrRebuildAttemptsExhausted = errors.New("cantondisclosure: index rebuild attempts exhausted")
 
+// errStalledStream: the ledger lag stayed above the bound for StalledStreamTimeout without index offset progress.
+var errStalledStream = errors.New("cantondisclosure: core contract update stream stalled")
+
+// followedIndex is the index that the writer applies advances to. With swapPending, the served index is
+// the index it replaces, and the writer swaps when the followed offset reaches the served offset.
+type followedIndex struct {
+	index              *CoreContractIndex
+	bootstrapLedgerEnd observedLedgerEnd
+	swapPending        bool
+}
+
 // Run builds and follows indexes until ctx ends. It returns nil when ctx ends, and
 // ErrRebuildAttemptsExhausted after MaxConsecutiveRebuildAttempts consecutive builds that failed
 // or followed the ledger for less than StableFollowDuration. A byte cap retry counts as stable.
+// A ledger end poller runs beside it for the whole call.
 func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
+	pollerCtx, cancelPoller := context.WithCancel(ctx)
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		writer.pollLedgerEnd(pollerCtx)
+	}()
+	defer func() {
+		cancelPoller()
+		writer.waitForBackgroundStop(pollerDone, "ledger end poller")
+	}()
+
 	consecutiveUnstableBuilds := 0
+	var replacement *followedIndex
 	// Runs until ctx ends; consecutiveUnstableBuilds bounds the failures.
 	for {
 		if consecutiveUnstableBuilds > 0 {
@@ -190,50 +221,100 @@ func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
 				return nil
 			}
 		}
-		index, err := writer.buildIndex(ctx)
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err != nil {
-			indexBuildFailuresCounter.Inc()
-			consecutiveUnstableBuilds++
-			writer.logger.Error("core disclosure index build failed", zap.Int("consecutiveUnstableBuilds", consecutiveUnstableBuilds), zap.Error(err))
-			continue
+		followed := replacement
+		replacement = nil
+		if followed == nil {
+			built, err := writer.buildAndSwapIndex(ctx)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				indexBuildFailuresCounter.Inc()
+				consecutiveUnstableBuilds++
+				writer.logger.Error("core disclosure index build failed", zap.Int("consecutiveUnstableBuilds", consecutiveUnstableBuilds), zap.Error(err))
+				continue
+			}
+			followed = &built
 		}
 		followStartedAt := time.Now()
-		rebuildReason, err := writer.followLedger(ctx, index)
+		outcome := writer.followLedger(ctx, followed)
 		if ctx.Err() != nil {
 			return nil
 		}
-		indexRebuildsCounter.WithLabelValues(string(rebuildReason)).Inc()
-		if rebuildReason == IndexRebuildReasonByteCapRetry || time.Since(followStartedAt) >= writer.timing.StableFollowDuration {
+		if outcome.rebuildReason == "" {
+			panic("cantondisclosure: follow ended without a rebuild reason")
+		}
+		replacement = outcome.replacement
+		indexRebuildsCounter.WithLabelValues(string(outcome.rebuildReason)).Inc()
+		if outcome.rebuildReason == IndexRebuildReasonByteCapRetry || time.Since(followStartedAt) >= writer.timing.StableFollowDuration {
 			consecutiveUnstableBuilds = 0
 		} else {
 			consecutiveUnstableBuilds++
 		}
-		writer.logger.Warn("rebuilding the core disclosure index", zap.String("reason", string(rebuildReason)), zap.Int64("indexOffset", index.Status().Offset), zap.Int("consecutiveUnstableBuilds", consecutiveUnstableBuilds), zap.Error(err))
+		writer.logger.Warn("rebuilding the core disclosure index", zap.String("reason", string(outcome.rebuildReason)), zap.Int64("indexOffset", followed.index.Status().Offset), zap.Bool("replacementReady", replacement != nil), zap.Int("consecutiveUnstableBuilds", consecutiveUnstableBuilds), zap.Error(outcome.err))
 	}
 }
 
-// buildIndex bootstraps a new index from the active contracts at the ledger end and swaps it in.
-func (writer *CoreContractIndexWriter) buildIndex(ctx context.Context) (*CoreContractIndex, error) {
+func (writer *CoreContractIndexWriter) waitForBackgroundStop(done <-chan struct{}, name string) {
+	timer := time.NewTimer(backgroundStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		writer.logger.Error("core disclosure background task did not stop", zap.String("task", name), zap.Duration("timeout", backgroundStopTimeout))
+	}
+}
+
+// pollLedgerEnd records a ledger end read every LedgerEndPollInterval until ctx ends, also while the writer
+// builds, resnapshots or reconnects.
+func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
+	ticker := time.NewTicker(writer.timing.LedgerEndPollInterval)
+	defer ticker.Stop()
+	// Runs until ctx ends.
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				ledgerEndReadFailuresCounter.Inc()
+				writer.logger.Warn("ledger end read failed", zap.Error(err))
+				continue
+			}
+			if ledgerEnd < 0 {
+				ledgerEndReadFailuresCounter.Inc()
+				writer.logger.Warn("ledger end read returned a negative offset", zap.Int64("ledgerEnd", ledgerEnd))
+				continue
+			}
+			writer.served.recordLedgerEnd(ledgerEnd, time.Now())
+			publishIndexMetrics(writer.served)
+		}
+	}
+}
+
+// readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
+func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
 	ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
 	if err != nil {
-		return nil, err
+		return followedIndex{}, err
 	}
-	observedAt := time.Now()
+	bootstrapLedgerEnd := observedLedgerEnd{offset: ledgerEnd, observedAt: time.Now()}
 	if ledgerEnd < 0 {
-		return nil, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
+		return followedIndex{}, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
 	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.maxSnapshotReplayNodes())
 	if err != nil {
-		return nil, err
+		return followedIndex{}, err
 	}
 	index, err := NewCoreContractIndex(writer.guardianGovernance, writer.byteCapBytes)
 	if err != nil {
-		return nil, err
+		return followedIndex{}, err
 	}
 	if snapshot.ReplayNodesTruncated() {
 		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodes", writer.maxSnapshotReplayNodes()))
@@ -242,20 +323,32 @@ func (writer *CoreContractIndexWriter) buildIndex(ctx context.Context) (*CoreCon
 		err = index.ApplyBootstrapSnapshot(ledgerEnd, snapshot.Contracts())
 	}
 	if err != nil {
-		return nil, err
+		return followedIndex{}, err
 	}
 	status := index.Status()
 	if status.Readiness == IndexReadinessInconsistent || status.Readiness == IndexReadinessBootstrapping {
-		return nil, fmt.Errorf("cantondisclosure: bootstrap at offset %d left readiness %s", ledgerEnd, status.Readiness)
+		return followedIndex{}, fmt.Errorf("cantondisclosure: bootstrap at offset %d left readiness %s", ledgerEnd, status.Readiness)
 	}
 	if status.Offset != ledgerEnd {
 		panic("cantondisclosure: bootstrapped index offset is not the snapshot offset")
 	}
-	writer.served.swapIndex(index)
-	writer.served.recordLedgerEnd(ledgerEnd, observedAt)
-	publishIndexMetrics(writer.served)
 	writer.logger.Info("core disclosure index bootstrapped", zap.Int64("offset", ledgerEnd), zap.Int("liveContracts", status.LiveContractCount), zap.Int64("usedBytes", status.UsedBytes), zap.String("readiness", status.Readiness.String()))
-	return index, nil
+	return followedIndex{index: index, bootstrapLedgerEnd: bootstrapLedgerEnd}, nil
+}
+
+// buildAndSwapIndex bootstraps a new index and serves it at once. The ledger end is at or above every served offset.
+func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (followedIndex, error) {
+	built, err := writer.readBootstrappedIndex(ctx)
+	if err != nil {
+		return followedIndex{}, err
+	}
+	servedOffset := writer.served.indexOffset()
+	if built.bootstrapLedgerEnd.offset < servedOffset {
+		return followedIndex{}, fmt.Errorf("cantondisclosure: ledger end %d is below the served index offset %d", built.bootstrapLedgerEnd.offset, servedOffset)
+	}
+	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd)
+	publishIndexMetrics(writer.served)
+	return built, nil
 }
 
 // streamFailureAction is what the writer does after the update stream fails.
@@ -286,32 +379,68 @@ func classifyStreamFailure(err error) (streamFailureAction, IndexRebuildReason) 
 	return streamFailureActionReconnect, ""
 }
 
-// followLedger subscribes from the index offset and applies every advance until a rebuild is due or ctx ends.
-func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, index *CoreContractIndex) (IndexRebuildReason, error) {
+// followOutcome ends one followed index. A non-nil replacement is a caught-up index to follow next.
+type followOutcome struct {
+	rebuildReason IndexRebuildReason
+	err           error
+	replacement   *followedIndex
+}
+
+// replacementBuild is a background build of an index that replaces the followed index while the writer keeps following it.
+type replacementBuild struct {
+	reason IndexRebuildReason
+	cancel context.CancelFunc
+	// result receives exactly one value; done closes after it.
+	result chan replacementBuildResult
+	done   chan struct{}
+}
+
+type replacementBuildResult struct {
+	replacement followedIndex
+	err         error
+}
+
+// ledgerFollowSession is the state of one followLedger call. Only the writer goroutine uses it.
+type ledgerFollowSession struct {
+	writer      *CoreContractIndexWriter
+	followed    *followedIndex
+	replacement *replacementBuild
+	// stallStartedAt is the first stall check that saw the lag above the bound at stallStartOffset; zero otherwise.
+	stallStartedAt   time.Time
+	stallStartOffset int64
+}
+
+// followLedger subscribes from the followed index offset and applies every advance until a rebuild is due or ctx ends.
+func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, followed *followedIndex) followOutcome {
+	session := &ledgerFollowSession{writer: writer, followed: followed}
+	defer session.stopReplacementBuild()
+	session.swapServedIndexWhenCaughtUp()
 	consecutiveReconnectAttempts := 0
 	resnapshotTicker := time.NewTicker(writer.timing.ResnapshotInterval)
 	defer resnapshotTicker.Stop()
-	ledgerEndTicker := time.NewTicker(writer.timing.LedgerEndPollInterval)
-	defer ledgerEndTicker.Stop()
+	stallCheckTicker := time.NewTicker(writer.timing.LedgerEndPollInterval)
+	defer stallCheckTicker.Stop()
 	// Runs until ctx ends or a rebuild is due; consecutiveReconnectAttempts bounds the failures.
 	for {
 		if consecutiveReconnectAttempts > 0 {
 			if consecutiveReconnectAttempts > writer.timing.MaxConsecutiveReconnectAttempts {
-				return IndexRebuildReasonReconnectsExhausted, nil
+				return followOutcome{rebuildReason: IndexRebuildReasonReconnectsExhausted}
 			}
 			streamReconnectsCounter.Inc()
 			if !waitForDelay(ctx, backoffDelay(consecutiveReconnectAttempts, writer.timing.ReconnectInitialDelay, writer.timing.ReconnectMaxDelay)) {
-				return "", ctx.Err()
+				return followOutcome{err: ctx.Err()}
 			}
 		}
 		advances := make(chan cantonclient.CoreContractLedgerAdvance, advanceChannelCapacity)
-		subscription, err := writer.reader.SubscribeCoreContractUpdates(ctx, index.Status().Offset, advances)
+		subscription, err := writer.reader.SubscribeCoreContractUpdates(ctx, followed.index.Status().Offset, advances)
 		if err != nil {
+			writer.served.setStreamConnected(false)
+			publishIndexMetrics(writer.served)
 			if ctx.Err() != nil {
-				return "", ctx.Err()
+				return followOutcome{err: ctx.Err()}
 			}
 			if action, rebuildReason := classifyStreamFailure(err); action == streamFailureActionRebuild {
-				return rebuildReason, err
+				return followOutcome{rebuildReason: rebuildReason, err: err}
 			}
 			consecutiveReconnectAttempts++
 			writer.logger.Warn("core contract update stream subscribe failed", zap.Int("consecutiveReconnectAttempts", consecutiveReconnectAttempts), zap.Error(err))
@@ -319,66 +448,66 @@ func (writer *CoreContractIndexWriter) followLedger(ctx context.Context, index *
 		}
 		writer.served.setStreamConnected(true)
 		publishIndexMetrics(writer.served)
-		outcome := writer.consumeSubscription(ctx, index, subscription, advances, resnapshotTicker.C, ledgerEndTicker.C)
+		session.stallStartedAt = time.Time{}
+		outcome := session.consumeSubscription(ctx, subscription, advances, resnapshotTicker.C, stallCheckTicker.C)
 		subscription.Unsubscribe()
-		writer.waitForSubscriptionStop(subscription)
-		writer.served.setStreamConnected(false)
-		publishIndexMetrics(writer.served)
+		writer.waitForBackgroundStop(subscription.Done(), "core contract update stream")
+		if outcome.replacement == nil {
+			// A replacement subscribes at once; the readiness keeps the stream connected through the handover.
+			writer.served.setStreamConnected(false)
+			publishIndexMetrics(writer.served)
+		}
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return followOutcome{err: ctx.Err()}
 		}
 		if outcome.rebuildReason != "" {
-			return outcome.rebuildReason, outcome.err
+			return followOutcome{rebuildReason: outcome.rebuildReason, err: outcome.err, replacement: outcome.replacement}
 		}
 		if outcome.appliedAdvanceCount > 0 {
 			consecutiveReconnectAttempts = 0
 		}
 		consecutiveReconnectAttempts++
-		writer.logger.Warn("core contract update stream failed", zap.Int64("indexOffset", index.Status().Offset), zap.Int("consecutiveReconnectAttempts", consecutiveReconnectAttempts), zap.Error(outcome.err))
+		writer.logger.Warn("core contract update stream failed", zap.Int64("indexOffset", followed.index.Status().Offset), zap.Int("consecutiveReconnectAttempts", consecutiveReconnectAttempts), zap.Error(outcome.err))
 	}
 }
 
-func (writer *CoreContractIndexWriter) waitForSubscriptionStop(subscription *cantonclient.Subscription) {
-	timer := time.NewTimer(subscriptionStopTimeout)
-	defer timer.Stop()
-	select {
-	case <-subscription.Done():
-	case <-timer.C:
-		writer.logger.Error("core contract update stream goroutine did not stop", zap.Duration("timeout", subscriptionStopTimeout))
-	}
-}
-
-// subscriptionOutcome: a non-empty rebuildReason ends the index; otherwise err is a stream failure to reconnect after.
+// subscriptionOutcome: a non-empty rebuildReason ends the followed index; otherwise err is a stream failure to reconnect after.
 type subscriptionOutcome struct {
 	rebuildReason       IndexRebuildReason
 	err                 error
+	replacement         *followedIndex
 	appliedAdvanceCount int
 }
 
-// consumeSubscription applies advances, polls the ledger end and runs the resnapshot until the subscription ends.
-func (writer *CoreContractIndexWriter) consumeSubscription(
+// consumeSubscription applies advances, runs the resnapshot, checks for a stalled stream and collects
+// a replacement build until the subscription ends or a rebuild is due.
+func (session *ledgerFollowSession) consumeSubscription(
 	ctx context.Context,
-	index *CoreContractIndex,
 	subscription *cantonclient.Subscription,
 	advances <-chan cantonclient.CoreContractLedgerAdvance,
 	resnapshotTicks <-chan time.Time,
-	ledgerEndTicks <-chan time.Time,
+	stallCheckTicks <-chan time.Time,
 ) subscriptionOutcome {
+	writer := session.writer
 	outcome := subscriptionOutcome{}
 	// Runs until ctx ends, the subscription ends or a rebuild is due.
 	for {
+		var replacementResults <-chan replacementBuildResult
+		if session.replacement != nil {
+			replacementResults = session.replacement.result
+		}
 		select {
 		case <-ctx.Done():
 			return outcome
 		case advance := <-advances:
-			if rebuildReason, err := writer.applyAdvance(index, advance); rebuildReason != "" {
+			if rebuildReason, err := session.applyAdvance(advance); rebuildReason != "" {
 				return subscriptionOutcome{rebuildReason: rebuildReason, err: err, appliedAdvanceCount: outcome.appliedAdvanceCount}
 			}
 			outcome.appliedAdvanceCount++
 		case <-subscription.Done():
 			// The stream goroutine sends every decoded advance before it fails.
 			for bufferedAdvanceCount := len(advances); bufferedAdvanceCount > 0; bufferedAdvanceCount-- {
-				if rebuildReason, err := writer.applyAdvance(index, <-advances); rebuildReason != "" {
+				if rebuildReason, err := session.applyAdvance(<-advances); rebuildReason != "" {
 					return subscriptionOutcome{rebuildReason: rebuildReason, err: err, appliedAdvanceCount: outcome.appliedAdvanceCount}
 				}
 				outcome.appliedAdvanceCount++
@@ -394,11 +523,142 @@ func (writer *CoreContractIndexWriter) consumeSubscription(
 			}
 			outcome.err = streamErr
 			return outcome
-		case <-ledgerEndTicks:
-			writer.recordLedgerEnd(ctx)
+		case checkedAt := <-stallCheckTicks:
+			if session.streamStalled(checkedAt) {
+				outcome.err = errStalledStream
+				return outcome
+			}
 		case <-resnapshotTicks:
-			if rebuildReason, err := writer.resnapshotAndCompare(ctx, index); rebuildReason != "" {
-				return subscriptionOutcome{rebuildReason: rebuildReason, err: err, appliedAdvanceCount: outcome.appliedAdvanceCount}
+			if session.replacement != nil || session.followed.swapPending {
+				continue
+			}
+			if rebuildReason, err := writer.resnapshotAndCompare(ctx, session.followed.index); rebuildReason != "" {
+				writer.logger.Warn("building a replacement core disclosure index", zap.String("reason", string(rebuildReason)), zap.Error(err))
+				session.startReplacementBuild(ctx, rebuildReason)
+			}
+		case result := <-replacementResults:
+			reason := session.replacement.reason
+			session.replacement = nil
+			if result.err == nil {
+				return subscriptionOutcome{rebuildReason: reason, replacement: &result.replacement, appliedAdvanceCount: outcome.appliedAdvanceCount}
+			}
+			indexBuildFailuresCounter.Inc()
+			writer.logger.Error("replacement core disclosure index build failed", zap.String("reason", string(reason)), zap.Error(result.err))
+			if !session.followed.index.Status().Readiness.ServesSingletonLookups() {
+				return subscriptionOutcome{rebuildReason: reason, err: result.err, appliedAdvanceCount: outcome.appliedAdvanceCount}
+			}
+		}
+	}
+}
+
+// applyAdvance applies advance to the followed index and swaps it in once it reaches the served offset.
+func (session *ledgerFollowSession) applyAdvance(advance cantonclient.CoreContractLedgerAdvance) (IndexRebuildReason, error) {
+	rebuildReason, err := session.writer.applyAdvance(session.followed.index, advance)
+	if rebuildReason != "" {
+		return rebuildReason, err
+	}
+	session.swapServedIndexWhenCaughtUp()
+	return "", nil
+}
+
+// swapServedIndexWhenCaughtUp serves a pending replacement once its offset reaches the frozen served offset.
+func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
+	if !session.followed.swapPending {
+		return
+	}
+	if session.followed.index.Status().Offset < session.writer.served.indexOffset() {
+		return
+	}
+	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd)
+	session.followed.swapPending = false
+	publishIndexMetrics(session.writer.served)
+	session.writer.logger.Info("replacement core disclosure index serves", zap.Int64("indexOffset", session.followed.index.Status().Offset))
+}
+
+// streamStalled is true when the served ledger lag stayed above the bound for StalledStreamTimeout
+// while the followed index offset did not move.
+func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
+	readiness := session.writer.served.ServiceReadiness()
+	followedOffset := session.followed.index.Status().Offset
+	if readiness.LedgerLag <= readiness.LedgerLagBound {
+		session.stallStartedAt = time.Time{}
+		return false
+	}
+	if session.stallStartedAt.IsZero() || followedOffset != session.stallStartOffset {
+		session.stallStartedAt = checkedAt
+		session.stallStartOffset = followedOffset
+		return false
+	}
+	return checkedAt.Sub(session.stallStartedAt) >= session.writer.timing.StalledStreamTimeout
+}
+
+// startReplacementBuild bootstraps a new index in the background and follows it until it reaches the served offset.
+func (session *ledgerFollowSession) startReplacementBuild(ctx context.Context, reason IndexRebuildReason) {
+	if session.replacement != nil {
+		panic("cantondisclosure: second replacement build")
+	}
+	buildCtx, cancel := context.WithCancel(ctx)
+	build := &replacementBuild{reason: reason, cancel: cancel, result: make(chan replacementBuildResult, 1), done: make(chan struct{})}
+	writer := session.writer
+	go func() {
+		defer close(build.done)
+		replacement, err := writer.readBootstrappedIndex(buildCtx)
+		if err == nil {
+			replacement.swapPending = true
+			err = writer.catchUpReplacementIndex(buildCtx, replacement.index)
+		}
+		build.result <- replacementBuildResult{replacement: replacement, err: err}
+	}()
+	session.replacement = build
+}
+
+func (session *ledgerFollowSession) stopReplacementBuild() {
+	if session.replacement == nil {
+		return
+	}
+	session.replacement.cancel()
+	session.writer.waitForBackgroundStop(session.replacement.done, "replacement index build")
+	session.replacement = nil
+}
+
+// catchUpReplacementIndex applies advances to replacement until its offset reaches the served offset,
+// within SnapshotReadTimeout.
+func (writer *CoreContractIndexWriter) catchUpReplacementIndex(ctx context.Context, replacement *CoreContractIndex) error {
+	if replacement.Status().Offset >= writer.served.indexOffset() {
+		return nil
+	}
+	catchUpCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
+	defer cancel()
+	advances := make(chan cantonclient.CoreContractLedgerAdvance, advanceChannelCapacity)
+	subscription, err := writer.reader.SubscribeCoreContractUpdates(catchUpCtx, replacement.Status().Offset, advances)
+	if err != nil {
+		return fmt.Errorf("cantondisclosure: replacement catch-up subscribe: %w", err)
+	}
+	defer func() {
+		subscription.Unsubscribe()
+		writer.waitForBackgroundStop(subscription.Done(), "replacement catch-up stream")
+	}()
+	// Runs until the replacement reaches the served offset, the stream fails or catchUpCtx ends.
+	for {
+		select {
+		case <-catchUpCtx.Done():
+			return fmt.Errorf("cantondisclosure: replacement catch-up at offset %d: %w", replacement.Status().Offset, catchUpCtx.Err())
+		case <-subscription.Done():
+			if len(advances) == 0 {
+				streamErr := errors.New("cantondisclosure: replacement catch-up stream ended without an error")
+				select {
+				case subscriptionErr := <-subscription.Err():
+					streamErr = subscriptionErr
+				default:
+				}
+				return fmt.Errorf("cantondisclosure: replacement catch-up stream: %w", streamErr)
+			}
+		case advance := <-advances:
+			if rebuildReason, err := writer.applyAdvance(replacement, advance); rebuildReason != "" {
+				return fmt.Errorf("cantondisclosure: replacement catch-up %s: %w", rebuildReason, err)
+			}
+			if replacement.Status().Offset >= writer.served.indexOffset() {
+				return nil
 			}
 		}
 	}
@@ -427,19 +687,9 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 	return "", nil
 }
 
-func (writer *CoreContractIndexWriter) recordLedgerEnd(ctx context.Context) {
-	ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
-	if err != nil {
-		ledgerEndReadFailuresCounter.Inc()
-		writer.logger.Warn("ledger end read failed", zap.Error(err))
-		return
-	}
-	writer.served.recordLedgerEnd(ledgerEnd, time.Now())
-	publishIndexMetrics(writer.served)
-}
-
 // resnapshotAndCompare reads the active contracts at the index offset and compares them with the index.
-// Applies wait meanwhile. At the byte cap it requests a rebuild instead.
+// Applies wait meanwhile. A non-empty reason requests a replacement build. A stale or missing contract
+// suspends every lookup of index until the replacement serves.
 func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context, index *CoreContractIndex) (IndexRebuildReason, error) {
 	indexStatus := index.Status()
 	if indexStatus.ReplayNodesDroppedAtByteCap {
@@ -485,6 +735,8 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 		zap.Any("firstDifferences", firstSnapshotDifferencesForLog(comparison)),
 	)
 	if comparison.MissingFromIndexCount() > 0 || comparison.StaleInIndexCount() > 0 {
+		index.SuspendLookupsUntilReplaced()
+		publishIndexMetrics(writer.served)
 		return IndexRebuildReasonResnapshotDifference, nil
 	}
 	return "", nil

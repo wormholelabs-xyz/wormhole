@@ -48,6 +48,8 @@ type CoreContractIndex struct {
 	// replayNodesDroppedAtByteCap: a create reached the byte cap. The index holds singletons only from then on.
 	replayNodesDroppedAtByteCap  bool
 	droppedReplayNodeUpdateCount uint64
+	// lookupsSuspended: a resnapshot found a stale or missing contract. The index keeps applying updates.
+	lookupsSuspended bool
 }
 
 // IndexStatus is a point-in-time copy of the index counters.
@@ -167,6 +169,20 @@ func (index *CoreContractIndex) AdvanceOffset(offset int64) error {
 	index.offset = offset
 	index.checkInvariantsLocked()
 	return nil
+}
+
+// SuspendLookupsUntilReplaced fails every lookup from now on with IndexReadinessResnapshotDifference.
+// The index keeps applying updates until the writer swaps in its replacement.
+func (index *CoreContractIndex) SuspendLookupsUntilReplaced() {
+	index.mutex.Lock()
+	defer index.mutex.Unlock()
+	if index.lifecycle == indexLifecycleAwaitingBootstrap {
+		panic("cantondisclosure: suspend the lookups of an index without a bootstrap snapshot")
+	}
+	index.lookupsSuspended = true
+	if index.readinessLocked().ServesSingletonLookups() {
+		panic("cantondisclosure: suspended index serves lookups")
+	}
 }
 
 // CompareWithSnapshot compares the live index with a snapshot read at the index offset.
@@ -434,6 +450,9 @@ func (index *CoreContractIndex) readinessLocked() IndexReadiness {
 	case indexLifecycleLive:
 	default:
 		panic(fmt.Sprintf("cantondisclosure: unknown index lifecycle %d", int(index.lifecycle)))
+	}
+	if index.lookupsSuspended {
+		return IndexReadinessResnapshotDifference
 	}
 	hasSingletonConflict := false
 	hasMissingSingleton := false

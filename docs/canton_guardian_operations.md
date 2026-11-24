@@ -1338,15 +1338,22 @@ The service also has its own limits:
 | - | - |
 | `bootstrapping` | The first snapshot is not complete. |
 | `stream_disconnected` | The update stream is not connected. |
-| `ledger_lag_above_bound` | The index is behind the ledger end for more than `--ledgerLagBound`. |
+| `ledger_lag_above_bound` | The newest ledger end read that the index reached is older than `--ledgerLagBound`. |
 | `index_singleton_missing` | A singleton has no live instance. |
 | `index_singleton_conflict` | A singleton has two or more live instances. |
 | `index_inconsistent` | The index refused an update. The service builds a new index. |
+| `index_resnapshot_difference` | A periodic snapshot found a stale or missing contract. The service builds a new index. |
 
 The status `ready_byte_cap_reached` gives 200. In this state, the service serves the singletons only.
 `/v1/replay-node` and `/v1/claimed-roots-node` give 503.
 At each `--resnapshotInterval`, the service builds a new index and tries again.
 To serve the nodes again, increase `--indexByteCapBytes`.
+
+The service builds a new index in the background after a byte cap retry or a snapshot difference.
+During this build, the old index continues to follow the ledger, and `/v1/readyz` shows its state.
+The new index replaces the old index when it reaches the same offset.
+After other rebuild causes, the status is `stream_disconnected` until the new index is complete.
+The service reads the ledger end every 5 seconds, also during a build.
 
 The index uses the blob bytes plus 1536 bytes for each contract.
 During a rebuild, the old index, the snapshot and the new index are in memory together.

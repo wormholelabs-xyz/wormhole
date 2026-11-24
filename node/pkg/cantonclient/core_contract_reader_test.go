@@ -36,13 +36,23 @@ func (stream *scriptedCoreContractStream[Response]) Recv() (*Response, error) {
 	return response, nil
 }
 
+// fakeActiveContractsService returns stream for the first request and singletonStream for later requests.
 type fakeActiveContractsService struct {
 	apiv2.StateServiceClient
-	stream  *scriptedCoreContractStream[apiv2.GetActiveContractsResponse]
-	request *apiv2.GetActiveContractsRequest
+	stream          *scriptedCoreContractStream[apiv2.GetActiveContractsResponse]
+	singletonStream *scriptedCoreContractStream[apiv2.GetActiveContractsResponse]
+	request         *apiv2.GetActiveContractsRequest
+	requests        []*apiv2.GetActiveContractsRequest
 }
 
 func (service *fakeActiveContractsService) GetActiveContracts(_ context.Context, request *apiv2.GetActiveContractsRequest, _ ...grpc.CallOption) (apiv2.StateService_GetActiveContractsClient, error) {
+	service.requests = append(service.requests, request)
+	if len(service.requests) > 1 {
+		if service.singletonStream == nil {
+			return nil, errors.New("fake state service: unexpected second GetActiveContracts")
+		}
+		return service.singletonStream, nil
+	}
 	service.request = request
 	return service.stream, nil
 }
@@ -147,7 +157,8 @@ func TestReadActiveCoreContractsReplayNodeLimit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reader, _ := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
+			reader, service := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
+			service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: snapshotResponses[2:]}
 			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxReplayNodes)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
@@ -174,6 +185,106 @@ func decodedSnapshotContract(t *testing.T, template CoreContractTemplate, serial
 	contract, err := testCoreContractDecoder(t).decodeCreatedCoreContract(createdCoreEvent(template, 1, snapshotContractIDHex(serial), nil), testSynchronizerID)
 	require.NoError(t, err)
 	return contract
+}
+
+// checkFiltersTemplates requires the guardianGovernance party filter with blobs for exactly wantTemplates.
+func checkFiltersTemplates(t *testing.T, eventFormat *apiv2.EventFormat, wantTemplates []string) {
+	t.Helper()
+	filters, found := eventFormat.GetFiltersByParty()[governanceParty]
+	require.True(t, found)
+	gotTemplates := []string{}
+	for _, cumulativeFilter := range filters.GetCumulative() {
+		templateFilter := cumulativeFilter.GetTemplateFilter()
+		require.NotNil(t, templateFilter)
+		assert.True(t, templateFilter.GetIncludeCreatedEventBlob())
+		identifier := templateFilter.GetTemplateId()
+		gotTemplates = append(gotTemplates, identifier.GetPackageId()+":"+identifier.GetModuleName()+":"+identifier.GetEntityName())
+	}
+	assert.Equal(t, wantTemplates, gotTemplates)
+}
+
+func TestReadActiveCoreContractsStopsAtTheReplayNodeLimitAndReadsTheSingletonsAlone(t *testing.T) {
+	const maxReplayNodes = 2
+	fullResponses := []*apiv2.GetActiveContractsResponse{
+		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 1, snapshotContractIDHex(100), nil)),
+	}
+	for serial := 1; serial <= 50; serial++ {
+		fullResponses = append(fullResponses, activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, snapshotContractIDHex(serial), nil)))
+	}
+	singletonResponses := []*apiv2.GetActiveContractsResponse{
+		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 1, snapshotContractIDHex(100), nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateEmitterRegistry, 1, snapshotContractIDHex(101), nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayRootRegistry, 1, snapshotContractIDHex(102), nil)),
+	}
+	reader, service := testCoreContractReaderWithSnapshot(t, fullResponses...)
+	service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: singletonResponses}
+
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 7, maxReplayNodes)
+	require.NoError(t, err)
+	require.True(t, snapshot.ReplayNodesTruncated())
+	gotTemplates := []CoreContractTemplate{}
+	for _, contract := range snapshot.Contracts() {
+		gotTemplates = append(gotTemplates, contract.TemplateID().Template())
+	}
+	assert.Equal(t, []CoreContractTemplate{CoreContractTemplateCoreState, CoreContractTemplateEmitterRegistry, CoreContractTemplateReplayRootRegistry}, gotTemplates)
+
+	receivedFullEntryCount := len(fullResponses) - len(service.stream.responses)
+	assert.Equal(t, 1+maxReplayNodes+1, receivedFullEntryCount, "the full read stops at the first replay node above the limit")
+	assert.Empty(t, service.singletonStream.responses)
+	require.Len(t, service.requests, 2)
+	for _, request := range service.requests {
+		assert.Equal(t, int64(7), request.GetActiveAtOffset())
+	}
+	checkFiltersTheDisclosedCoreTemplates(t, service.requests[0].GetEventFormat())
+	checkFiltersTemplates(t, service.requests[1].GetEventFormat(), []string{
+		"#wormhole-core:Wormhole.Core.State:CoreState",
+		"#wormhole-core:Wormhole.Core.State:EmitterRegistry",
+		"#wormhole-core:Wormhole.Core.State:ReplayRootRegistry",
+	})
+}
+
+func TestReadActiveCoreContractsSingletonReadRejects(t *testing.T) {
+	overLimit := []*apiv2.GetActiveContractsResponse{
+		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, snapshotContractIDHex(1), nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, snapshotContractIDHex(2), nil)),
+	}
+	fourCoreStates := []*apiv2.GetActiveContractsResponse{}
+	for serial := 10; serial < 14; serial++ {
+		fourCoreStates = append(fourCoreStates, activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 1, snapshotContractIDHex(serial), nil)))
+	}
+	cases := []struct {
+		name               string
+		singletonResponses []*apiv2.GetActiveContractsResponse
+		singletonFinalErr  error
+		wantErr            string
+	}{
+		{name: "replay node in the singleton read", singletonResponses: overLimit[:1], wantErr: "singleton read returned replay node"},
+		{name: "four instances of one singleton", singletonResponses: fourCoreStates, wantErr: "more than 3 active"},
+		{name: "stream error", singletonFinalErr: errors.New("connection reset"), wantErr: "singleton read: GetActiveContracts(5): connection reset"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader, service := testCoreContractReaderWithSnapshot(t, overLimit...)
+			service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: tc.singletonResponses, finalErr: tc.singletonFinalErr}
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 5, 1)
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Equal(t, ActiveCoreContracts{}, snapshot)
+		})
+	}
+}
+
+func TestActiveCoreContractCollectorEntryBound(t *testing.T) {
+	collector, err := newActiveCoreContractCollector(4)
+	require.NoError(t, err)
+	require.Equal(t, 4+1+9, collector.maxReceivedEntryCount())
+	for entryIndex := 0; entryIndex < collector.maxReceivedEntryCount(); entryIndex++ {
+		require.NoError(t, collector.countReceivedEntry())
+	}
+	require.ErrorContains(t, collector.countReceivedEntry(), "more than 14 entries")
+	require.Equal(t, 0+1+9, newSingletonContractCollector().maxReceivedEntryCount())
+	largest, err := newActiveCoreContractCollector(MaxActiveCoreContractsPerSnapshot)
+	require.NoError(t, err)
+	require.Equal(t, MaxActiveCoreContractsPerSnapshot+10, largest.maxReceivedEntryCount())
 }
 
 func TestCollectActiveCoreContracts(t *testing.T) {
