@@ -421,7 +421,7 @@ func (notReady ReadPartyHostingNotReadyError) Is(target error) bool {
 }
 
 // servedIndexForLookup is the served index, or an error before the first swap or while the hosting refuses lookups.
-// SECURITY: an unhosted participant keeps a frozen ACS; its blobs are stale even though the ledger rejects them.
+// SECURITY: an unhosted participant keeps a frozen ACS, so its blobs can be stale.
 func (served *ServedIndex) servedIndexForLookup() (*CoreContractIndex, error) {
 	index := served.currentIndex.Load()
 	if index == nil {

@@ -83,7 +83,9 @@ func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64
 	reader.ledgerEndReadStartedAt = time.Now()
 	readDuration := reader.ledgerEndReadDuration
 	reader.mutex.Unlock()
-	time.Sleep(readDuration)
+	if readDuration > 0 {
+		time.Sleep(readDuration)
+	}
 	reader.mutex.Lock()
 	defer reader.mutex.Unlock()
 	reader.ledgerEndReadCount++
@@ -411,7 +413,10 @@ func TestWriterStopsAfterBoundedRebuildAttempts(t *testing.T) {
 			reader := testCase.reader(t)
 			served, err := NewServedIndex(time.Minute)
 			require.NoError(t, err)
-			writer, err := NewCoreContractIndexWriter(reader, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, testWriterTiming(), zap.NewNop())
+			timing := testWriterTiming()
+			// The ledger end poller stays idle, so the ledger end reads are the build reads only.
+			timing.LedgerEndPollInterval = 30 * time.Second
+			writer, err := NewCoreContractIndexWriter(reader, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, timing, zap.NewNop())
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
