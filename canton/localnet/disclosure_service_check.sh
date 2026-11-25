@@ -17,7 +17,7 @@
 #   D4 each served ReplayNode is active once the index offset is past the archive offset
 #   D5 submissions with only served blobs: VerifyAndConsumeVAA, and ClaimReplayRoot by a party on app-user that is not a
 #      stakeholder; stale blobs fail with LOCAL_VERDICT_INACTIVE_CONTRACTS
-#   D6 hosting change (hosting-change): a ready instance serves the ledger; app-user reports read_party_not_hosted
+#   D6 hosting change (hosting-change): sv and guardian4 are consistent; app-user reports read_party_not_hosted
 #   D7 idle ledger lag, resnapshot metrics and the core package count
 #   D8 restart rebuilds the same answers     D9 a small byte cap serves the singletons only
 #
@@ -279,14 +279,23 @@ stop_service_instance() {
   STARTED_SERVICE_INSTANCES=("${kept_names[@]}")
 }
 
-# stop_leftover_service_instances: instances of an earlier run that left a pid file.
+# stop_leftover_service_instances: instances of an earlier run that left a pid file. SIGTERM, then SIGKILL after
+# SERVICE_STOP_SECONDS, so that the ports are free for the next start.
 stop_leftover_service_instances() {
-  local pid_file service_pid
+  local pid_file service_pid waited_seconds
   for pid_file in "$SUITE_STATE_DIR"/*.pid; do
     [[ -f "$pid_file" ]] || continue
     service_pid="$(cat "$pid_file")"
     if service_pid_is_service "$service_pid"; then
       kill -TERM "$service_pid"
+      for ((waited_seconds = 0; waited_seconds < SERVICE_STOP_SECONDS; waited_seconds++)); do
+        service_pid_is_service "$service_pid" || break
+        sleep 1
+      done
+      if service_pid_is_service "$service_pid"; then
+        kill -KILL "$service_pid"
+        echo "leftover service pid $service_pid did not stop on SIGTERM; sent SIGKILL" >&2
+      fi
       echo "stopped leftover service pid $service_pid ($(basename "$pid_file" .pid))"
     fi
     rm -f "$pid_file"
@@ -581,13 +590,21 @@ compare_covering_nodes_after_split() {
     test "$archived_rows" -eq 0
 }
 
-# check_split_parent_is_not_served: D4 after the index offset passed the split offset.
+# check_split_parent_is_not_served: D4 at or past the split offset, a digest of each first nibble gets a node other than
+# the split parent. The parent was the root node, so it covered each of these digests before the split.
 check_split_parent_is_not_served() {
-  local served
+  local nibble served served_node_id lookup_count=0 parent_answer_count=0
   [[ -n "${split_offset:-}" && -n "${split_parent_node_id:-}" ]] || { record_check D4 FAIL "no split recorded"; return 1; }
-  served="$(service_lookup_at_offset sv-main /v1/core-state "$split_offset")" \
-    || { record_check D4 FAIL "the index offset does not reach the split offset $split_offset"; return 1; }
-  record_check D4 OBSERVED "index offset $(jq -r .activeAtOffset <<<"$served") is at or past the split offset $split_offset"
+  for nibble in 0 1 2 3 4 5 6 7 8 9 a b c d e f; do
+    served="$(service_lookup_at_offset sv-main "$(replay_node_query_path "$integrator_party" "$replay_namespace" \
+      "$(synthetic_digest_with_first_nibble "$nibble")")" "$split_offset")" \
+      || { record_check D4 FAIL "no covering node for first nibble $nibble at or past the split offset $split_offset"; return 1; }
+    served_node_id="$(jq -r .contractId <<<"$served")"
+    lookup_count=$((lookup_count + 1))
+    [[ "$served_node_id" != "$split_parent_node_id" ]] || parent_answer_count=$((parent_answer_count + 1))
+  done
+  check_or_record D4 "$lookup_count lookups at or past the split offset $split_offset, one for each first nibble: $parent_answer_count give the split parent ${split_parent_node_id:0:16}" \
+    test "$parent_answer_count" -eq 0
 }
 
 # check_stale_replay_node_fails: the parent node served before the split, then the fresh node.
@@ -644,8 +661,8 @@ check_claim_from_app_user() {
 
 # --- D7 ---
 
-# measure_idle_lag <name>: samples /v1/readyz and the lag gauges each IDLE_LAG_SAMPLE_SECONDS for IDLE_LAG_SECONDS while
-# the suite sends only non-core traffic.
+# measure_idle_lag <name>: samples /v1/readyz and the lag gauges each IDLE_LAG_SAMPLE_SECONDS for IDLE_LAG_SECONDS. The suite
+# submits no transaction meanwhile; the LocalNet background traffic of other parties moves the ledger end.
 measure_idle_lag() {
   local name="$1" samples_file sample_count summary metrics_text readiness started_seconds
   samples_file="$SUITE_EVIDENCE_DIR/idle-lag-samples-$name.jsonl"
@@ -777,6 +794,8 @@ check_restart_serves_same_answers() {
   answers_after="$(capture_answers sv-main)"
   printf '%s\n' "$answers_before" > "$SUITE_EVIDENCE_DIR/answers-before-restart.txt"
   printf '%s\n' "$answers_after" > "$SUITE_EVIDENCE_DIR/answers-after-restart.txt"
+  check_or_record D8 "each answer before the restart has a contract id" check_answers_have_contract_ids "$answers_before"
+  check_or_record D8 "each answer after the restart has a contract id" check_answers_have_contract_ids "$answers_after"
   check_or_record D8 "after a restart the service serves the same $(wc -l <<<"$answers_after" | tr -d ' ') answers" \
     test "$answers_before" == "$answers_after"
 }
@@ -922,9 +941,9 @@ hosting_answers_match_ledger() {
   [[ "$mismatches" -eq 0 ]]
 }
 
-# record_hosting_outcome <name>
+# record_hosting_outcome <name> <requirement>: requirement is consistent or safe (check_hosting_change_outcome).
 record_hosting_outcome() {
-  local name="$1" readiness metrics answers_match=false outcome detail
+  local name="$1" requirement="$2" readiness metrics answers_match=false outcome detail
   readiness="$(service_readyz "$name")"
   metrics="$(resnapshot_metrics_json "$name")"
   hosting_answers_match_ledger "$name" && answers_match=true
@@ -934,10 +953,10 @@ record_hosting_outcome() {
     --argjson metrics "$metrics" --argjson answersMatch "$answers_match" \
     '{outcome: $outcome, validator: $validator, readiness: $readiness, answersMatchLedger: $answersMatch, resnapshot: $metrics}')"
   write_evidence_json "hosting-change-$name.json" "$detail"
-  if hosting_change_outcome_is_safe "$outcome"; then
-    record_check D6 PASS "$name on ${SERVICE_VALIDATOR_OF[$name]}: $outcome (readyz $(jq -c . <<<"$readiness"))" "$detail"
+  if check_hosting_change_outcome "$outcome" "$requirement"; then
+    record_check D6 PASS "$name on ${SERVICE_VALIDATOR_OF[$name]}: $outcome, required $requirement (readyz $(jq -c . <<<"$readiness"))" "$detail"
   else
-    record_check D6 FAIL "$name on ${SERVICE_VALIDATOR_OF[$name]}: $outcome" "$detail"
+    record_check D6 FAIL "$name on ${SERVICE_VALIDATOR_OF[$name]}: $outcome, required $requirement" "$detail"
   fi
 }
 
@@ -994,9 +1013,9 @@ run_hosting_change() {
     record_check D6 FAIL "consumes after the hosting change"
   fi
   sleep "$HOSTING_SETTLE_SECONDS"
-  for name in hosting-sv hosting-app-user hosting-guardian4; do
-    record_hosting_outcome "$name"
-  done
+  record_hosting_outcome hosting-sv consistent
+  record_hosting_outcome hosting-app-user safe
+  record_hosting_outcome hosting-guardian4 consistent
   check_or_record D6 "hosting-app-user: /v1/readyz $(service_readyz hosting-app-user | jq -c .), expected 503 read_party_not_hosted" \
     check_json_matches '.httpStatus == 503 and .status == "read_party_not_hosted"' "$(service_readyz hosting-app-user)"
   report_summary hosting-change

@@ -26,10 +26,10 @@ type CoreContractReader interface {
 	ReadPartyIsHosted(ctx context.Context) (bool, error)
 
 	// ReadActiveCoreContracts returns the active disclosed core contracts at
-	// activeAtOffset, with their created event blobs. Above maxReplayNodes
-	// ReplayNodes, the result keeps the singletons only and reports ReplayNodesTruncated.
+	// activeAtOffset, with their created event blobs. Above replayNodeLimit,
+	// the result keeps the singletons only and reports ReplayNodesTruncated.
 	// Maps to StateService.GetActiveContracts.
-	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (ActiveCoreContracts, error)
+	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, replayNodeLimit ReplayNodeSnapshotLimit) (ActiveCoreContracts, error)
 
 	// SubscribeCoreContractUpdates delivers on out, in ledger order, one
 	// CoreContractLedgerAdvance per transaction with core contract events and
@@ -40,8 +40,43 @@ type CoreContractReader interface {
 	Close() error
 }
 
-// MaxActiveCoreContractsPerSnapshot bounds the maxReplayNodes of one ReadActiveCoreContracts call.
+// MaxActiveCoreContractsPerSnapshot bounds the ReplayNode count of one ReadActiveCoreContracts call.
 const MaxActiveCoreContractsPerSnapshot = 1 << 23
+
+// Bounds of the byte terms of a ReplayNodeSnapshotLimit. maxReplayNodeSnapshotChargedBytes keeps each sum inside int64.
+const (
+	maxReplayNodeSnapshotChargedBytes         int64 = 1 << 40
+	maxReplayNodeSnapshotOverheadBytesPerNode int64 = 1 << 20
+)
+
+// ReplayNodeSnapshotLimit bounds the ReplayNodes that one ReadActiveCoreContracts call keeps: at most
+// maxReplayNodeCount nodes, and at most maxChargedBytes of blob bytes plus overheadBytesPerNode per node.
+type ReplayNodeSnapshotLimit struct {
+	maxReplayNodeCount   int
+	maxChargedBytes      int64
+	overheadBytesPerNode int64
+}
+
+// NewReplayNodeSnapshotLimit requires maxReplayNodeCount in [1, MaxActiveCoreContractsPerSnapshot],
+// maxChargedBytes in [1, 2^40] and overheadBytesPerNode in [0, 2^20].
+func NewReplayNodeSnapshotLimit(maxReplayNodeCount int, maxChargedBytes int64, overheadBytesPerNode int64) (ReplayNodeSnapshotLimit, error) {
+	if maxReplayNodeCount < 1 || maxReplayNodeCount > MaxActiveCoreContractsPerSnapshot {
+		return ReplayNodeSnapshotLimit{}, fmt.Errorf("maximum replay node count %d is outside [1, %d]", maxReplayNodeCount, MaxActiveCoreContractsPerSnapshot)
+	}
+	if maxChargedBytes < 1 || maxChargedBytes > maxReplayNodeSnapshotChargedBytes {
+		return ReplayNodeSnapshotLimit{}, fmt.Errorf("maximum replay node bytes %d is outside [1, %d]", maxChargedBytes, maxReplayNodeSnapshotChargedBytes)
+	}
+	if overheadBytesPerNode < 0 || overheadBytesPerNode > maxReplayNodeSnapshotOverheadBytesPerNode {
+		return ReplayNodeSnapshotLimit{}, fmt.Errorf("replay node overhead bytes %d is outside [0, %d]", overheadBytesPerNode, maxReplayNodeSnapshotOverheadBytesPerNode)
+	}
+	return ReplayNodeSnapshotLimit{maxReplayNodeCount: maxReplayNodeCount, maxChargedBytes: maxChargedBytes, overheadBytesPerNode: overheadBytesPerNode}, nil
+}
+
+// MaxReplayNodeCount is the largest ReplayNode count that the limit keeps.
+func (limit ReplayNodeSnapshotLimit) MaxReplayNodeCount() int { return limit.maxReplayNodeCount }
+
+// MaxChargedBytes is the largest sum of blob bytes plus overhead bytes of the kept ReplayNodes.
+func (limit ReplayNodeSnapshotLimit) MaxChargedBytes() int64 { return limit.maxChargedBytes }
 
 // maxActiveSingletonContractsPerTemplate bounds the kept instances of each singleton template; two show a conflict.
 const maxActiveSingletonContractsPerTemplate = 3
@@ -60,47 +95,52 @@ func (snapshot ActiveCoreContracts) Contracts() []CreatedCoreContract {
 	return slices.Clone(snapshot.contracts)
 }
 
-// ReplayNodesTruncated is true when the snapshot had more than maxReplayNodes ReplayNodes.
+// ReplayNodesTruncated is true when the snapshot had more ReplayNodes than its ReplayNodeSnapshotLimit admits.
 func (snapshot ActiveCoreContracts) ReplayNodesTruncated() bool {
 	return snapshot.replayNodesTruncated
 }
 
-// activeCoreContractCollector keeps at most maxReplayNodes ReplayNodes and
+// activeCoreContractCollector keeps the ReplayNodes that replayNodeLimit admits and at most
 // maxActiveSingletonContractsPerTemplate instances of each singleton template.
-// A singleton-only collector has maxReplayNodes 0 and refuses every ReplayNode.
+// A singleton-only collector has the zero limit and refuses every ReplayNode.
 type activeCoreContractCollector struct {
-	maxReplayNodes            int
+	replayNodeLimit           ReplayNodeSnapshotLimit
 	contracts                 []CreatedCoreContract
 	keptContractIDs           map[ContractID]bool
 	replayNodeCount           int
+	replayNodeChargedBytes    int64
 	singletonCountsByTemplate map[CoreContractTemplate]int
 	receivedEntryCount        int
 }
 
-func newActiveCoreContractCollector(maxReplayNodes int) (*activeCoreContractCollector, error) {
-	if maxReplayNodes < 1 || maxReplayNodes > MaxActiveCoreContractsPerSnapshot {
-		return nil, fmt.Errorf("maximum replay node count %d is outside [1, %d]", maxReplayNodes, MaxActiveCoreContractsPerSnapshot)
+func newActiveCoreContractCollector(replayNodeLimit ReplayNodeSnapshotLimit) (*activeCoreContractCollector, error) {
+	if replayNodeLimit.maxReplayNodeCount < 1 || replayNodeLimit.maxChargedBytes < 1 {
+		return nil, fmt.Errorf("replay node limit %+v is not from NewReplayNodeSnapshotLimit", replayNodeLimit)
 	}
-	return newCollectorWithReplayNodeLimit(maxReplayNodes), nil
+	return newCollectorWithReplayNodeLimit(replayNodeLimit), nil
 }
 
 func newSingletonContractCollector() *activeCoreContractCollector {
-	return newCollectorWithReplayNodeLimit(0)
+	return newCollectorWithReplayNodeLimit(ReplayNodeSnapshotLimit{})
 }
 
-func newCollectorWithReplayNodeLimit(maxReplayNodes int) *activeCoreContractCollector {
+func newCollectorWithReplayNodeLimit(replayNodeLimit ReplayNodeSnapshotLimit) *activeCoreContractCollector {
 	return &activeCoreContractCollector{
-		maxReplayNodes:            maxReplayNodes,
+		replayNodeLimit:           replayNodeLimit,
 		contracts:                 []CreatedCoreContract{},
 		keptContractIDs:           map[ContractID]bool{},
 		singletonCountsByTemplate: map[CoreContractTemplate]int{},
 	}
 }
 
+func (collector *activeCoreContractCollector) isSingletonOnly() bool {
+	return collector.replayNodeLimit.maxReplayNodeCount == 0
+}
+
 // maxReceivedEntryCount is the largest entry count of one read: every kept contract plus the
 // first ReplayNode above the limit, at which the read stops.
 func (collector *activeCoreContractCollector) maxReceivedEntryCount() int {
-	return collector.maxReplayNodes + 1 + maxActiveSingletonContractsPerSnapshot
+	return collector.replayNodeLimit.maxReplayNodeCount + 1 + maxActiveSingletonContractsPerSnapshot
 }
 
 // countReceivedEntry fails when a read receives more than maxReceivedEntryCount entries.
@@ -113,17 +153,23 @@ func (collector *activeCoreContractCollector) countReceivedEntry() error {
 }
 
 // keepActiveContract keeps contract. It returns replayNodeLimitExceeded at the first ReplayNode
-// above maxReplayNodes; the caller stops the read there.
+// above the count or byte limit; the caller stops the read there.
 func (collector *activeCoreContractCollector) keepActiveContract(contract CreatedCoreContract) (replayNodeLimitExceeded bool, err error) {
 	template := contract.TemplateID().Template()
 	if template == CoreContractTemplateReplayNode {
-		if collector.maxReplayNodes == 0 {
+		if collector.isSingletonOnly() {
 			return false, fmt.Errorf("singleton read returned replay node %s", contract.ContractID())
 		}
-		if collector.replayNodeCount == collector.maxReplayNodes {
+		if collector.replayNodeCount == collector.replayNodeLimit.maxReplayNodeCount {
+			return true, nil
+		}
+		// The blob is bounded by the gRPC message size, so the sum stays inside int64.
+		nodeChargedBytes := int64(contract.CreatedEventBlobByteCount()) + collector.replayNodeLimit.overheadBytesPerNode
+		if collector.replayNodeChargedBytes+nodeChargedBytes > collector.replayNodeLimit.maxChargedBytes {
 			return true, nil
 		}
 		collector.replayNodeCount++
+		collector.replayNodeChargedBytes += nodeChargedBytes
 	} else {
 		if collector.singletonCountsByTemplate[template] == maxActiveSingletonContractsPerTemplate {
 			return false, fmt.Errorf("more than %d active %s", maxActiveSingletonContractsPerTemplate, template)
@@ -150,7 +196,10 @@ func (collector *activeCoreContractCollector) collectedActiveCoreContracts() Act
 	if len(collector.contracts) != collector.replayNodeCount+singletonCount {
 		panic("cantonclient: kept contract count differs from the replay node and singleton counts")
 	}
-	isSingletonOnly := collector.maxReplayNodes == 0
+	if collector.replayNodeChargedBytes > collector.replayNodeLimit.maxChargedBytes {
+		panic("cantonclient: kept replay node bytes exceed the limit")
+	}
+	isSingletonOnly := collector.isSingletonOnly()
 	if isSingletonOnly && collector.replayNodeCount != 0 {
 		panic("cantonclient: singleton read kept replay nodes")
 	}
@@ -322,12 +371,12 @@ func (decoder coreContractDecoder) eventFormatForTemplates(templates []CoreContr
 }
 
 // ReadActiveCoreContracts reads every disclosed core contract. At the first ReplayNode above
-// maxReplayNodes it stops that read and reads the singletons alone at the same offset.
-func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (ActiveCoreContracts, error) {
+// replayNodeLimit it stops that read and reads the singletons alone at the same offset.
+func (reader *grpcCoreContractReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, replayNodeLimit ReplayNodeSnapshotLimit) (ActiveCoreContracts, error) {
 	if activeAtOffset < 0 {
 		return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts: negative offset %d", activeAtOffset)
 	}
-	collector, err := newActiveCoreContractCollector(maxReplayNodes)
+	collector, err := newActiveCoreContractCollector(replayNodeLimit)
 	if err != nil {
 		return ActiveCoreContracts{}, fmt.Errorf("GetActiveContracts: %w", err)
 	}

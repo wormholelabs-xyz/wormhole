@@ -154,3 +154,49 @@ created_replay_node_count_in() {
       | select((.templateId | endswith(":Wormhole.Core.Replay:ReplayNode")) and .createArgument.namespace == $namespace)]
     | length' <<<"$1"
 }
+
+# check_hosting_change_outcome <outcome> <requirement>: requirement "consistent" admits only consistent; "safe" admits
+# each outcome that hosting_change_outcome_is_safe admits. An instance on a host whose ACS does not change is consistent.
+check_hosting_change_outcome() {
+  local outcome="$1" requirement="$2"
+  case "$requirement" in
+    consistent) [[ "$outcome" == consistent ]] ;;
+    safe) hosting_change_outcome_is_safe "$outcome" ;;
+    *) echo "unknown hosting change requirement: '$requirement'" >&2; return 2 ;;
+  esac
+}
+
+# check_answers_have_contract_ids <answers-text>: each line of capture_answers is "<route or digest> <contract id>" with a
+# contract id of at least 66 lowercase hex characters. An empty text fails.
+check_answers_have_contract_ids() {
+  local answers="$1" line_number=0 key contract_id extra
+  [[ -n "$answers" ]] || { echo "no answers" >&2; return 1; }
+  while IFS=' ' read -r key contract_id extra; do
+    line_number=$((line_number + 1))
+    if [[ -z "$key" || -n "$extra" || ! "$contract_id" =~ ^[0-9a-f]{66,}$ ]]; then
+      echo "answer line $line_number has no contract id: '$key $contract_id${extra:+ $extra}'" >&2
+      return 1
+    fi
+  done <<<"$answers"
+}
+
+# go_duration_constant_seconds <go-file> <name>: the seconds of "const <name> = <count> * time.<Second|Minute|Hour>".
+go_duration_constant_seconds() {
+  local definition
+  definition="$(grep -E "^const $2 = [0-9]+ \* time\.(Second|Minute|Hour)$" "$1")" || { echo "no duration constant $2 in $1" >&2; return 1; }
+  awk '{ unit = $NF; sub(/^time\./, "", unit); scale = (unit == "Hour") ? 3600 : (unit == "Minute") ? 60 : 1; print $4 * scale }' <<<"$definition"
+}
+
+# go_integer_constant <go-file> <name>: the value of "const <name> = <digits>".
+go_integer_constant() {
+  local definition
+  definition="$(grep -E "^const $2 = [0-9]+$" "$1")" || { echo "no integer constant $2 in $1" >&2; return 1; }
+  awk '{ print $4 }' <<<"$definition"
+}
+
+# shell_readonly_integer <script> <name>: the value of "readonly <name>=<digits>".
+shell_readonly_integer() {
+  local definition
+  definition="$(grep -E "^readonly $2=[0-9]+$" "$1")" || { echo "no readonly integer $2 in $1" >&2; return 1; }
+  echo "${definition#*=}"
+}

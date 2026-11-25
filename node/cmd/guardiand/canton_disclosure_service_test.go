@@ -48,6 +48,9 @@ func TestParseCantonDisclosureServiceFlags(t *testing.T) {
 		{name: "status server off", mutate: func(flags *cantonDisclosureServiceFlags) { flags.statusAddress = "" }},
 		{name: "minimum ledger lag bound", mutate: func(flags *cantonDisclosureServiceFlags) { flags.ledgerLagBound = 10 * time.Second }},
 		{name: "minimum resnapshot interval", mutate: func(flags *cantonDisclosureServiceFlags) { flags.resnapshotInterval = time.Minute }},
+		{name: "log level debug", mutate: func(flags *cantonDisclosureServiceFlags) { flags.logLevel = "debug" }},
+		{name: "log level dpanic", mutate: func(flags *cantonDisclosureServiceFlags) { flags.logLevel = "dpanic" }},
+		{name: "log level fatal", mutate: func(flags *cantonDisclosureServiceFlags) { flags.logLevel = "fatal" }},
 
 		{name: "empty cantonRPC", mutate: func(flags *cantonDisclosureServiceFlags) { flags.cantonRPC = "" }, expectedErrorMessage: "--cantonRPC"},
 		{name: "cantonRPC without port", mutate: func(flags *cantonDisclosureServiceFlags) { flags.cantonRPC = "participant.example" }, expectedErrorMessage: "--cantonRPC"},
@@ -138,7 +141,7 @@ func (emptyLedgerReader) GetLedgerEnd(context.Context) (int64, error) { return 5
 
 func (emptyLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) { return true, nil }
 
-func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, int) (cantonclient.ActiveCoreContracts, error) {
+func (emptyLedgerReader) ReadActiveCoreContracts(context.Context, int64, cantonclient.ReplayNodeSnapshotLimit) (cantonclient.ActiveCoreContracts, error) {
 	return cantonclient.ActiveCoreContracts{}, nil
 }
 
@@ -197,6 +200,8 @@ func TestServeCantonDisclosureShutsDownOnCancellation(t *testing.T) {
 	_ = metricsResponse.Body.Close()
 	require.Equal(t, http.StatusOK, metricsResponse.StatusCode)
 	require.Contains(t, string(metricsBody), "wormhole_canton_disclosure_index_byte_cap_bytes 4.294967296e+09")
+	require.Contains(t, string(metricsBody), "wormhole_canton_disclosure_stream_reconnects_total 0")
+	require.Contains(t, string(metricsBody), "go_goroutines")
 
 	cancel()
 	select {
