@@ -221,7 +221,8 @@ func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
 			if consecutiveUnstableBuilds >= writer.timing.MaxConsecutiveRebuildAttempts {
 				return fmt.Errorf("%w: %d consecutive", ErrRebuildAttemptsExhausted, consecutiveUnstableBuilds)
 			}
-			if !waitForDelay(ctx, backoffDelay(consecutiveUnstableBuilds, writer.timing.RebuildInitialDelay, writer.timing.RebuildMaxDelay)) {
+			// A ready replacement is caught up and needs no snapshot read, so it follows at once.
+			if replacement == nil && !waitForDelay(ctx, backoffDelay(consecutiveUnstableBuilds, writer.timing.RebuildInitialDelay, writer.timing.RebuildMaxDelay)) {
 				return nil
 			}
 		}
@@ -280,36 +281,42 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+			observed, err := writer.readObservedLedgerEnd(ctx)
 			if ctx.Err() != nil {
 				return
 			}
 			if err != nil {
 				ledgerEndReadFailuresCounter.Inc()
 				writer.logger.Warn("ledger end read failed", zap.Error(err))
-				continue
+			} else {
+				writer.served.recordLedgerEnd(observed.offset, observed.observedAt)
 			}
-			if ledgerEnd < 0 {
-				ledgerEndReadFailuresCounter.Inc()
-				writer.logger.Warn("ledger end read returned a negative offset", zap.Int64("ledgerEnd", ledgerEnd))
-				continue
-			}
-			writer.served.recordLedgerEnd(ledgerEnd, time.Now())
 			writer.recordReadPartyHosting(ctx)
 		}
 	}
 }
 
+// readObservedLedgerEnd times the read at its start: the ledger end then was at most the returned offset,
+// so the lag measured from that time is an upper bound.
+func (writer *CoreContractIndexWriter) readObservedLedgerEnd(ctx context.Context) (observedLedgerEnd, error) {
+	readStartedAt := time.Now()
+	ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+	if err != nil {
+		return observedLedgerEnd{}, err
+	}
+	if ledgerEnd < 0 {
+		return observedLedgerEnd{}, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
+	}
+	return observedLedgerEnd{offset: ledgerEnd, observedAt: readStartedAt}, nil
+}
+
 // readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
 func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
-	ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+	bootstrapLedgerEnd, err := writer.readObservedLedgerEnd(ctx)
 	if err != nil {
 		return followedIndex{}, err
 	}
-	bootstrapLedgerEnd := observedLedgerEnd{offset: ledgerEnd, observedAt: time.Now()}
-	if ledgerEnd < 0 {
-		return followedIndex{}, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
-	}
+	ledgerEnd := bootstrapLedgerEnd.offset
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
 	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.snapshotReplayNodeLimit)
@@ -511,8 +518,9 @@ func (session *ledgerFollowSession) consumeSubscription(
 			outcome.appliedAdvanceCount++
 		case <-subscription.Done():
 			return session.applyAdvancesBufferedBeforeDone(subscription, advances, outcome.appliedAdvanceCount)
-		case checkedAt := <-stallCheckTicks:
-			if session.streamStalled(checkedAt) {
+		case <-stallCheckTicks:
+			// A tick can wait in the channel while an apply runs, so the check reads the clock itself.
+			if session.streamStalled(time.Now()) {
 				outcome.err = errStalledStream
 				return outcome
 			}
@@ -592,11 +600,13 @@ func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
 }
 
 // streamStalled is true when the served ledger lag stayed above the bound for StalledStreamTimeout
-// while the followed index offset did not move.
+// while the ledger end was above the served offset and the followed index offset did not move.
+// A lag above the bound with no offset behind comes from failed ledger end reads on a quiet ledger; a reconnect cannot fix it.
+// The lag bound must stay above the idle offset checkpoint interval of the participant, or an idle stream reconnects.
 func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 	readiness := session.writer.served.ServiceReadiness()
 	followedOffset := session.followed.index.Status().Offset
-	if readiness.LedgerLag <= readiness.LedgerLagBound {
+	if readiness.LedgerLag <= readiness.LedgerLagBound || session.writer.served.LedgerOffsetsBehind() == 0 {
 		session.stallStartedAt = time.Time{}
 		return false
 	}
@@ -694,6 +704,8 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 		return IndexRebuildReasonInconsistentIndex, err
 	}
 	if err != nil {
+		// The refused update is missing from index, so its lookups stop until the rebuilt index serves.
+		index.SuspendLookupsUntilReplaced()
 		return IndexRebuildReasonIndexUpdateRefused, err
 	}
 	if status.Offset != advance.Offset() || status.Offset <= offsetBefore {

@@ -50,6 +50,9 @@ type fakeCoreContractLedgerReader struct {
 	readPartyUnhosted     bool
 	readPartyHostingErr   error
 	readPartyHostingReads int
+	// ledgerEndReadDuration delays each GetLedgerEnd answer; ledgerEndReadStartedAt is the entry time of the last call.
+	ledgerEndReadDuration  time.Duration
+	ledgerEndReadStartedAt time.Time
 }
 
 func (reader *fakeCoreContractLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) {
@@ -76,6 +79,11 @@ func (reader *fakeCoreContractLedgerReader) readPartyHostingReadCount() int {
 }
 
 func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64, error) {
+	reader.mutex.Lock()
+	reader.ledgerEndReadStartedAt = time.Now()
+	readDuration := reader.ledgerEndReadDuration
+	reader.mutex.Unlock()
+	time.Sleep(readDuration)
 	reader.mutex.Lock()
 	defer reader.mutex.Unlock()
 	reader.ledgerEndReadCount++
@@ -854,6 +862,9 @@ func TestWriterSuspendsAStaleIndexAndSwapsAfterTheReplacementCatchesUp(t *testin
 	}
 	timing := testWriterTiming()
 	timing.ResnapshotInterval = 20 * time.Millisecond
+	// A ready replacement skips the rebuild backoff.
+	timing.RebuildInitialDelay = time.Hour
+	timing.RebuildMaxDelay = time.Hour
 	rebuildsBefore := rebuildCount(IndexRebuildReasonResnapshotDifference)
 	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, timing)
 	require.Eventually(t, func() bool {
@@ -923,6 +934,9 @@ func TestWriterReconnectsAStalledStream(t *testing.T) {
 	_, subscribes := reader.callCounts()
 	require.Equal(t, 1, subscribes, "a stream within the lag bound is not stalled")
 
+	reader.mutex.Lock()
+	reader.ledgerEnd = testBootstrapOffset + 1
+	reader.mutex.Unlock()
 	clockSkew.Store(int64(2 * time.Minute))
 	require.Eventually(t, func() bool {
 		_, subscribes := reader.callCounts()
@@ -941,6 +955,7 @@ func TestStreamStalled(t *testing.T) {
 	require.NoError(t, err)
 	session := &ledgerFollowSession{writer: writer, followed: &followedIndex{index: index}}
 	bootstrappedAt := clock.current
+	served.recordLedgerEnd(testBootstrapOffset+10, clock.current)
 	steps := []struct {
 		name          string
 		elapsed       time.Duration
@@ -962,6 +977,63 @@ func TestStreamStalled(t *testing.T) {
 		}
 		require.Equal(t, step.expectStalled, session.streamStalled(clock.current), step.name)
 	}
+}
+
+func TestStreamAtTheLedgerEndIsNotStalled(t *testing.T) {
+	served, clock := newTestServedIndex(t)
+	index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+	swapTestIndex(served, index, clock)
+	timing := testWriterTiming()
+	timing.StalledStreamTimeout = 30 * time.Second
+	writer, err := NewCoreContractIndexWriter(&fakeCoreContractLedgerReader{}, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, timing, zap.NewNop())
+	require.NoError(t, err)
+	session := &ledgerFollowSession{writer: writer, followed: &followedIndex{index: index}}
+	served.recordLedgerEnd(testBootstrapOffset, clock.current)
+	for _, elapsed := range []time.Duration{testLedgerLagBound + time.Second, testLedgerLagBound + time.Hour} {
+		clock.current = clock.current.Add(elapsed)
+		require.Greater(t, served.ServiceReadiness().LedgerLag, testLedgerLagBound)
+		require.Zero(t, served.LedgerOffsetsBehind())
+		require.False(t, session.streamStalled(clock.current), "failed ledger end reads on a quiet ledger do not stall the stream")
+	}
+}
+
+func TestReadObservedLedgerEndTimesTheReadAtItsStart(t *testing.T) {
+	reader := &fakeCoreContractLedgerReader{ledgerEnd: testBootstrapOffset, ledgerEndReadDuration: 20 * time.Millisecond}
+	served, _ := newTestServedIndex(t)
+	writer, err := NewCoreContractIndexWriter(reader, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, testWriterTiming(), zap.NewNop())
+	require.NoError(t, err)
+	observed, err := writer.readObservedLedgerEnd(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(testBootstrapOffset), observed.offset)
+	reader.mutex.Lock()
+	readStartedAt := reader.ledgerEndReadStartedAt
+	reader.mutex.Unlock()
+	require.False(t, observed.observedAt.After(readStartedAt), "observed at %s after the read start %s", observed.observedAt, readStartedAt)
+
+	reader.ledgerEnd = -1
+	_, err = writer.readObservedLedgerEnd(context.Background())
+	require.ErrorContains(t, err, "negative ledger end")
+	reader.ledgerEndErr = errors.New("unavailable")
+	_, err = writer.readObservedLedgerEnd(context.Background())
+	require.ErrorContains(t, err, "unavailable")
+}
+
+func TestRefusedAdvanceSuspendsTheLookupsOfTheIndex(t *testing.T) {
+	ledger := testDecodingLedger()
+	served, clock := newTestServedIndex(t)
+	index := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+	swapTestIndex(served, index, clock)
+	writer, err := NewCoreContractIndexWriter(&fakeCoreContractLedgerReader{}, served, testPartyID(t, testGuardianGovernance), testLargeIndexByteCap, testWriterTiming(), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, index.AdvanceOffset(testBootstrapOffset+5))
+	_, err = index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	require.NoError(t, err)
+
+	rebuildReason, err := writer.applyAdvance(index, ledger.DecodeOffsetCheckpoint(t, testBootstrapOffset, testBootstrapOffset+1))
+	require.Equal(t, IndexRebuildReasonIndexUpdateRefused, rebuildReason)
+	require.ErrorIs(t, err, ErrOffsetNotIncreasing)
+	_, err = index.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	requireIndexNotReady(t, err, IndexReadinessResnapshotDifference)
 }
 
 // endedTestSubscription is a subscription that failed with finalErr after its goroutine sent bufferedAdvances.
