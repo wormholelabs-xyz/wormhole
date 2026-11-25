@@ -25,10 +25,10 @@ func DecodeCoreContractUpdatesResponseForTest(readScope ReadScope, approved Appr
 }
 
 // CollectActiveCoreContractsForTest applies the ReadActiveCoreContracts limits to contracts in order: at the first
-// ReplayNode above maxReplayNodes it keeps the singletons of contracts alone, as the singleton-only read does.
+// ReplayNode above replayNodeLimit it keeps the singletons of contracts alone, as the singleton-only read does.
 // Do not call it outside tests: it exists so that fake readers in other packages enforce the same limits.
-func CollectActiveCoreContractsForTest(contracts []CreatedCoreContract, maxReplayNodes int) (ActiveCoreContracts, error) {
-	collector, err := newActiveCoreContractCollector(maxReplayNodes)
+func CollectActiveCoreContractsForTest(contracts []CreatedCoreContract, replayNodeLimit ReplayNodeSnapshotLimit) (ActiveCoreContracts, error) {
+	collector, err := newActiveCoreContractCollector(replayNodeLimit)
 	if err != nil {
 		return ActiveCoreContracts{}, err
 	}

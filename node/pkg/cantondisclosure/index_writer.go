@@ -18,7 +18,7 @@ import (
 type CoreContractLedgerReader interface {
 	GetLedgerEnd(ctx context.Context) (int64, error)
 	ReadPartyIsHosted(ctx context.Context) (bool, error)
-	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error)
+	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, replayNodeLimit cantonclient.ReplayNodeSnapshotLimit) (cantonclient.ActiveCoreContracts, error)
 	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error)
 }
 
@@ -147,8 +147,10 @@ type CoreContractIndexWriter struct {
 	served             *ServedIndex
 	guardianGovernance cantonclient.PartyID
 	byteCapBytes       int64
-	timing             IndexWriterTiming
-	logger             *zap.Logger
+	// snapshotReplayNodeLimit charges each ReplayNode as the index does, so a snapshot holds at most byteCapBytes of nodes.
+	snapshotReplayNodeLimit cantonclient.ReplayNodeSnapshotLimit
+	timing                  IndexWriterTiming
+	logger                  *zap.Logger
 }
 
 // NewCoreContractIndexWriter checks every parameter. One writer per ServedIndex.
@@ -165,19 +167,20 @@ func NewCoreContractIndexWriter(reader CoreContractLedgerReader, served *ServedI
 	if 2*timing.LedgerEndPollInterval > served.ledgerLagBound {
 		return nil, fmt.Errorf("cantondisclosure: ledger end poll interval %s is above half the ledger lag bound %s", timing.LedgerEndPollInterval, served.ledgerLagBound)
 	}
+	maxSnapshotReplayNodeCount := int(min(byteCapBytes/indexEntryOverheadBytes, int64(cantonclient.MaxActiveCoreContractsPerSnapshot)))
+	snapshotReplayNodeLimit, err := cantonclient.NewReplayNodeSnapshotLimit(maxSnapshotReplayNodeCount, byteCapBytes, indexEntryOverheadBytes)
+	if err != nil {
+		return nil, fmt.Errorf("cantondisclosure: snapshot replay node limit: %w", err)
+	}
 	return &CoreContractIndexWriter{
-		reader:             reader,
-		served:             served,
-		guardianGovernance: guardianGovernance,
-		byteCapBytes:       byteCapBytes,
-		timing:             timing,
-		logger:             logger,
+		reader:                  reader,
+		served:                  served,
+		guardianGovernance:      guardianGovernance,
+		byteCapBytes:            byteCapBytes,
+		snapshotReplayNodeLimit: snapshotReplayNodeLimit,
+		timing:                  timing,
+		logger:                  logger,
 	}, nil
-}
-
-// maxSnapshotReplayNodes is the largest ReplayNode count that fits the byte cap, at most MaxActiveCoreContractsPerSnapshot.
-func (writer *CoreContractIndexWriter) maxSnapshotReplayNodes() int {
-	return int(min(writer.byteCapBytes/indexEntryOverheadBytes, int64(cantonclient.MaxActiveCoreContractsPerSnapshot)))
 }
 
 // ErrRebuildAttemptsExhausted: the writer stopped after MaxConsecutiveRebuildAttempts unstable rebuilds.
@@ -309,7 +312,7 @@ func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.maxSnapshotReplayNodes())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.snapshotReplayNodeLimit)
 	if err != nil {
 		return followedIndex{}, err
 	}
@@ -318,7 +321,7 @@ func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context
 		return followedIndex{}, err
 	}
 	if snapshot.ReplayNodesTruncated() {
-		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodes", writer.maxSnapshotReplayNodes()))
+		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodeCount", writer.snapshotReplayNodeLimit.MaxReplayNodeCount()), zap.Int64("maxReplayNodeBytes", writer.snapshotReplayNodeLimit.MaxChargedBytes()))
 		err = index.ApplyBootstrapSnapshotWithoutReplayNodes(ledgerEnd, snapshot.Contracts())
 	} else {
 		err = index.ApplyBootstrapSnapshot(ledgerEnd, snapshot.Contracts())
@@ -727,7 +730,7 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.maxSnapshotReplayNodes())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.snapshotReplayNodeLimit)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil

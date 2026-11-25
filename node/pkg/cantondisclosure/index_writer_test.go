@@ -42,7 +42,7 @@ type fakeCoreContractLedgerReader struct {
 	snapshotResponses        []fakeSnapshotResponse
 	subscriptionScripts      []fakeSubscriptionScript
 	snapshotOffsets          []int64
-	snapshotReplayNodeLimits []int
+	snapshotReplayNodeLimits []cantonclient.ReplayNodeSnapshotLimit
 	subscribeBeginOffsets    []int64
 	ledgerEndReadCount       int
 	// snapshotReadGates[i], when not nil, holds snapshot read i until the gate closes.
@@ -83,7 +83,7 @@ func (reader *fakeCoreContractLedgerReader) GetLedgerEnd(context.Context) (int64
 }
 
 // ReadActiveCoreContracts applies the limits of the gRPC reader through cantonclient.CollectActiveCoreContractsForTest.
-func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error) {
+func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, replayNodeLimit cantonclient.ReplayNodeSnapshotLimit) (cantonclient.ActiveCoreContracts, error) {
 	reader.mutex.Lock()
 	readIndex := len(reader.snapshotOffsets)
 	reader.snapshotOffsets = append(reader.snapshotOffsets, activeAtOffset)
@@ -98,7 +98,7 @@ func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(ctx context.
 		reader.mutex.Lock()
 	}
 	defer reader.mutex.Unlock()
-	reader.snapshotReplayNodeLimits = append(reader.snapshotReplayNodeLimits, maxReplayNodes)
+	reader.snapshotReplayNodeLimits = append(reader.snapshotReplayNodeLimits, replayNodeLimit)
 	if len(reader.snapshotResponses) == 0 {
 		return cantonclient.ActiveCoreContracts{}, errors.New("fake reader: no scripted snapshot")
 	}
@@ -109,7 +109,7 @@ func (reader *fakeCoreContractLedgerReader) ReadActiveCoreContracts(ctx context.
 	if response.err != nil {
 		return cantonclient.ActiveCoreContracts{}, response.err
 	}
-	return cantonclient.CollectActiveCoreContractsForTest(response.contracts, maxReplayNodes)
+	return cantonclient.CollectActiveCoreContractsForTest(response.contracts, replayNodeLimit)
 }
 
 func (reader *fakeCoreContractLedgerReader) SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error) {
@@ -592,7 +592,8 @@ func TestNewCoreContractIndexWriterRejects(t *testing.T) {
 	}
 	writer, err := NewCoreContractIndexWriter(reader, served, guardianGovernance, ProductionIndexByteCapBytes, ProductionIndexWriterTiming(ProductionResnapshotInterval), zap.NewNop())
 	require.NoError(t, err)
-	require.Equal(t, int(ProductionIndexByteCapBytes/indexEntryOverheadBytes), writer.maxSnapshotReplayNodes())
+	require.Equal(t, int(ProductionIndexByteCapBytes/indexEntryOverheadBytes), writer.snapshotReplayNodeLimit.MaxReplayNodeCount())
+	require.Equal(t, ProductionIndexByteCapBytes, writer.snapshotReplayNodeLimit.MaxChargedBytes())
 }
 
 func TestCheckProductionResnapshotInterval(t *testing.T) {
@@ -667,16 +668,27 @@ func decodedReplayNodesAboveTheSnapshotLimit() []cantonclienttest.CoreContractEv
 	return replayNodes
 }
 
+// decodedReplayNodesAboveTheSnapshotByteLimit are three nodes within the count limit whose blobs exceed the byte cap.
+func decodedReplayNodesAboveTheSnapshotByteLimit() []cantonclienttest.CoreContractEvent {
+	const replayNodeCount = 3
+	replayNodes := make([]cantonclienttest.CoreContractEvent, 0, replayNodeCount)
+	for serial := 1; serial <= replayNodeCount; serial++ {
+		replayNode := decodedReplayNodeEvent(serial, fmt.Sprintf("%x", serial))
+		replayNode.CreatedEventBlob = testBlob(serial, int(testReplayNodeLimitByteCapBytes/replayNodeCount))
+		replayNodes = append(replayNodes, replayNode)
+	}
+	return replayNodes
+}
+
 func TestWriterServesSingletonsPastTheSnapshotReplayNodeLimit(t *testing.T) {
 	ledger := testDecodingLedger()
 	require.Equal(t, 13, int(testReplayNodeLimitByteCapBytes/indexEntryOverheadBytes))
 	oversizedNode := decodedReplayNodeEvent(1, "")
 	oversizedNode.CreatedEventBlob = testBlob(1, int(testReplayNodeLimitByteCapBytes))
 	testCases := []struct {
-		name                    string
-		snapshotResponses       func(t *testing.T) []fakeSnapshotResponse
-		expectedRebuildReason   IndexRebuildReason
-		expectedReplayNodeLimit int
+		name                  string
+		snapshotResponses     func(t *testing.T) []fakeSnapshotResponse
+		expectedRebuildReason IndexRebuildReason
 	}{
 		{
 			name: "above the limit at the bootstrap",
@@ -701,6 +713,16 @@ func TestWriterServesSingletonsPastTheSnapshotReplayNodeLimit(t *testing.T) {
 				return []fakeSnapshotResponse{
 					{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))},
 					{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodesAboveTheSnapshotLimit()...)},
+				}
+			},
+			expectedRebuildReason: IndexRebuildReasonSnapshotReplayNodeLimit,
+		},
+		{
+			name: "above the byte limit within the count limit at a resnapshot",
+			snapshotResponses: func(t *testing.T) []fakeSnapshotResponse {
+				return []fakeSnapshotResponse{
+					{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))},
+					{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodesAboveTheSnapshotByteLimit()...)},
 				}
 			},
 			expectedRebuildReason: IndexRebuildReasonSnapshotReplayNodeLimit,
@@ -735,7 +757,8 @@ func TestWriterServesSingletonsPastTheSnapshotReplayNodeLimit(t *testing.T) {
 			require.Greater(t, rebuildCount(testCase.expectedRebuildReason), rebuildsBefore)
 			reader.mutex.Lock()
 			for _, replayNodeLimit := range reader.snapshotReplayNodeLimits {
-				require.Equal(t, 13, replayNodeLimit)
+				require.Equal(t, 13, replayNodeLimit.MaxReplayNodeCount())
+				require.Equal(t, testReplayNodeLimitByteCapBytes, replayNodeLimit.MaxChargedBytes())
 			}
 			reader.mutex.Unlock()
 		})

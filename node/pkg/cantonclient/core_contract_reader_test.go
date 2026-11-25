@@ -111,7 +111,7 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testCoreContractIDHex, nil)),
 		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 10, testOtherContractIDHex, nil)),
 	)
-	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 2)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, replayNodeCountLimit(t, 2))
 	require.NoError(t, err)
 	assert.False(t, snapshot.ReplayNodesTruncated())
 	contracts := snapshot.Contracts()
@@ -129,7 +129,7 @@ func TestReadActiveCoreContractsReturnsEveryEntry(t *testing.T) {
 
 func TestReadActiveCoreContractsEmptySnapshot(t *testing.T) {
 	reader, _ := testCoreContractReaderWithSnapshot(t)
-	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, 1)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 10, replayNodeCountLimit(t, 1))
 	require.NoError(t, err)
 	assert.Empty(t, snapshot.Contracts())
 	assert.False(t, snapshot.ReplayNodesTruncated())
@@ -146,25 +146,95 @@ func TestReadActiveCoreContractsReplayNodeLimit(t *testing.T) {
 		maxReplayNodes     int
 		wantContractIDs    []string
 		wantReplayTruncate bool
-		wantErr            string
 	}{
 		{name: "limit above the replay node count", maxReplayNodes: 3, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
 		{name: "limit equal to the replay node count", maxReplayNodes: 2, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
 		{name: "limit one below the replay node count keeps the singletons", maxReplayNodes: 1, wantContractIDs: []string{testThirdContractIDHex}, wantReplayTruncate: true},
-		{name: "zero limit", maxReplayNodes: 0, wantErr: "outside [1, 8388608]"},
-		{name: "negative limit", maxReplayNodes: -1, wantErr: "outside [1, 8388608]"},
-		{name: "limit above the upper bound", maxReplayNodes: MaxActiveCoreContractsPerSnapshot + 1, wantErr: "outside [1, 8388608]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, service := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
 			service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: snapshotResponses[2:]}
-			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, tc.maxReplayNodes)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, replayNodeCountLimit(t, tc.maxReplayNodes))
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
+			contractIDs := []string{}
+			for _, contract := range snapshot.Contracts() {
+				contractIDs = append(contractIDs, contract.ContractID().String())
+			}
+			assert.Equal(t, tc.wantContractIDs, contractIDs)
+		})
+	}
+}
+
+// replayNodeCountLimit is a limit of count ReplayNodes with no byte bound below maxReplayNodeSnapshotChargedBytes.
+func replayNodeCountLimit(t *testing.T, count int) ReplayNodeSnapshotLimit {
+	t.Helper()
+	limit, err := NewReplayNodeSnapshotLimit(count, maxReplayNodeSnapshotChargedBytes, 0)
+	require.NoError(t, err)
+	return limit
+}
+
+func TestNewReplayNodeSnapshotLimit(t *testing.T) {
+	cases := []struct {
+		name                 string
+		maxReplayNodeCount   int
+		maxChargedBytes      int64
+		overheadBytesPerNode int64
+		wantErr              string
+	}{
+		{name: "smallest", maxReplayNodeCount: 1, maxChargedBytes: 1, overheadBytesPerNode: 0},
+		{name: "largest", maxReplayNodeCount: MaxActiveCoreContractsPerSnapshot, maxChargedBytes: maxReplayNodeSnapshotChargedBytes, overheadBytesPerNode: maxReplayNodeSnapshotOverheadBytesPerNode},
+		{name: "zero count", maxReplayNodeCount: 0, maxChargedBytes: 1, wantErr: "count 0 is outside [1, 8388608]"},
+		{name: "negative count", maxReplayNodeCount: -1, maxChargedBytes: 1, wantErr: "count -1 is outside [1, 8388608]"},
+		{name: "count above the upper bound", maxReplayNodeCount: MaxActiveCoreContractsPerSnapshot + 1, maxChargedBytes: 1, wantErr: "is outside [1, 8388608]"},
+		{name: "zero bytes", maxReplayNodeCount: 1, maxChargedBytes: 0, wantErr: "bytes 0 is outside"},
+		{name: "bytes above the upper bound", maxReplayNodeCount: 1, maxChargedBytes: maxReplayNodeSnapshotChargedBytes + 1, wantErr: "is outside [1, 1099511627776]"},
+		{name: "negative overhead", maxReplayNodeCount: 1, maxChargedBytes: 1, overheadBytesPerNode: -1, wantErr: "overhead bytes -1 is outside"},
+		{name: "overhead above the upper bound", maxReplayNodeCount: 1, maxChargedBytes: 1, overheadBytesPerNode: maxReplayNodeSnapshotOverheadBytesPerNode + 1, wantErr: "is outside [0, 1048576]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limit, err := NewReplayNodeSnapshotLimit(tc.maxReplayNodeCount, tc.maxChargedBytes, tc.overheadBytesPerNode)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				assert.Equal(t, ActiveCoreContracts{}, snapshot)
+				assert.Equal(t, ReplayNodeSnapshotLimit{}, limit)
 				return
 			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.maxReplayNodeCount, limit.MaxReplayNodeCount())
+			assert.Equal(t, tc.maxChargedBytes, limit.MaxChargedBytes())
+		})
+	}
+	_, err := newActiveCoreContractCollector(ReplayNodeSnapshotLimit{})
+	require.ErrorContains(t, err, "not from NewReplayNodeSnapshotLimit")
+}
+
+func TestReadActiveCoreContractsReplayNodeByteLimit(t *testing.T) {
+	snapshotResponses := []*apiv2.GetActiveContractsResponse{
+		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 1, testCoreContractIDHex, nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateReplayNode, 2, testOtherContractIDHex, nil)),
+		activeContractResponse(createdCoreEvent(CoreContractTemplateCoreState, 3, testThirdContractIDHex, nil)),
+	}
+	const overheadBytesPerNode = 100
+	nodeChargedBytes := int64(len(testCreatedEventBlob)) + overheadBytesPerNode
+	cases := []struct {
+		name               string
+		maxChargedBytes    int64
+		wantContractIDs    []string
+		wantReplayTruncate bool
+	}{
+		{name: "bytes of both nodes", maxChargedBytes: 2 * nodeChargedBytes, wantContractIDs: []string{testCoreContractIDHex, testOtherContractIDHex, testThirdContractIDHex}},
+		{name: "one byte below both nodes keeps the singletons", maxChargedBytes: 2*nodeChargedBytes - 1, wantContractIDs: []string{testThirdContractIDHex}, wantReplayTruncate: true},
+		{name: "one byte below one node keeps the singletons", maxChargedBytes: nodeChargedBytes - 1, wantContractIDs: []string{testThirdContractIDHex}, wantReplayTruncate: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader, service := testCoreContractReaderWithSnapshot(t, snapshotResponses...)
+			service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: snapshotResponses[2:]}
+			limit, err := NewReplayNodeSnapshotLimit(MaxActiveCoreContractsPerSnapshot, tc.maxChargedBytes, overheadBytesPerNode)
+			require.NoError(t, err)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 3, limit)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantReplayTruncate, snapshot.ReplayNodesTruncated())
 			contractIDs := []string{}
@@ -219,7 +289,7 @@ func TestReadActiveCoreContractsStopsAtTheReplayNodeLimitAndReadsTheSingletonsAl
 	reader, service := testCoreContractReaderWithSnapshot(t, fullResponses...)
 	service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: singletonResponses}
 
-	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 7, maxReplayNodes)
+	snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 7, replayNodeCountLimit(t, maxReplayNodes))
 	require.NoError(t, err)
 	require.True(t, snapshot.ReplayNodesTruncated())
 	gotTemplates := []CoreContractTemplate{}
@@ -266,7 +336,7 @@ func TestReadActiveCoreContractsSingletonReadRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, service := testCoreContractReaderWithSnapshot(t, overLimit...)
 			service.singletonStream = &scriptedCoreContractStream[apiv2.GetActiveContractsResponse]{responses: tc.singletonResponses, finalErr: tc.singletonFinalErr}
-			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 5, 1)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), 5, replayNodeCountLimit(t, 1))
 			require.ErrorContains(t, err, tc.wantErr)
 			assert.Equal(t, ActiveCoreContracts{}, snapshot)
 		})
@@ -274,7 +344,7 @@ func TestReadActiveCoreContractsSingletonReadRejects(t *testing.T) {
 }
 
 func TestActiveCoreContractCollectorEntryBound(t *testing.T) {
-	collector, err := newActiveCoreContractCollector(4)
+	collector, err := newActiveCoreContractCollector(replayNodeCountLimit(t, 4))
 	require.NoError(t, err)
 	require.Equal(t, 4+1+9, collector.maxReceivedEntryCount())
 	for entryIndex := 0; entryIndex < collector.maxReceivedEntryCount(); entryIndex++ {
@@ -282,7 +352,7 @@ func TestActiveCoreContractCollectorEntryBound(t *testing.T) {
 	}
 	require.ErrorContains(t, collector.countReceivedEntry(), "more than 14 entries")
 	require.Equal(t, 0+1+9, newSingletonContractCollector().maxReceivedEntryCount())
-	largest, err := newActiveCoreContractCollector(MaxActiveCoreContractsPerSnapshot)
+	largest, err := newActiveCoreContractCollector(replayNodeCountLimit(t, MaxActiveCoreContractsPerSnapshot))
 	require.NoError(t, err)
 	require.Equal(t, MaxActiveCoreContractsPerSnapshot+10, largest.maxReceivedEntryCount())
 }
@@ -323,7 +393,7 @@ func TestCollectActiveCoreContracts(t *testing.T) {
 			for serial, template := range tc.templates {
 				contracts = append(contracts, decodedSnapshotContract(t, template, serial+1))
 			}
-			snapshot, err := CollectActiveCoreContractsForTest(contracts, tc.maxReplayNodes)
+			snapshot, err := CollectActiveCoreContractsForTest(contracts, replayNodeCountLimit(t, tc.maxReplayNodes))
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Equal(t, ActiveCoreContracts{}, snapshot)
@@ -342,7 +412,7 @@ func TestCollectActiveCoreContracts(t *testing.T) {
 
 func TestCollectActiveCoreContractsRejectsARepeatedKeptContractID(t *testing.T) {
 	coreState := decodedSnapshotContract(t, CoreContractTemplateCoreState, 1)
-	_, err := CollectActiveCoreContractsForTest([]CreatedCoreContract{coreState, coreState}, 1)
+	_, err := CollectActiveCoreContractsForTest([]CreatedCoreContract{coreState, coreState}, replayNodeCountLimit(t, 1))
 	require.ErrorContains(t, err, "repeats contract id")
 }
 
@@ -375,7 +445,7 @@ func TestReadActiveCoreContractsRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, service := testCoreContractReaderWithSnapshot(t, tc.responses...)
 			service.stream.finalErr = tc.finalErr
-			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, 10)
+			snapshot, err := reader.ReadActiveCoreContracts(context.Background(), tc.activeAtOffset, replayNodeCountLimit(t, 10))
 			require.ErrorContains(t, err, tc.wantErr)
 			assert.Equal(t, ActiveCoreContracts{}, snapshot)
 		})
