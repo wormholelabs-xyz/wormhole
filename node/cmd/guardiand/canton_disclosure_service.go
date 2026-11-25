@@ -66,7 +66,7 @@ func init() {
 	cantonDisclosureIndexByteCapBytes = flags.Int64("indexByteCapBytes", cantondisclosure.ProductionIndexByteCapBytes, "Byte cap of the in-memory index: blobs plus a fixed overhead per contract. At the cap the index drops every ReplayNode and serves the singletons only")
 	cantonDisclosureLedgerLagBound = flags.Duration("ledgerLagBound", cantondisclosure.DefaultLedgerLagBound, "Largest ledger lag at which /v1/readyz answers 200, in [10s, 1h]")
 	cantonDisclosureResnapshotInterval = flags.Duration("resnapshotInterval", cantondisclosure.ProductionResnapshotInterval, "Interval of the snapshot comparison with the live index, in [1m, 168h]")
-	cantonDisclosureLogLevel = flags.String("logLevel", "info", "Log level (debug, info, warn, error)")
+	cantonDisclosureLogLevel = flags.String("logLevel", "info", "Log level of zap: debug, info, warn, error, dpanic, panic or fatal")
 	for _, requiredFlag := range []string{"cantonRPC", "cantonReadAsParty", "listenAddress"} {
 		if err := CantonDisclosureServiceCmd.MarkFlagRequired(requiredFlag); err != nil {
 			panic(err)
@@ -336,6 +336,7 @@ func serveCantonDisclosure(ctx context.Context, config cantonDisclosureServiceCo
 	if err := disclosureServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("disclosure server shutdown", zap.Error(err))
 	}
+	components.handler.FlushSuppressedUnavailableLogs()
 	if statusServer != nil {
 		if err := statusServer.Shutdown(shutdownCtx); err != nil {
 			logger.Warn("status server shutdown", zap.Error(err))

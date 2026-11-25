@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,10 +50,16 @@ const (
 	httpWriteTimeout                   = 10 * time.Second
 	httpIdleTimeout                    = 60 * time.Second
 	httpMaxHeaderBytes                 = 16 << 10
-	// httpRetryAfterSeconds is the Retry-After of a 503 that a short wait can clear.
+	// httpRetryAfterSeconds is the Retry-After of the busy 503: a lookup slot frees within one write timeout.
+	// An index or hosting 503 has no Retry-After, because a rebuild, a ledger change or an operator action clears it.
 	httpRetryAfterSeconds = 1
-	// unavailableLogInterval bounds the 503 warn logs to one per interval.
+	// unavailableLogInterval bounds the 503 warn logs to one per interval and cause.
 	unavailableLogInterval = time.Second
+	// maxUnavailableLogCauses bounds the causes that the limiter tracks; the causes come from fixed enumerations.
+	maxUnavailableLogCauses = 32
+	// unavailableCauseServiceBusy and unavailableCauseOther are the causes without a readiness.
+	unavailableCauseServiceBusy = "service_busy"
+	unavailableCauseOther       = "other"
 )
 
 // Fixed public messages of the error bodies.
@@ -117,27 +125,87 @@ type DisclosureHTTPHandler struct {
 	unavailableLogs    *unavailableLogLimiter
 }
 
-// unavailableLogLimiter admits one 503 warn log per unavailableLogInterval and counts the others.
+// unavailableLogLimiter admits one 503 warn log per unavailableLogInterval and cause, and counts the others.
 type unavailableLogLimiter struct {
-	now             func() time.Time
-	mutex           sync.Mutex
+	now          func() time.Time
+	mutex        sync.Mutex
+	stateByCause map[string]*unavailableCauseLogState
+}
+
+type unavailableCauseLogState struct {
 	lastAdmittedAt  time.Time
 	suppressedCount uint64
 }
 
-// admitLog returns true at most once per unavailableLogInterval, with the count suppressed since the last admitted log.
-func (limiter *unavailableLogLimiter) admitLog() (admitted bool, suppressedCount uint64) {
+// suppressedUnavailableLogCount is the count of one cause suppressed since its last admitted log.
+type suppressedUnavailableLogCount struct {
+	cause           string
+	suppressedCount uint64
+}
+
+func newUnavailableLogLimiter(now func() time.Time) *unavailableLogLimiter {
+	return &unavailableLogLimiter{now: now, stateByCause: make(map[string]*unavailableCauseLogState, maxUnavailableLogCauses+1)}
+}
+
+// admitLog returns true at most once per unavailableLogInterval for cause, with the count suppressed since its last
+// admitted log. Above maxUnavailableLogCauses tracked causes, a new cause counts as unavailableCauseOther.
+func (limiter *unavailableLogLimiter) admitLog(cause string) (admitted bool, suppressedCount uint64) {
 	limiter.mutex.Lock()
 	defer limiter.mutex.Unlock()
 	now := limiter.now()
-	if !limiter.lastAdmittedAt.IsZero() && now.Sub(limiter.lastAdmittedAt) < unavailableLogInterval {
-		limiter.suppressedCount++
+	if _, isTracked := limiter.stateByCause[cause]; !isTracked && len(limiter.stateByCause) >= maxUnavailableLogCauses {
+		cause = unavailableCauseOther
+	}
+	state, isTracked := limiter.stateByCause[cause]
+	if !isTracked {
+		state = &unavailableCauseLogState{}
+		limiter.stateByCause[cause] = state
+	}
+	if len(limiter.stateByCause) > maxUnavailableLogCauses+1 {
+		panic("cantondisclosure: unavailable log causes exceed their bound")
+	}
+	if !state.lastAdmittedAt.IsZero() && now.Sub(state.lastAdmittedAt) < unavailableLogInterval {
+		state.suppressedCount++
 		return false, 0
 	}
-	suppressedCount = limiter.suppressedCount
-	limiter.lastAdmittedAt = now
-	limiter.suppressedCount = 0
+	suppressedCount = state.suppressedCount
+	state.lastAdmittedAt = now
+	state.suppressedCount = 0
 	return true, suppressedCount
+}
+
+// takeSuppressedCounts clears and returns the suppressed counts whose interval ended, or every count with allCauses.
+// A taken count starts a new interval of its cause.
+func (limiter *unavailableLogLimiter) takeSuppressedCounts(allCauses bool) []suppressedUnavailableLogCount {
+	limiter.mutex.Lock()
+	defer limiter.mutex.Unlock()
+	now := limiter.now()
+	taken := []suppressedUnavailableLogCount{}
+	for cause, state := range limiter.stateByCause {
+		if state.suppressedCount == 0 || (!allCauses && now.Sub(state.lastAdmittedAt) < unavailableLogInterval) {
+			continue
+		}
+		taken = append(taken, suppressedUnavailableLogCount{cause: cause, suppressedCount: state.suppressedCount})
+		state.suppressedCount = 0
+		state.lastAdmittedAt = now
+	}
+	slices.SortFunc(taken, func(first, second suppressedUnavailableLogCount) int {
+		return strings.Compare(first.cause, second.cause)
+	})
+	return taken
+}
+
+// unavailableCauseOf is the readiness of a not-ready lookup error.
+func unavailableCauseOf(err error) string {
+	var indexNotReady IndexNotReadyError
+	if errors.As(err, &indexNotReady) {
+		return indexNotReady.Readiness.String()
+	}
+	var hostingNotReady ReadPartyHostingNotReadyError
+	if errors.As(err, &hostingNotReady) {
+		return string(hostingNotReady.Status)
+	}
+	return unavailableCauseOther
 }
 
 // NewDisclosureHTTPHandler bounds the lookups in progress to maxConcurrentLookupRequests.
@@ -152,7 +220,7 @@ func NewDisclosureHTTPHandler(lookups CoreContractLookups, maxConcurrentLookupRe
 		lookups:            lookups,
 		lookupRequestSlots: make(chan struct{}, maxConcurrentLookupRequests),
 		logger:             logger,
-		unavailableLogs:    &unavailableLogLimiter{now: time.Now},
+		unavailableLogs:    newUnavailableLogLimiter(time.Now),
 	}, nil
 }
 
@@ -173,6 +241,7 @@ func NewDisclosureHTTPServer(listenAddress string, handler http.Handler) *http.S
 }
 
 func (handler *DisclosureHTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	handler.logSuppressedUnavailableLogs(false)
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	if len(request.RequestURI) > maxRequestURIBytes || len(request.URL.RawQuery) > maxRequestURIBytes {
@@ -201,7 +270,7 @@ func (handler *DisclosureHTTPHandler) ServeHTTP(writer http.ResponseWriter, requ
 	case handler.lookupRequestSlots <- struct{}{}:
 	default:
 		writer.Header().Set("Retry-After", strconv.Itoa(httpRetryAfterSeconds))
-		handler.writeServerError(writer, request, http.StatusServiceUnavailable, publicMessageServiceBusy, errors.New("concurrent lookup request limit reached"))
+		handler.writeUnavailable(writer, request, publicMessageServiceBusy, unavailableCauseServiceBusy, errors.New("concurrent lookup request limit reached"))
 		return
 	}
 	defer func() { <-handler.lookupRequestSlots }()
@@ -269,12 +338,7 @@ func (handler *DisclosureHTTPHandler) writeLookupResult(writer http.ResponseWrit
 	switch {
 	case lookupErr == nil:
 	case errors.Is(lookupErr, ErrIndexNotReady):
-		// A byte cap lasts until the rebuild at the next resnapshot interval.
-		var notReady IndexNotReadyError
-		if !errors.As(lookupErr, &notReady) || notReady.Readiness != IndexReadinessByteCapReached {
-			writer.Header().Set("Retry-After", strconv.Itoa(httpRetryAfterSeconds))
-		}
-		handler.writeServerError(writer, request, http.StatusServiceUnavailable, publicMessageIndexNotReady, lookupErr)
+		handler.writeUnavailable(writer, request, publicMessageIndexNotReady, unavailableCauseOf(lookupErr), lookupErr)
 		return
 	case errors.Is(lookupErr, ErrNoCoveringReplayNode):
 		handler.writeClientError(writer, http.StatusNotFound, publicMessageNoCoveringNode)
@@ -317,24 +381,44 @@ func (handler *DisclosureHTTPHandler) writeClientError(writer http.ResponseWrite
 	writeJSONBody(writer, statusCode, publicErrorBody{Error: publicMessage, RequestID: requestID})
 }
 
-// writeServerError logs internalErr with the request id and writes publicMessage only.
-// The 503 logs are rate limited by unavailableLogs.
+// writeServerError logs internalErr with the request id and writes publicMessage only. A 503 goes through writeUnavailable.
 func (handler *DisclosureHTTPHandler) writeServerError(writer http.ResponseWriter, request *http.Request, statusCode int, publicMessage string, internalErr error) {
-	if statusCode < 500 || statusCode > 599 {
+	if statusCode < 500 || statusCode > 599 || statusCode == http.StatusServiceUnavailable {
 		panic(fmt.Sprintf("cantondisclosure: server error with status %d", statusCode))
 	}
+	requestID := writePublicServerError(writer, statusCode, publicMessage)
+	handler.logger.Warn("disclosure request failed", zap.String("requestId", requestID), zap.String("path", request.URL.Path), zap.Int("status", statusCode), zap.Error(internalErr))
+}
+
+// writeUnavailable writes a 503 with publicMessage; unavailableLogs limits its log per cause.
+func (handler *DisclosureHTTPHandler) writeUnavailable(writer http.ResponseWriter, request *http.Request, publicMessage string, cause string, internalErr error) {
+	requestID := writePublicServerError(writer, http.StatusServiceUnavailable, publicMessage)
+	admitted, suppressedCount := handler.unavailableLogs.admitLog(cause)
+	if !admitted {
+		return
+	}
+	handler.logger.Warn("disclosure request failed", zap.String("requestId", requestID), zap.String("path", request.URL.Path),
+		zap.Int("status", http.StatusServiceUnavailable), zap.String("cause", cause), zap.Uint64("suppressedUnavailableLogs", suppressedCount), zap.Error(internalErr))
+}
+
+// writePublicServerError writes the fixed public body and returns its request id.
+func writePublicServerError(writer http.ResponseWriter, statusCode int, publicMessage string) string {
 	requestID := newRequestID()
 	writer.Header().Set(requestIDHeaderName, requestID)
 	writeJSONBody(writer, statusCode, publicErrorBody{Error: publicMessage, RequestID: requestID})
-	logFields := []zap.Field{zap.String("requestId", requestID), zap.String("path", request.URL.Path), zap.Int("status", statusCode), zap.Error(internalErr)}
-	if statusCode == http.StatusServiceUnavailable {
-		admitted, suppressedCount := handler.unavailableLogs.admitLog()
-		if !admitted {
-			return
-		}
-		logFields = append(logFields, zap.Uint64("suppressedUnavailableLogs", suppressedCount))
+	return requestID
+}
+
+// FlushSuppressedUnavailableLogs logs every suppressed 503 count. Call it at shutdown.
+func (handler *DisclosureHTTPHandler) FlushSuppressedUnavailableLogs() {
+	handler.logSuppressedUnavailableLogs(true)
+}
+
+// logSuppressedUnavailableLogs logs the suppressed counts whose interval ended, or every count with allCauses.
+func (handler *DisclosureHTTPHandler) logSuppressedUnavailableLogs(allCauses bool) {
+	for _, taken := range handler.unavailableLogs.takeSuppressedCounts(allCauses) {
+		handler.logger.Warn("disclosure 503 logs suppressed", zap.String("cause", taken.cause), zap.Uint64("suppressedUnavailableLogs", taken.suppressedCount))
 	}
-	handler.logger.Warn("disclosure request failed", logFields...)
 }
 
 func writeJSONBody(writer http.ResponseWriter, statusCode int, body any) {
