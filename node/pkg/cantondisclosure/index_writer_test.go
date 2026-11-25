@@ -50,19 +50,30 @@ type fakeCoreContractLedgerReader struct {
 	readPartyUnhosted     bool
 	readPartyHostingErr   error
 	readPartyHostingReads int
+	// firstHostingReadGate, when not nil, holds the answer of the first hosting read, computed at its start.
+	firstHostingReadGate chan struct{}
 	// ledgerEndReadDuration delays each GetLedgerEnd answer; ledgerEndReadStartedAt is the entry time of the last call.
 	ledgerEndReadDuration  time.Duration
 	ledgerEndReadStartedAt time.Time
 }
 
-func (reader *fakeCoreContractLedgerReader) ReadPartyIsHosted(context.Context) (bool, error) {
+func (reader *fakeCoreContractLedgerReader) ReadPartyIsHosted(ctx context.Context) (bool, error) {
 	reader.mutex.Lock()
-	defer reader.mutex.Unlock()
 	reader.readPartyHostingReads++
-	if reader.readPartyHostingErr != nil {
-		return false, reader.readPartyHostingErr
+	isFirstRead := reader.readPartyHostingReads == 1
+	hosted, hostingErr, gate := !reader.readPartyUnhosted, reader.readPartyHostingErr, reader.firstHostingReadGate
+	reader.mutex.Unlock()
+	if isFirstRead && gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
-	return !reader.readPartyUnhosted, nil
+	if hostingErr != nil {
+		return false, hostingErr
+	}
+	return hosted, nil
 }
 
 func (reader *fakeCoreContractLedgerReader) setReadPartyHosting(unhosted bool, hostingErr error) {
@@ -1326,6 +1337,52 @@ func TestWriterBootstrapDoesNotServeASnapshotReadBeforeARehosting(t *testing.T) 
 			require.NoError(t, stop())
 		})
 	}
+}
+
+func TestWriterRecordsHostingReadsInTheOrderTheyStart(t *testing.T) {
+	ledger := testDecodingLedger()
+	bootstrapHostingReadGate := make(chan struct{})
+	bootstrapSnapshotGate := make(chan struct{})
+	replacementGate := make(chan struct{})
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))},
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(2, ""))},
+		},
+		snapshotReadGates:    []chan struct{}{bootstrapSnapshotGate, replacementGate},
+		firstHostingReadGate: bootstrapHostingReadGate,
+	}
+	timing := testWriterTiming()
+	timing.LedgerEndPollInterval = 200 * time.Millisecond
+	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, timing)
+	require.Eventually(t, func() bool { return reader.readPartyHostingReadCount() >= 1 }, 5*time.Second, time.Millisecond)
+
+	// The bootstrap read answered hosted; the party is lost before that answer arrives, and a poll starts meanwhile.
+	reader.setReadPartyHosting(true, nil)
+	time.Sleep(timing.LedgerEndPollInterval + timing.LedgerEndPollInterval/2)
+	close(bootstrapHostingReadGate)
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads == 1 && reader.readPartyHostingReadCount() >= 2
+	}, 5*time.Second, time.Millisecond)
+
+	// The real regain comes after the snapshot started on the frozen ACS, before the next poll.
+	reader.setReadPartyHosting(false, nil)
+	require.Eventually(t, func() bool { return reader.readPartyHostingReadCount() >= 3 }, 5*time.Second, time.Millisecond)
+	close(bootstrapSnapshotGate)
+
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads == 2
+	}, 5*time.Second, time.Millisecond, "the snapshot read while unhosted gets a replacement")
+	require.Equal(t, ServiceReadinessStatusReadPartyRehosted, served.ServiceReadiness().Status())
+	close(replacementGate)
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.NoError(t, err)
+	require.Equal(t, testContractIDHex(2), result.Contract().ContractID().String())
+	require.NoError(t, stop())
 }
 
 func TestWriterReportsAnUnknownHostingAfterTheLagBoundOfFailedReads(t *testing.T) {

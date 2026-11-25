@@ -353,7 +353,7 @@ func TestServedIndexLookupsFailWhileTheHostingRefusesThem(t *testing.T) {
 
 func TestReadPartyHostingTransitions(t *testing.T) {
 	served, clock := newTestServedIndex(t)
-	require.Equal(t, readPartyHostingTransitionFirstReadHosted, served.setReadPartyHosted(true), "the zero value is not hosted")
+	require.Equal(t, readPartyHostingTransitionFirstReadHosted, served.setReadPartyHosted(true), "the first successful read finds the party hosted")
 	require.Zero(t, served.currentReadPartyRehostCount(), "the first hosting read is no re-hosting")
 	require.Equal(t, readPartyHostingTransitionLost, served.setReadPartyHosted(false))
 	require.Equal(t, readPartyHostingTransitionRegained, served.setReadPartyHosted(true))

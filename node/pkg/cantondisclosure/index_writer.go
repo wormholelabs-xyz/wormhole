@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -151,6 +152,9 @@ type CoreContractIndexWriter struct {
 	snapshotReplayNodeLimit cantonclient.ReplayNodeSnapshotLimit
 	timing                  IndexWriterTiming
 	logger                  *zap.Logger
+	// hostingReadMutex orders the hosting reads: each holds it from its RPC through its record, so the records follow
+	// the order in which the reads start. A poll can wait up to one unary RPC timeout behind a build read.
+	hostingReadMutex sync.Mutex
 }
 
 // NewCoreContractIndexWriter checks every parameter. One writer per ServedIndex.
@@ -283,6 +287,8 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// The hosting read goes first, so a slow ledger end read does not age it past the bound.
+			writer.recordReadPartyHosting(ctx)
 			observed, err := writer.readObservedLedgerEnd(ctx)
 			if ctx.Err() != nil {
 				return
@@ -290,10 +296,9 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 			if err != nil {
 				ledgerEndReadFailuresCounter.Inc()
 				writer.logger.Warn("ledger end read failed", zap.Error(err))
-			} else {
-				writer.served.recordLedgerEnd(observed.offset, observed.observedAt)
+				continue
 			}
-			writer.recordReadPartyHosting(ctx)
+			writer.served.recordLedgerEnd(observed.offset, observed.observedAt)
 		}
 	}
 }
@@ -312,15 +317,27 @@ func (writer *CoreContractIndexWriter) readObservedLedgerEnd(ctx context.Context
 	return observedLedgerEnd{offset: ledgerEnd, observedAt: readStartedAt}, nil
 }
 
-// readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
-// The hosting read comes first: a re-hosting during the snapshot read then raises the count above the captured one.
-func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+// recordReadPartyHostingAndCaptureRehostCount reads and records the hosting, then returns the rehost count, all under
+// hostingReadMutex.
+func (writer *CoreContractIndexWriter) recordReadPartyHostingAndCaptureRehostCount(ctx context.Context) (uint64, error) {
+	writer.hostingReadMutex.Lock()
+	defer writer.hostingReadMutex.Unlock()
 	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
+	if err != nil {
+		return 0, err
+	}
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
+	return writer.served.currentReadPartyRehostCount(), nil
+}
+
+// readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
+// The hosting read and the count capture come first, under hostingReadMutex: a re-hosting during the snapshot read
+// then raises the count above the captured one.
+func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+	readPartyRehostCount, err := writer.recordReadPartyHostingAndCaptureRehostCount(ctx)
 	if err != nil {
 		return followedIndex{}, err
 	}
-	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
-	readPartyRehostCount := writer.served.currentReadPartyRehostCount()
 	bootstrapLedgerEnd, err := writer.readObservedLedgerEnd(ctx)
 	if err != nil {
 		return followedIndex{}, err
@@ -624,7 +641,7 @@ func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 
 // startRehostReplacementBuildWhenDue builds a replacement from a snapshot read after the read party became hosted again.
 // The index missed the updates of the unhosted period, so the service stays not ready until the replacement serves.
-// A failed build starts again at the next check.
+// A failed build ends the session, and Run retries with its backoff and attempt limit.
 func (session *ledgerFollowSession) startRehostReplacementBuildWhenDue(ctx context.Context) {
 	if session.replacement != nil || session.followed.swapPending || !session.writer.served.readPartyRehostReplacementDue() {
 		return
@@ -734,6 +751,8 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 // SECURITY: a participant that stops hosting the read party keeps its ACS and its offset checkpoints, so neither the
 // ledger lag nor the resnapshot comparison detects the frozen index. Only this check makes /v1/readyz fail.
 func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Context) {
+	writer.hostingReadMutex.Lock()
+	defer writer.hostingReadMutex.Unlock()
 	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
 	if ctx.Err() != nil {
 		return

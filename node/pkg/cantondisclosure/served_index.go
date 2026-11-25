@@ -53,7 +53,8 @@ const (
 	ServiceReadinessStatusReadPartyNotHosted  ServiceReadinessStatus = "read_party_not_hosted"
 	// ServiceReadinessStatusReadPartyHostingUnknown: the last successful hosting read is older than the ledger lag bound.
 	ServiceReadinessStatusReadPartyHostingUnknown ServiceReadinessStatus = "read_party_hosting_unknown"
-	// ServiceReadinessStatusReadPartyRehosted: the read party is hosted again, and a replacement index is not yet served.
+	// ServiceReadinessStatusReadPartyRehosted: the read party is hosted again, or hosted after an unknown hosting, and a
+	// replacement index read after that is not yet served.
 	ServiceReadinessStatusReadPartyRehosted ServiceReadinessStatus = "read_party_rehosted"
 	serviceReadinessStatusIndexPrefix                              = "index_"
 )
@@ -135,8 +136,9 @@ type ServedIndex struct {
 	readPartyHosted bool
 	// readPartyHostingReadAt is the time of the last successful hosting read; zero before the first.
 	readPartyHostingReadAt time.Time
-	// readPartyRehostCount counts the hosted-again transitions after the first swap. servedIndexRehostCount is
-	// the count before the snapshot of the served index: a lower value means a snapshot of a frozen ACS.
+	// readPartyRehostCount counts the hosted reads after an earlier unhosted read or an unknown-hosting gap, also before
+	// the first swap. servedIndexRehostCount is the count before the snapshot of the served index: a lower value means
+	// a snapshot of a possibly frozen ACS.
 	readPartyRehostCount   uint64
 	servedIndexRehostCount uint64
 	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnds holds the reads above the index offset,
