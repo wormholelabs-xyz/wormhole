@@ -1303,9 +1303,9 @@ Thus the service affects liveness only.
 | `--listenAddress` | Mandatory. HTTP listen address of the routes (`host:port`). |
 | `--statusAddr` | Listen address of `/metrics`. The default is `127.0.0.1:6061`. An empty value disables it. |
 | `--indexByteCapBytes` | Byte cap of the index. The default is 4 GiB. |
-| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 3 minutes. Without core transactions, the index moves only on offset checkpoints. Then the lag can be 75 seconds on Canton 3.7.3. |
+| `--ledgerLagBound` | Largest ledger lag for a ready service, from 10 seconds to 1 hour. The default is 3 minutes. Without core transactions, the index moves only on offset checkpoints. Then the lag can be 75 seconds on Canton 3.7.3. Keep the bound above the idle checkpoint interval of your participant. |
 | `--resnapshotInterval` | Interval of the snapshot comparison, from 1 minute to 168 hours. The default is 1 hour. |
-| `--logLevel` | Log level: `debug`, `info`, `warn` or `error`. The default is `info`. |
+| `--logLevel` | Log level of zap: `debug`, `info`, `warn`, `error`, `dpanic`, `panic` or `fatal`. The default is `info`. |
 
 The command refuses to start if a flag is not valid.
 It uses the same checks as the watcher for TLS, OAuth2 and the party ID.
@@ -1338,7 +1338,9 @@ The service also has its own limits:
 | Status | Meaning |
 | - | - |
 | `bootstrapping` | The first snapshot is not complete. |
-| `read_party_not_hosted` | No connected synchronizer hosts `gg` on your participant. The index stops at the last offset of the hosting. Point the service at a participant that hosts `gg`. |
+| `read_party_not_hosted` | No connected synchronizer hosts `gg` on your participant. The index content stops at the last update before the hosting change. The index offset continues to move on offset checkpoints. Lookups give 503. Point the service at a participant that hosts `gg`. |
+| `read_party_hosting_unknown` | No hosting read was successful during `--ledgerLagBound`. Lookups give 503. |
+| `read_party_rehosted` | Your participant hosts `gg` again. The index does not have the updates of the period without hosting. The service builds a new index. Lookups give 503 until the new index serves. |
 | `stream_disconnected` | The update stream is not connected. |
 | `ledger_lag_above_bound` | The newest ledger end read that the index reached is older than `--ledgerLagBound`. |
 | `index_singleton_missing` | A singleton has no live instance. |
@@ -1351,25 +1353,45 @@ The status `ready_byte_cap_reached` gives 200. In this state, the service serves
 At each `--resnapshotInterval`, the service builds a new index and tries again.
 To serve the nodes again, increase `--indexByteCapBytes`.
 
-The service builds a new index in the background after a byte cap retry or a snapshot difference.
+The service builds a new index in the background after these causes (the `reason` label of `wormhole_canton_disclosure_index_rebuilds_total`):
+
+- `byte_cap_retry`: a byte cap retry.
+- `resnapshot_difference`: a snapshot difference.
+- `snapshot_replay_node_limit`: a periodic snapshot with more `ReplayNode` contracts than the byte cap holds.
+- `pruned_offset`: a periodic snapshot at a pruned offset.
+- `read_party_rehosted`: a new hosting of `gg`.
+
 During this build, the old index continues to follow the ledger, and `/v1/readyz` shows its state.
 The new index replaces the old index when it reaches the same offset.
 After other rebuild causes, the status is `stream_disconnected` until the new index is complete.
-The service reads the ledger end every 5 seconds, also during a build.
+The service reads the ledger end and the hosting of `gg` every 5 seconds, also during a build.
+The update stream can stop without an error. The service then reconnects the stream when these conditions continue for 2 minutes:
+
+- The ledger lag is more than `--ledgerLagBound`.
+- The ledger end is above the index offset.
+- The index offset does not move.
+
+Thus the reconnect occurs about `--ledgerLagBound` plus 2 minutes after the last update. With the default bound, this is 5 minutes.
 
 The index uses the blob bytes plus 1536 bytes for each contract.
 A `ReplayNode` blob has about 66 bytes for each digest, plus the fixed bytes of the node.
 From 8.4 M to 134 M digests in one trie, the trie has about 1.05 M live nodes (`canton/README.md` §4.6).
 Thus the index uses about 1.05 M x (1536 + F) bytes plus 66 bytes for each digest. F is the fixed blob bytes of a node.
+Each live node uses 1536 + F bytes, also if it covers few digests. Thus many small tries increase the bytes for each digest.
 With F = 1 KiB, the default cap of 4 GiB holds about 24 M digests.
 Measure F on your participant, and set `--indexByteCapBytes` from the result.
 
 During a rebuild, the old index, the snapshot and the new index are in memory together.
-Thus plan for a peak memory of about 3 times `--indexByteCapBytes`. For the default cap, this is 12 GiB.
+The snapshot keeps `ReplayNode` blobs plus 1536 bytes for each node up to `--indexByteCapBytes`.
+Thus the live data can be 3 times `--indexByteCapBytes`. For the default cap, this is 12 GiB.
+The Go garbage collector needs more memory than the live data. With the default `GOGC` of 100, the heap can grow to 2 times the live data.
+Thus plan for a peak memory of 6 times `--indexByteCapBytes`, or set `GOMEMLIMIT` below the memory limit of the container.
 
-A lookup that gets 503 because of the byte cap has no `Retry-After` header. The cap continues until the next `--resnapshotInterval`.
-Other 503 answers have `Retry-After: 1`.
-The service writes at most one warning log each second for 503 answers. The log field `suppressedUnavailableLogs` gives the number of skipped logs.
+Only the 503 for the lookup limit (`service busy, retry`) has the header `Retry-After: 1`.
+A 503 for an index or hosting status has no `Retry-After` header. A short wait cannot clear these statuses.
+The service writes at most one warning log each second for each cause of a 503. The log field `cause` gives the cause.
+The log field `suppressedUnavailableLogs` gives the number of skipped logs.
+After one second without a 503 of that cause, the next request writes the last skipped count. At shutdown, the service writes all skipped counts.
 
 #### 7.12.4 Monitoring
 
@@ -1381,11 +1403,14 @@ The service writes at most one warning log each second for 503 answers. The log 
 | `wormhole_canton_disclosure_ledger_lag_seconds` | The value is more than `--ledgerLagBound`. |
 | `wormhole_canton_disclosure_stream_connected` | The value is 0 for 1 minute. |
 | `wormhole_canton_disclosure_read_party_hosted` | The value is 0. |
+| `wormhole_canton_disclosure_read_party_hosting_read_failures_total` | The value increases for 1 minute. After `--ledgerLagBound` without a successful read, `/v1/readyz` shows `read_party_hosting_unknown`. |
 | `wormhole_canton_disclosure_index_rebuilds_total` | The value increases. The `reason` label shows the cause. |
 | `wormhole_canton_disclosure_resnapshot_differences_total` | The value increases. The `kind` label shows the difference. |
 | `wormhole_canton_disclosure_index_ignored_unknown_archives` | The value increases. |
 
-The service calculates each gauge when Prometheus reads `/metrics`. Thus the ledger lag increases also while the index writer waits.
+The service calculates the gauges when Prometheus reads `/metrics`. Thus the ledger lag increases also while the index writer waits.
+The service reads its state one time for each read of `/metrics`. Thus the gauges of one read agree.
+`/metrics` on `--statusAddr` gives only the disclosure metrics and the Go process metrics. `guardiand node` does not give the disclosure metrics.
 
 ## 8. Watcher configuration
 
