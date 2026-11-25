@@ -1340,7 +1340,7 @@ The service also has its own limits:
 | `bootstrapping` | The first snapshot is not complete. |
 | `read_party_not_hosted` | No connected synchronizer hosts `gg` on your participant. The index content stops at the last update before the hosting change. The index offset continues to move on offset checkpoints. Lookups give 503. Point the service at a participant that hosts `gg`. |
 | `read_party_hosting_unknown` | No hosting read was successful during `--ledgerLagBound`. Lookups give 503. |
-| `read_party_rehosted` | Your participant hosts `gg` again. The index does not have the updates of the period without hosting. The service builds a new index. Lookups give 503 until the new index serves. |
+| `read_party_rehosted` | Your participant hosts `gg` again, or a hosting read is successful after `read_party_hosting_unknown`. The index can miss the updates of that period. The service builds a new index from a snapshot read after the hosting read. Lookups give 503 until the new index serves. |
 | `stream_disconnected` | The update stream is not connected. |
 | `ledger_lag_above_bound` | The newest ledger end read that the index reached is older than `--ledgerLagBound`. |
 | `index_singleton_missing` | A singleton has no live instance. |

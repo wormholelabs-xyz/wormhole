@@ -50,8 +50,8 @@ const (
 	httpWriteTimeout                   = 10 * time.Second
 	httpIdleTimeout                    = 60 * time.Second
 	httpMaxHeaderBytes                 = 16 << 10
-	// httpRetryAfterSeconds is the Retry-After of the busy 503: a lookup slot frees within one write timeout.
-	// An index or hosting 503 has no Retry-After, because a rebuild, a ledger change or an operator action clears it.
+	// httpRetryAfterSeconds is the Retry-After of the busy 503 only: a lookup slot frees within one write timeout,
+	// while a rebuild, a ledger change or an operator action clears an index or hosting 503.
 	httpRetryAfterSeconds = 1
 	// unavailableLogInterval bounds the 503 warn logs to one per interval and cause.
 	unavailableLogInterval = time.Second

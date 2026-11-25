@@ -27,7 +27,7 @@ const (
 )
 
 // NewMetricsRegistry returns a new registry with the disclosure metrics of served and the Go runtime and process
-// metrics. The service serves it on its status address; the default registry of guardiand holds no disclosure metric.
+// metrics. The service serves it on its status address; only these registries hold the disclosure metrics.
 // Each call returns a separate registry; the counters are shared by every registry of the process.
 func (served *ServedIndex) NewMetricsRegistry() (*prometheus.Registry, error) {
 	if served == nil {

@@ -313,7 +313,13 @@ func (writer *CoreContractIndexWriter) readObservedLedgerEnd(ctx context.Context
 }
 
 // readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
+// The hosting read comes first: a re-hosting during the snapshot read then raises the count above the captured one.
 func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
+	if err != nil {
+		return followedIndex{}, err
+	}
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
 	readPartyRehostCount := writer.served.currentReadPartyRehostCount()
 	bootstrapLedgerEnd, err := writer.readObservedLedgerEnd(ctx)
 	if err != nil {
@@ -360,11 +366,6 @@ func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (f
 	if built.bootstrapLedgerEnd.offset < servedOffset {
 		return followedIndex{}, fmt.Errorf("cantondisclosure: ledger end %d is below the served index offset %d", built.bootstrapLedgerEnd.offset, servedOffset)
 	}
-	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
-	if err != nil {
-		return followedIndex{}, err
-	}
-	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
 	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd, built.readPartyRehostCount)
 	return built, nil
 }
@@ -544,7 +545,8 @@ func (session *ledgerFollowSession) consumeSubscription(
 			}
 			indexBuildFailuresCounter.Inc()
 			writer.logger.Error("replacement core disclosure index build failed", zap.String("reason", string(reason)), zap.Error(result.err))
-			if !session.followed.index.Status().Readiness.ServesSingletonLookups() {
+			// A re-hosting replacement stays due, so Run retries it with its backoff and attempt limit.
+			if reason == IndexRebuildReasonReadPartyRehosted || !session.followed.index.Status().Readiness.ServesSingletonLookups() {
 				return subscriptionOutcome{rebuildReason: reason, err: result.err, appliedAdvanceCount: outcome.appliedAdvanceCount}
 			}
 		}
@@ -603,10 +605,8 @@ func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
 	session.writer.logger.Info("replacement core disclosure index serves", zap.Int64("indexOffset", session.followed.index.Status().Offset))
 }
 
-// streamStalled is true when the served ledger lag stayed above the bound for StalledStreamTimeout
-// while the ledger end was above the served offset and the followed index offset did not move.
-// A lag above the bound with no offset behind comes from failed ledger end reads on a quiet ledger; a reconnect cannot fix it.
-// The lag bound must stay above the idle offset checkpoint interval of the participant, or an idle stream reconnects.
+// streamStalled is true when, for StalledStreamTimeout, the lag stayed above the bound, the ledger end stayed above the
+// served offset, and the followed offset did not move. Keep the lag bound above the idle checkpoint interval.
 func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 	readiness := session.writer.served.ServiceReadiness()
 	followedOffset := session.followed.index.Status().Offset
@@ -748,11 +748,11 @@ func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Contex
 
 func (writer *CoreContractIndexWriter) logReadPartyHostingTransition(transition readPartyHostingTransition) {
 	switch transition {
-	case readPartyHostingTransitionUnchanged:
+	case readPartyHostingTransitionUnchanged, readPartyHostingTransitionFirstReadHosted:
 	case readPartyHostingTransitionLost:
 		writer.logger.Warn("the participant no longer hosts the read party; /v1/readyz reports read_party_not_hosted", zap.String("guardianGovernance", writer.guardianGovernance.String()))
 	case readPartyHostingTransitionRegained:
-		writer.logger.Info("the participant hosts the read party again; a replacement index must serve before /v1/readyz reports ready", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+		writer.logger.Info("the participant hosts the read party again, or after an unknown hosting; a replacement index must serve before /v1/readyz reports ready", zap.String("guardianGovernance", writer.guardianGovernance.String()))
 	default:
 		panic(fmt.Sprintf("cantondisclosure: unknown hosting transition %d", int(transition)))
 	}

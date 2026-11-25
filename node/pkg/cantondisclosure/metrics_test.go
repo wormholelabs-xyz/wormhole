@@ -65,9 +65,8 @@ func TestGaugesReadTheServedIndexAtScrapeTime(t *testing.T) {
 	require.Equal(t, 1.0, gatheredGaugeValue(t, registry, "wormhole_canton_disclosure_service_readiness", "status", string(ServiceReadinessStatusReadPartyRehosted)))
 	swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 
-	clock.current = clock.current.Add(90 * time.Second)
+	advanceClockWithHostingReads(served, clock, 90*time.Second)
 	served.recordLedgerEnd(testBootstrapOffset+4, clock.current)
-	served.setReadPartyHosted(true)
 	require.Equal(t, 90.0, gatheredGaugeValue(t, registry, "wormhole_canton_disclosure_ledger_lag_seconds", "", ""))
 	require.Equal(t, 4.0, gatheredGaugeValue(t, registry, "wormhole_canton_disclosure_ledger_lag_offsets", "", ""))
 	require.Equal(t, 1.0, gatheredGaugeValue(t, registry, "wormhole_canton_disclosure_service_readiness", "status", string(ServiceReadinessStatusLedgerLagAboveBound)))

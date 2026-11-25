@@ -213,32 +213,40 @@ type readPartyHostingTransition int
 
 const (
 	readPartyHostingTransitionUnchanged readPartyHostingTransition = iota + 1
+	readPartyHostingTransitionFirstReadHosted
 	readPartyHostingTransitionLost
 	readPartyHostingTransitionRegained
 )
 
-// setReadPartyHosted records a successful hosting read at the clock time. A regained hosting after the first swap
-// increments readPartyRehostCount, so that the served index stays not ready until a snapshot read after it serves.
+// setReadPartyHosted records a successful hosting read at the clock time. A hosted read after an earlier read that
+// was unhosted, or older than the ledger lag bound, increments readPartyRehostCount: a snapshot read before it can hold
+// a frozen ACS, so the served index stays not ready until a snapshot read after it serves.
 func (served *ServedIndex) setReadPartyHosted(hosted bool) readPartyHostingTransition {
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
 	readAt := served.now()
-	if readAt.Before(served.readPartyHostingReadAt) {
+	previousReadAt := served.readPartyHostingReadAt
+	if readAt.Before(previousReadAt) {
 		panic("cantondisclosure: hosting reads go back in time")
 	}
-	served.readPartyHostingReadAt = readAt
+	isFirstRead := previousReadAt.IsZero()
+	hostingWasUnknown := !isFirstRead && readAt.Sub(previousReadAt) > served.ledgerLagBound
 	wasHosted := served.readPartyHosted
+	served.readPartyHostingReadAt = readAt
 	served.readPartyHosted = hosted
 	switch {
-	case wasHosted == hosted:
-		return readPartyHostingTransitionUnchanged
-	case !hosted:
+	case !hosted && wasHosted:
 		return readPartyHostingTransitionLost
-	}
-	if served.currentIndex.Load() != nil {
+	case !hosted:
+		return readPartyHostingTransitionUnchanged
+	case isFirstRead:
+		return readPartyHostingTransitionFirstReadHosted
+	case wasHosted && !hostingWasUnknown:
+		return readPartyHostingTransitionUnchanged
+	default:
 		served.readPartyRehostCount++
+		return readPartyHostingTransitionRegained
 	}
-	return readPartyHostingTransitionRegained
 }
 
 // currentReadPartyRehostCount is the count that a snapshot read from now on passes to swapIndex.
