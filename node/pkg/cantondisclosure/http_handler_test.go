@@ -360,7 +360,7 @@ func TestClaimedRootsNodeQueryParsing(t *testing.T) {
 }
 
 func TestReadyzStates(t *testing.T) {
-	readyReadiness := ServiceReadiness{BootstrapCompleted: true, StreamConnected: true, LedgerLag: time.Second, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady}
+	readyReadiness := ServiceReadiness{BootstrapCompleted: true, ReadPartyHosted: true, StreamConnected: true, LedgerLag: time.Second, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady}
 	testCases := []struct {
 		name           string
 		mutate         func(readiness *ServiceReadiness)
@@ -378,6 +378,10 @@ func TestReadyzStates(t *testing.T) {
 		{name: "singleton missing", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessSingletonMissing }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_singleton_missing"}`},
 		{name: "inconsistent", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessInconsistent }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_inconsistent"}`},
 		{name: "resnapshot difference", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessResnapshotDifference }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_resnapshot_difference"}`},
+		{name: "read party not hosted", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHosted = false }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_not_hosted"}`},
+		{name: "hosting read at the bound", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHostingReadAge = time.Minute }, expectedStatus: http.StatusOK, expectedBody: `{"status":"ready"}`},
+		{name: "hosting read above the bound", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHostingReadAge = time.Minute + 1 }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_hosting_unknown"}`},
+		{name: "read party rehosted", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyRehostedBeforeServedSnapshot = true }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_rehosted"}`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -400,7 +404,7 @@ func TestHealthzIsAlwaysOK(t *testing.T) {
 func TestConcurrentLookupLimitAnswers503AndKeepsProbes(t *testing.T) {
 	lookups := &fakeCoreContractLookups{
 		result:        testLookupResult(t),
-		readiness:     ServiceReadiness{BootstrapCompleted: true, StreamConnected: true, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady},
+		readiness:     ServiceReadiness{BootstrapCompleted: true, ReadPartyHosted: true, StreamConnected: true, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady},
 		blockLookups:  make(chan struct{}),
 		lookupStarted: make(chan struct{}, 1),
 	}

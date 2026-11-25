@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -241,28 +242,38 @@ func runCantonDisclosureService(cmd *cobra.Command, _ []string) error {
 	return serveCantonDisclosure(ctx, config, reader, listener, statusListener, logger)
 }
 
-func newCantonDisclosureComponents(config cantonDisclosureServiceConfig, reader cantondisclosure.CoreContractLedgerReader, logger *zap.Logger) (*cantondisclosure.CoreContractIndexWriter, *cantondisclosure.DisclosureHTTPHandler, error) {
+// cantonDisclosureComponents are the parts of one service run. metricsRegistry holds the disclosure metrics.
+type cantonDisclosureComponents struct {
+	writer          *cantondisclosure.CoreContractIndexWriter
+	handler         *cantondisclosure.DisclosureHTTPHandler
+	metricsRegistry *prometheus.Registry
+}
+
+func newCantonDisclosureComponents(config cantonDisclosureServiceConfig, reader cantondisclosure.CoreContractLedgerReader, logger *zap.Logger) (cantonDisclosureComponents, error) {
 	served, err := cantondisclosure.NewServedIndex(config.ledgerLagBound)
 	if err != nil {
-		return nil, nil, err
+		return cantonDisclosureComponents{}, err
 	}
-	served.ExportMetrics()
+	metricsRegistry, err := served.NewMetricsRegistry()
+	if err != nil {
+		return cantonDisclosureComponents{}, err
+	}
 	writer, err := cantondisclosure.NewCoreContractIndexWriter(reader, served, config.guardianGovernance, config.indexByteCapBytes, config.writerTiming, logger)
 	if err != nil {
-		return nil, nil, err
+		return cantonDisclosureComponents{}, err
 	}
 	handler, err := cantondisclosure.NewDisclosureHTTPHandler(served, cantondisclosure.DefaultMaxConcurrentLookupRequests, logger)
 	if err != nil {
-		return nil, nil, err
+		return cantonDisclosureComponents{}, err
 	}
-	return writer, handler, nil
+	return cantonDisclosureComponents{writer: writer, handler: handler, metricsRegistry: metricsRegistry}, nil
 }
 
 // serveCantonDisclosure runs the index writer, the disclosure server and the status server until ctx
 // ends or one of them fails, then shuts the servers down within cantonDisclosureShutdownTimeout.
 // statusListener is nil when /metrics is off.
 func serveCantonDisclosure(ctx context.Context, config cantonDisclosureServiceConfig, reader cantondisclosure.CoreContractLedgerReader, listener net.Listener, statusListener net.Listener, logger *zap.Logger) error {
-	writer, handler, err := newCantonDisclosureComponents(config, reader, logger)
+	components, err := newCantonDisclosureComponents(config, reader, logger)
 	if err != nil {
 		_ = listener.Close()
 		if statusListener != nil {
@@ -270,11 +281,12 @@ func serveCantonDisclosure(ctx context.Context, config cantonDisclosureServiceCo
 		}
 		return err
 	}
-	disclosureServer := cantondisclosure.NewDisclosureHTTPServer(listener.Addr().String(), handler)
+	writer := components.writer
+	disclosureServer := cantondisclosure.NewDisclosureHTTPServer(listener.Addr().String(), components.handler)
 	var statusServer *http.Server
 	if statusListener != nil {
 		statusRouter := http.NewServeMux()
-		statusRouter.Handle("/metrics", promhttp.Handler())
+		statusRouter.Handle("/metrics", promhttp.HandlerFor(components.metricsRegistry, promhttp.HandlerOpts{}))
 		statusServer = &http.Server{
 			Handler:           statusRouter,
 			ReadHeaderTimeout: cantonDisclosureStatusServerTimeout,

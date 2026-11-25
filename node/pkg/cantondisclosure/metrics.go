@@ -1,10 +1,11 @@
 package cantondisclosure
 
 import (
-	"sync/atomic"
+	"errors"
+	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 // IndexRebuildReason is the metric label of one index rebuild.
@@ -21,55 +22,95 @@ const (
 	IndexRebuildReasonByteCapRetry         IndexRebuildReason = "byte_cap_retry"
 	// IndexRebuildReasonSnapshotReplayNodeLimit: a resnapshot had more ReplayNodes than the byte cap admits.
 	IndexRebuildReasonSnapshotReplayNodeLimit IndexRebuildReason = "snapshot_replay_node_limit"
+	// IndexRebuildReasonReadPartyRehosted: the read party became hosted again after the snapshot of the served index.
+	IndexRebuildReasonReadPartyRehosted IndexRebuildReason = "read_party_rehosted"
 )
 
-// metricsServedIndex is the served index that the gauges read at scrape time; nil reads as zero.
-var metricsServedIndex atomic.Pointer[ServedIndex]
-
-// ExportMetrics makes the disclosure gauges read served at each scrape. Call it once per process.
-func (served *ServedIndex) ExportMetrics() {
+// NewMetricsRegistry returns a new registry with the disclosure metrics of served and the Go runtime and process
+// metrics. The service serves it on its status address; the default registry of guardiand holds no disclosure metric.
+// Each call returns a separate registry; the counters are shared by every registry of the process.
+func (served *ServedIndex) NewMetricsRegistry() (*prometheus.Registry, error) {
 	if served == nil {
-		panic("cantondisclosure: export the metrics of a nil served index")
+		return nil, errors.New("cantondisclosure: metrics registry of a nil served index")
 	}
-	metricsServedIndex.Store(served)
-}
-
-// exportedIndexStatus is the status of the exported served index, and false before its first swap.
-func exportedIndexStatus() (IndexStatus, bool) {
-	served := metricsServedIndex.Load()
-	if served == nil {
-		return IndexStatus{}, false
+	registry := prometheus.NewRegistry()
+	registeredCollectors := []prometheus.Collector{
+		servedIndexMetricsCollector{served: served},
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		readPartyHostingReadFailuresCounter,
+		indexRebuildsCounter,
+		indexBuildFailuresCounter,
+		streamReconnectsCounter,
+		resnapshotDifferencesCounter,
+		resnapshotFailuresCounter,
+		ledgerEndReadFailuresCounter,
 	}
-	return served.IndexStatus()
-}
-
-// exportedServiceReadiness is the readiness of the exported served index, and false before ExportMetrics.
-func exportedServiceReadiness() (ServiceReadiness, bool) {
-	served := metricsServedIndex.Load()
-	if served == nil {
-		return ServiceReadiness{}, false
-	}
-	return served.ServiceReadiness(), true
-}
-
-func indexStatusGaugeFunc(name string, help string, valueOf func(IndexStatus) float64) {
-	promauto.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 {
-		status, hasIndex := exportedIndexStatus()
-		if !hasIndex {
-			return 0
+	for _, collector := range registeredCollectors {
+		if err := registry.Register(collector); err != nil {
+			return nil, fmt.Errorf("cantondisclosure: register a disclosure metric: %w", err)
 		}
-		return valueOf(status)
-	})
+	}
+	return registry, nil
 }
 
-func serviceReadinessGaugeFunc(opts prometheus.GaugeOpts, valueOf func(ServiceReadiness) float64) {
-	promauto.NewGaugeFunc(opts, func() float64 {
-		readiness, isExported := exportedServiceReadiness()
-		if !isExported {
-			return 0
-		}
-		return valueOf(readiness)
-	})
+func newGaugeDesc(name string, help string, variableLabels ...string) *prometheus.Desc {
+	return prometheus.NewDesc(name, help, variableLabels, nil)
+}
+
+var (
+	indexUsedBytesDesc               = newGaugeDesc("wormhole_canton_disclosure_index_used_bytes", "Bytes that the served core disclosure index charges against its byte cap")
+	indexByteCapBytesDesc            = newGaugeDesc("wormhole_canton_disclosure_index_byte_cap_bytes", "Byte cap of the core disclosure index")
+	indexOffsetDesc                  = newGaugeDesc("wormhole_canton_disclosure_index_offset", "Participant offset of the served core disclosure index")
+	indexLiveContractsDesc           = newGaugeDesc("wormhole_canton_disclosure_index_live_contracts", "Live core contracts in the served core disclosure index")
+	indexIgnoredUnknownArchivesDesc  = newGaugeDesc("wormhole_canton_disclosure_index_ignored_unknown_archives", "Archives of unknown contract ids that the served index ignored since its bootstrap")
+	indexDroppedReplayNodeUpdateDesc = newGaugeDesc("wormhole_canton_disclosure_index_dropped_replay_node_updates", "ReplayNode creates and archives that the served index skipped at the byte cap since its bootstrap")
+	indexReadinessDesc               = newGaugeDesc("wormhole_canton_disclosure_index_readiness", "1 for the readiness of the served core disclosure index, 0 for each other readiness", "readiness")
+	serviceReadinessDesc             = newGaugeDesc("wormhole_canton_disclosure_service_readiness", "1 for the /v1/readyz status of the disclosure service, 0 for each other status", "status")
+	ledgerLagSecondsDesc             = newGaugeDesc("wormhole_canton_disclosure_ledger_lag_seconds", "Age of the newest ledger end read that the index offset reached")
+	streamConnectedDesc              = newGaugeDesc("wormhole_canton_disclosure_stream_connected", "1 while the core contract update stream is connected")
+	ledgerLagOffsetsDesc             = newGaugeDesc("wormhole_canton_disclosure_ledger_lag_offsets", "Latest observed ledger end minus the index offset")
+	readPartyHostedDesc              = newGaugeDesc("wormhole_canton_disclosure_read_party_hosted", "1 while a connected synchronizer hosts the read party on the participant")
+)
+
+// servedIndexMetricsCollector reads the served index once per scrape, so that the gauges of one scrape agree.
+type servedIndexMetricsCollector struct {
+	served *ServedIndex
+}
+
+func (collector servedIndexMetricsCollector) Describe(descs chan<- *prometheus.Desc) {
+	for _, desc := range []*prometheus.Desc{
+		indexUsedBytesDesc, indexByteCapBytesDesc, indexOffsetDesc, indexLiveContractsDesc, indexIgnoredUnknownArchivesDesc,
+		indexDroppedReplayNodeUpdateDesc, indexReadinessDesc, serviceReadinessDesc, ledgerLagSecondsDesc, streamConnectedDesc,
+		ledgerLagOffsetsDesc, readPartyHostedDesc,
+	} {
+		descs <- desc
+	}
+}
+
+// Collect emits a zero index status before the first swap.
+func (collector servedIndexMetricsCollector) Collect(metrics chan<- prometheus.Metric) {
+	snapshot := collector.served.readMetricsSnapshot()
+	gauge := func(desc *prometheus.Desc, gaugeValue float64, labelValues ...string) {
+		metrics <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, gaugeValue, labelValues...)
+	}
+	gauge(indexUsedBytesDesc, float64(snapshot.indexStatus.UsedBytes))
+	gauge(indexByteCapBytesDesc, float64(snapshot.indexStatus.ByteCapBytes))
+	gauge(indexOffsetDesc, float64(snapshot.indexStatus.Offset))
+	gauge(indexLiveContractsDesc, float64(snapshot.indexStatus.LiveContractCount))
+	gauge(indexIgnoredUnknownArchivesDesc, float64(snapshot.indexStatus.IgnoredUnknownArchiveCount))
+	gauge(indexDroppedReplayNodeUpdateDesc, float64(snapshot.indexStatus.DroppedReplayNodeUpdateCount))
+	for _, indexReadiness := range allIndexReadinessValues {
+		gauge(indexReadinessDesc, gaugeValueOf(snapshot.readiness.IndexReadiness == indexReadiness), indexReadiness.String())
+	}
+	serviceStatus := snapshot.readiness.Status()
+	for _, listedStatus := range allServiceReadinessStatuses() {
+		gauge(serviceReadinessDesc, gaugeValueOf(serviceStatus == listedStatus), string(listedStatus))
+	}
+	gauge(ledgerLagSecondsDesc, snapshot.readiness.LedgerLag.Seconds())
+	gauge(streamConnectedDesc, gaugeValueOf(snapshot.readiness.StreamConnected))
+	gauge(ledgerLagOffsetsDesc, float64(snapshot.ledgerOffsetsBehind))
+	gauge(readPartyHostedDesc, gaugeValueOf(snapshot.readiness.ReadPartyHosted))
 }
 
 func gaugeValueOf(condition bool) float64 {
@@ -88,6 +129,8 @@ func allServiceReadinessStatuses() []ServiceReadinessStatus {
 		ServiceReadinessStatusStreamDisconnected,
 		ServiceReadinessStatusLedgerLagAboveBound,
 		ServiceReadinessStatusReadPartyNotHosted,
+		ServiceReadinessStatusReadPartyHostingUnknown,
+		ServiceReadinessStatusReadPartyRehosted,
 	}
 	for _, indexReadiness := range allIndexReadinessValues {
 		if indexReadiness == IndexReadinessBootstrapping || indexReadiness.ServesSingletonLookups() {
@@ -98,85 +141,33 @@ func allServiceReadinessStatuses() []ServiceReadinessStatus {
 	return statuses
 }
 
-func init() {
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_used_bytes", "Bytes that the served core disclosure index charges against its byte cap",
-		func(status IndexStatus) float64 { return float64(status.UsedBytes) })
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_byte_cap_bytes", "Byte cap of the core disclosure index",
-		func(status IndexStatus) float64 { return float64(status.ByteCapBytes) })
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_offset", "Participant offset of the served core disclosure index",
-		func(status IndexStatus) float64 { return float64(status.Offset) })
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_live_contracts", "Live core contracts in the served core disclosure index",
-		func(status IndexStatus) float64 { return float64(status.LiveContractCount) })
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_ignored_unknown_archives", "Archives of unknown contract ids that the served index ignored since its bootstrap",
-		func(status IndexStatus) float64 { return float64(status.IgnoredUnknownArchiveCount) })
-	indexStatusGaugeFunc("wormhole_canton_disclosure_index_dropped_replay_node_updates", "ReplayNode creates and archives that the served index skipped at the byte cap since its bootstrap",
-		func(status IndexStatus) float64 { return float64(status.DroppedReplayNodeUpdateCount) })
-	for _, indexReadiness := range allIndexReadinessValues {
-		serviceReadinessGaugeFunc(prometheus.GaugeOpts{
-			Name:        "wormhole_canton_disclosure_index_readiness",
-			Help:        "1 for the readiness of the served core disclosure index, 0 for each other readiness",
-			ConstLabels: prometheus.Labels{"readiness": indexReadiness.String()},
-		}, func(readiness ServiceReadiness) float64 {
-			return gaugeValueOf(readiness.IndexReadiness == indexReadiness)
-		})
-	}
-	for _, serviceStatus := range allServiceReadinessStatuses() {
-		serviceReadinessGaugeFunc(prometheus.GaugeOpts{
-			Name:        "wormhole_canton_disclosure_service_readiness",
-			Help:        "1 for the /v1/readyz status of the disclosure service, 0 for each other status",
-			ConstLabels: prometheus.Labels{"status": string(serviceStatus)},
-		}, func(readiness ServiceReadiness) float64 { return gaugeValueOf(readiness.Status() == serviceStatus) })
-	}
-	serviceReadinessGaugeFunc(prometheus.GaugeOpts{
-		Name: "wormhole_canton_disclosure_ledger_lag_seconds",
-		Help: "Age of the newest ledger end read that the index offset reached",
-	}, func(readiness ServiceReadiness) float64 { return readiness.LedgerLag.Seconds() })
-	serviceReadinessGaugeFunc(prometheus.GaugeOpts{
-		Name: "wormhole_canton_disclosure_stream_connected",
-		Help: "1 while the core contract update stream is connected",
-	}, func(readiness ServiceReadiness) float64 { return gaugeValueOf(readiness.StreamConnected) })
-	promauto.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "wormhole_canton_disclosure_ledger_lag_offsets",
-		Help: "Latest observed ledger end minus the index offset",
-	}, func() float64 {
-		served := metricsServedIndex.Load()
-		if served == nil {
-			return 0
-		}
-		return float64(served.LedgerOffsetsBehind())
-	})
-	serviceReadinessGaugeFunc(prometheus.GaugeOpts{
-		Name: "wormhole_canton_disclosure_read_party_hosted",
-		Help: "1 while a connected synchronizer hosts the read party on the participant",
-	}, func(readiness ServiceReadiness) float64 { return gaugeValueOf(!readiness.ReadPartyUnhosted) })
-}
-
+// The counters are registered by NewMetricsRegistry only.
 var (
-	readPartyHostingReadFailuresCounter = promauto.NewCounter(prometheus.CounterOpts{
+	readPartyHostingReadFailuresCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_read_party_hosting_read_failures_total",
 		Help: "Failed reads of the hosting of the read party",
 	})
-	indexRebuildsCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	indexRebuildsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_index_rebuilds_total",
 		Help: "Core disclosure index rebuilds by reason",
 	}, []string{"reason"})
-	indexBuildFailuresCounter = promauto.NewCounter(prometheus.CounterOpts{
+	indexBuildFailuresCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_index_build_failures_total",
 		Help: "Failed attempts to build a core disclosure index from a snapshot",
 	})
-	streamReconnectsCounter = promauto.NewCounter(prometheus.CounterOpts{
+	streamReconnectsCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_stream_reconnects_total",
 		Help: "Reconnects of the core contract update stream",
 	})
-	resnapshotDifferencesCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	resnapshotDifferencesCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_resnapshot_differences_total",
 		Help: "Differences between a periodic snapshot and the live index, by kind",
 	}, []string{"kind"})
-	resnapshotFailuresCounter = promauto.NewCounter(prometheus.CounterOpts{
+	resnapshotFailuresCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_resnapshot_failures_total",
 		Help: "Periodic snapshots that failed to read or compare",
 	})
-	ledgerEndReadFailuresCounter = promauto.NewCounter(prometheus.CounterOpts{
+	ledgerEndReadFailuresCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "wormhole_canton_disclosure_ledger_end_read_failures_total",
 		Help: "Failed ledger end reads of the lag measurement",
 	})

@@ -51,15 +51,23 @@ const (
 	ServiceReadinessStatusStreamDisconnected  ServiceReadinessStatus = "stream_disconnected"
 	ServiceReadinessStatusLedgerLagAboveBound ServiceReadinessStatus = "ledger_lag_above_bound"
 	ServiceReadinessStatusReadPartyNotHosted  ServiceReadinessStatus = "read_party_not_hosted"
-	serviceReadinessStatusIndexPrefix                                = "index_"
+	// ServiceReadinessStatusReadPartyHostingUnknown: the last successful hosting read is older than the ledger lag bound.
+	ServiceReadinessStatusReadPartyHostingUnknown ServiceReadinessStatus = "read_party_hosting_unknown"
+	// ServiceReadinessStatusReadPartyRehosted: the read party is hosted again, and a replacement index is not yet served.
+	ServiceReadinessStatusReadPartyRehosted ServiceReadinessStatus = "read_party_rehosted"
+	serviceReadinessStatusIndexPrefix                              = "index_"
 )
 
 // ServiceReadiness is a point-in-time copy of the service state that /v1/readyz reports.
 type ServiceReadiness struct {
 	BootstrapCompleted bool
-	// ReadPartyUnhosted is true after the latest hosting read found no connected synchronizer that hosts the read party.
-	ReadPartyUnhosted bool
-	StreamConnected   bool
+	// ReadPartyHosted is true after the latest successful hosting read found a connected synchronizer that hosts the read party.
+	ReadPartyHosted bool
+	// ReadPartyHostingReadAge is the age of the latest successful hosting read.
+	ReadPartyHostingReadAge time.Duration
+	// ReadPartyRehostedBeforeServedSnapshot is true when the read party became hosted again after the snapshot of the served index.
+	ReadPartyRehostedBeforeServedSnapshot bool
+	StreamConnected                       bool
 	// LedgerLag is the age of the newest ledger end read that the index offset reached: an upper bound
 	// of the time since the index last held every core contract update of the ledger.
 	LedgerLag      time.Duration
@@ -67,14 +75,29 @@ type ServiceReadiness struct {
 	IndexReadiness IndexReadiness
 }
 
-// Status is ready only after the bootstrap, with a hosted read party, a connected stream, a ledger lag
-// within the bound, and an index that serves singleton lookups.
+// readPartyHostingStatus is the not-ready status of the read party hosting, and false when the hosting admits lookups.
+func (readiness ServiceReadiness) readPartyHostingStatus() (ServiceReadinessStatus, bool) {
+	switch {
+	case readiness.ReadPartyHostingReadAge > readiness.LedgerLagBound:
+		return ServiceReadinessStatusReadPartyHostingUnknown, true
+	case !readiness.ReadPartyHosted:
+		return ServiceReadinessStatusReadPartyNotHosted, true
+	case !readiness.ReadPartyRehostedBeforeServedSnapshot:
+		return "", false
+	default:
+		return ServiceReadinessStatusReadPartyRehosted, true
+	}
+}
+
+// Status is ready only after the bootstrap, with a hosted read party read within the lag bound, a served snapshot
+// read after the last re-hosting, a connected stream, a ledger lag within the bound, and an index that serves singleton lookups.
 func (readiness ServiceReadiness) Status() ServiceReadinessStatus {
+	hostingStatus, hostingRefusesLookups := readiness.readPartyHostingStatus()
 	switch {
 	case !readiness.BootstrapCompleted:
 		return ServiceReadinessStatusBootstrapping
-	case readiness.ReadPartyUnhosted:
-		return ServiceReadinessStatusReadPartyNotHosted
+	case hostingRefusesLookups:
+		return hostingStatus
 	case !readiness.StreamConnected:
 		return ServiceReadinessStatusStreamDisconnected
 	case readiness.LedgerLag > readiness.LedgerLagBound:
@@ -106,9 +129,16 @@ type ServedIndex struct {
 	ledgerLagBound time.Duration
 	now            func() time.Time
 
-	mutex             sync.Mutex
-	streamConnected   bool
-	readPartyUnhosted bool
+	mutex           sync.Mutex
+	streamConnected bool
+	// readPartyHosted is false until a hosting read finds the read party hosted.
+	readPartyHosted bool
+	// readPartyHostingReadAt is the time of the last successful hosting read; zero before the first.
+	readPartyHostingReadAt time.Time
+	// readPartyRehostCount counts the hosted-again transitions after the first swap. servedIndexRehostCount is
+	// the count before the snapshot of the served index: a lower value means a snapshot of a frozen ACS.
+	readPartyRehostCount   uint64
+	servedIndexRehostCount uint64
 	// latestLedgerEnd is the last ledger end read. unreachedLedgerEnds holds the reads above the index offset,
 	// oldest first, with strictly increasing offsets, at most ledgerEndObservationCapacity.
 	// newestReachedLedgerEnd is the newest read at or below the index offset.
@@ -135,8 +165,9 @@ func newServedIndexWithClock(ledgerLagBound time.Duration, now func() time.Time)
 }
 
 // swapIndex serves index from now on. index must be bootstrapped, and its offset must not be below the served offset.
-// bootstrapLedgerEnd is the ledger end read of its bootstrap snapshot, which the index reached.
-func (served *ServedIndex) swapIndex(index *CoreContractIndex, bootstrapLedgerEnd observedLedgerEnd) {
+// bootstrapLedgerEnd is the ledger end read of its bootstrap snapshot, which the index reached. rehostCount is
+// readPartyRehostCount before that snapshot.
+func (served *ServedIndex) swapIndex(index *CoreContractIndex, bootstrapLedgerEnd observedLedgerEnd, rehostCount uint64) {
 	if index == nil {
 		panic("cantondisclosure: swap to a nil index")
 	}
@@ -152,7 +183,12 @@ func (served *ServedIndex) swapIndex(index *CoreContractIndex, bootstrapLedgerEn
 	if status.Offset < served.indexOffset() {
 		panic("cantondisclosure: swap to an index below the served offset")
 	}
+	if rehostCount > served.readPartyRehostCount {
+		panic("cantondisclosure: swap with a rehost count above the current count")
+	}
 	served.currentIndex.Store(index)
+	// A replacement that started before a later swap keeps the higher count.
+	served.servedIndexRehostCount = max(served.servedIndexRehostCount, rehostCount)
 	served.recordReachedLedgerEndLocked(bootstrapLedgerEnd)
 	served.removeReachedLedgerEndsLocked(status.Offset)
 }
@@ -172,13 +208,52 @@ func (served *ServedIndex) setStreamConnected(connected bool) {
 	served.streamConnected = connected
 }
 
-// setReadPartyHosted returns true when the hosting state changes.
-func (served *ServedIndex) setReadPartyHosted(hosted bool) bool {
+// readPartyHostingTransition is the change of one successful hosting read.
+type readPartyHostingTransition int
+
+const (
+	readPartyHostingTransitionUnchanged readPartyHostingTransition = iota + 1
+	readPartyHostingTransitionLost
+	readPartyHostingTransitionRegained
+)
+
+// setReadPartyHosted records a successful hosting read at the clock time. A regained hosting after the first swap
+// increments readPartyRehostCount, so that the served index stays not ready until a snapshot read after it serves.
+func (served *ServedIndex) setReadPartyHosted(hosted bool) readPartyHostingTransition {
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
-	changed := served.readPartyUnhosted == hosted
-	served.readPartyUnhosted = !hosted
-	return changed
+	readAt := served.now()
+	if readAt.Before(served.readPartyHostingReadAt) {
+		panic("cantondisclosure: hosting reads go back in time")
+	}
+	served.readPartyHostingReadAt = readAt
+	wasHosted := served.readPartyHosted
+	served.readPartyHosted = hosted
+	switch {
+	case wasHosted == hosted:
+		return readPartyHostingTransitionUnchanged
+	case !hosted:
+		return readPartyHostingTransitionLost
+	}
+	if served.currentIndex.Load() != nil {
+		served.readPartyRehostCount++
+	}
+	return readPartyHostingTransitionRegained
+}
+
+// currentReadPartyRehostCount is the count that a snapshot read from now on passes to swapIndex.
+func (served *ServedIndex) currentReadPartyRehostCount() uint64 {
+	served.mutex.Lock()
+	defer served.mutex.Unlock()
+	return served.readPartyRehostCount
+}
+
+// readPartyRehostReplacementDue is true while the read party is hosted, read within the lag bound, and hosted again
+// after the snapshot of the served index.
+func (served *ServedIndex) readPartyRehostReplacementDue() bool {
+	readiness := served.ServiceReadiness()
+	status, refusesLookups := readiness.readPartyHostingStatus()
+	return refusesLookups && status == ServiceReadinessStatusReadPartyRehosted
 }
 
 // recordLedgerEnd stores a ledger end read at observedAt. A full queue merges the read into its newest entry,
@@ -257,7 +332,10 @@ func (served *ServedIndex) ledgerLagLocked(now time.Time, indexOffset int64) tim
 func (served *ServedIndex) LedgerOffsetsBehind() int64 {
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
-	indexOffset := served.indexOffset()
+	return served.ledgerOffsetsBehindLocked(served.indexOffset())
+}
+
+func (served *ServedIndex) ledgerOffsetsBehindLocked(indexOffset int64) int64 {
 	if !served.hasLatestLedgerEnd || indexOffset < 0 {
 		return 0
 	}
@@ -269,20 +347,93 @@ func (served *ServedIndex) ServiceReadiness() ServiceReadiness {
 	served.mutex.Lock()
 	defer served.mutex.Unlock()
 	index := served.currentIndex.Load()
-	readiness := ServiceReadiness{
-		StreamConnected:   served.streamConnected,
-		ReadPartyUnhosted: served.readPartyUnhosted,
-		LedgerLagBound:    served.ledgerLagBound,
-		IndexReadiness:    IndexReadinessBootstrapping,
-	}
 	if index == nil {
+		return served.serviceReadinessLocked(served.now(), IndexStatus{}, false)
+	}
+	return served.serviceReadinessLocked(served.now(), index.Status(), true)
+}
+
+func (served *ServedIndex) serviceReadinessLocked(now time.Time, indexStatus IndexStatus, hasIndex bool) ServiceReadiness {
+	readiness := served.readPartyHostingReadinessLocked(now)
+	readiness.StreamConnected = served.streamConnected
+	readiness.IndexReadiness = IndexReadinessBootstrapping
+	if !hasIndex {
 		return readiness
 	}
-	status := index.Status()
 	readiness.BootstrapCompleted = true
-	readiness.IndexReadiness = status.Readiness
-	readiness.LedgerLag = served.ledgerLagLocked(served.now(), status.Offset)
+	readiness.IndexReadiness = indexStatus.Readiness
+	readiness.LedgerLag = served.ledgerLagLocked(now, indexStatus.Offset)
 	return readiness
+}
+
+// servedIndexMetricsSnapshot is one consistent read of the gauge inputs; indexStatus is zero before the first swap.
+type servedIndexMetricsSnapshot struct {
+	readiness           ServiceReadiness
+	indexStatus         IndexStatus
+	ledgerOffsetsBehind int64
+}
+
+// readMetricsSnapshot reads the index status once under served.mutex for every gauge of one scrape.
+func (served *ServedIndex) readMetricsSnapshot() servedIndexMetricsSnapshot {
+	served.mutex.Lock()
+	defer served.mutex.Unlock()
+	index := served.currentIndex.Load()
+	if index == nil {
+		return servedIndexMetricsSnapshot{readiness: served.serviceReadinessLocked(served.now(), IndexStatus{}, false)}
+	}
+	indexStatus := index.Status()
+	return servedIndexMetricsSnapshot{
+		readiness:           served.serviceReadinessLocked(served.now(), indexStatus, true),
+		indexStatus:         indexStatus,
+		ledgerOffsetsBehind: served.ledgerOffsetsBehindLocked(indexStatus.Offset),
+	}
+}
+
+// readPartyHostingReadinessLocked fills the hosting fields and the lag bound. A served index before any hosting
+// read reports an unknown hosting.
+func (served *ServedIndex) readPartyHostingReadinessLocked(now time.Time) ServiceReadiness {
+	hostingReadAge := unknownLedgerLag
+	if !served.readPartyHostingReadAt.IsZero() {
+		hostingReadAge = max(now.Sub(served.readPartyHostingReadAt), 0)
+	}
+	if served.servedIndexRehostCount > served.readPartyRehostCount {
+		panic("cantondisclosure: served rehost count above the current count")
+	}
+	return ServiceReadiness{
+		ReadPartyHosted:                       served.readPartyHosted,
+		ReadPartyHostingReadAge:               hostingReadAge,
+		ReadPartyRehostedBeforeServedSnapshot: served.servedIndexRehostCount < served.readPartyRehostCount,
+		LedgerLagBound:                        served.ledgerLagBound,
+	}
+}
+
+// ReadPartyHostingNotReadyError fails every lookup while the read party hosting refuses lookups.
+type ReadPartyHostingNotReadyError struct {
+	Status ServiceReadinessStatus
+}
+
+func (notReady ReadPartyHostingNotReadyError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrIndexNotReady, notReady.Status)
+}
+
+func (notReady ReadPartyHostingNotReadyError) Is(target error) bool {
+	return target == ErrIndexNotReady
+}
+
+// servedIndexForLookup is the served index, or an error before the first swap or while the hosting refuses lookups.
+// SECURITY: an unhosted participant keeps a frozen ACS; its blobs are stale even though the ledger rejects them.
+func (served *ServedIndex) servedIndexForLookup() (*CoreContractIndex, error) {
+	index := served.currentIndex.Load()
+	if index == nil {
+		return nil, errNoServedIndex
+	}
+	served.mutex.Lock()
+	readiness := served.readPartyHostingReadinessLocked(served.now())
+	served.mutex.Unlock()
+	if status, refusesLookups := readiness.readPartyHostingStatus(); refusesLookups {
+		return nil, ReadPartyHostingNotReadyError{Status: status}
+	}
+	return index, nil
 }
 
 // IndexStatus returns false before the first swap.
@@ -297,25 +448,25 @@ func (served *ServedIndex) IndexStatus() (IndexStatus, bool) {
 var errNoServedIndex = IndexNotReadyError{Readiness: IndexReadinessBootstrapping}
 
 func (served *ServedIndex) LookupSingleton(template cantonclient.CoreContractTemplate) (CoreContractLookupResult, error) {
-	index := served.currentIndex.Load()
-	if index == nil {
-		return CoreContractLookupResult{}, errNoServedIndex
+	index, err := served.servedIndexForLookup()
+	if err != nil {
+		return CoreContractLookupResult{}, err
 	}
 	return index.LookupSingleton(template)
 }
 
 func (served *ServedIndex) LookupCoveringReplayNode(consumer cantonclient.PartyID, namespace cantonclient.ReplayNamespace, digest ReplayDigest) (CoreContractLookupResult, error) {
-	index := served.currentIndex.Load()
-	if index == nil {
-		return CoreContractLookupResult{}, errNoServedIndex
+	index, err := served.servedIndexForLookup()
+	if err != nil {
+		return CoreContractLookupResult{}, err
 	}
 	return index.LookupCoveringReplayNode(consumer, namespace, digest)
 }
 
 func (served *ServedIndex) LookupClaimedRootsNode(consumer cantonclient.PartyID, namespace cantonclient.ReplayNamespace) (CoreContractLookupResult, error) {
-	index := served.currentIndex.Load()
-	if index == nil {
-		return CoreContractLookupResult{}, errNoServedIndex
+	index, err := served.servedIndexForLookup()
+	if err != nil {
+		return CoreContractLookupResult{}, err
 	}
 	return index.LookupClaimedRootsNode(consumer, namespace)
 }

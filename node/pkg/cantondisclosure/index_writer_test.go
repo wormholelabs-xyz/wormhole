@@ -1171,24 +1171,80 @@ func requireEventuallyServiceStatus(t *testing.T, served *ServedIndex, expectedS
 	require.Eventually(t, func() bool { return served.ServiceReadiness().Status() == expectedStatus }, 5*time.Second, time.Millisecond, "status %s", expectedStatus)
 }
 
-func TestWriterReportsAReadPartyThatLosesItsHosting(t *testing.T) {
+func TestWriterRebuildsWhenTheReadPartyIsHostedAgain(t *testing.T) {
 	ledger := testDecodingLedger()
+	replacementGate := make(chan struct{})
 	reader := &fakeCoreContractLedgerReader{
-		ledgerEnd:         testBootstrapOffset,
-		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+		ledgerEnd: testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))},
+			{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(2, ""))},
+		},
+		snapshotReadGates: []chan struct{}{nil, replacementGate},
 	}
+	rebuildsBefore := rebuildCount(IndexRebuildReasonReadPartyRehosted)
 	served, stop := runTestWriter(t, reader, testLargeIndexByteCap, testWriterTiming())
 	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
 
 	reader.setReadPartyHosting(true, nil)
 	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReadPartyNotHosted)
-	require.False(t, served.ServiceReadiness().IsReady())
+	_, err := served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	require.Equal(t, ReadPartyHostingNotReadyError{Status: ServiceReadinessStatusReadPartyNotHosted}, err)
+	snapshotReads, _ := reader.callCounts()
+	require.Equal(t, 1, snapshotReads, "an unhosted read party gets no replacement")
 
 	reader.setReadPartyHosting(false, nil)
+	require.Eventually(t, func() bool {
+		snapshotReads, _ := reader.callCounts()
+		return snapshotReads == 2
+	}, 5*time.Second, time.Millisecond, "the hosting regained starts a replacement build")
+	require.Equal(t, ServiceReadinessStatusReadPartyRehosted, served.ServiceReadiness().Status())
+	_, err = served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.Equal(t, ReadPartyHostingNotReadyError{Status: ServiceReadinessStatusReadPartyRehosted}, err)
+
+	close(replacementGate)
 	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+	result, err := served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+	require.NoError(t, err)
+	require.Equal(t, testContractIDHex(2), result.Contract().ContractID().String(), "the replacement serves the snapshot read after the re-hosting")
+	require.NoError(t, stop())
+	snapshotReads, _ = reader.callCounts()
+	require.Equal(t, 2, snapshotReads)
+	require.Equal(t, rebuildsBefore+1, rebuildCount(IndexRebuildReasonReadPartyRehosted))
+}
+
+func TestWriterReportsAnUnknownHostingAfterTheLagBoundOfFailedReads(t *testing.T) {
+	ledger := testDecodingLedger()
+	reader := &fakeCoreContractLedgerReader{
+		ledgerEnd:         testBootstrapOffset,
+		snapshotResponses: []fakeSnapshotResponse{{contracts: decodedGenesisSnapshot(t, ledger, decodedReplayNodeEvent(1, ""))}},
+	}
+	var clockSkew atomic.Int64
+	served, err := newServedIndexWithClock(time.Minute, func() time.Time { return time.Now().Add(time.Duration(clockSkew.Load())) })
+	require.NoError(t, err)
+	stop := runTestWriterOn(t, reader, served, testLargeIndexByteCap, testWriterTiming())
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReady)
+
+	failuresBefore := testutil.ToFloat64(readPartyHostingReadFailuresCounter)
+	reader.setReadPartyHosting(false, errors.New("unavailable"))
+	readsBeforeSkew := reader.readPartyHostingReadCount()
+	require.Eventually(t, func() bool { return reader.readPartyHostingReadCount() >= readsBeforeSkew+2 }, 5*time.Second, time.Millisecond)
+	require.Equal(t, ServiceReadinessStatusReady, served.ServiceReadiness().Status(), "a failed read within the bound keeps the last state")
+
+	clockSkew.Store(int64(time.Minute + time.Second))
+	requireEventuallyServiceStatus(t, served, ServiceReadinessStatusReadPartyHostingUnknown)
+	_, err = served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+	require.Equal(t, ReadPartyHostingNotReadyError{Status: ServiceReadinessStatusReadPartyHostingUnknown}, err)
+	require.Greater(t, testutil.ToFloat64(readPartyHostingReadFailuresCounter), failuresBefore)
+
+	reader.setReadPartyHosting(false, nil)
+	require.Eventually(t, func() bool {
+		_, refusesLookups := served.ServiceReadiness().readPartyHostingStatus()
+		return !refusesLookups
+	}, 5*time.Second, time.Millisecond, "a successful hosting read clears the unknown hosting")
 	require.NoError(t, stop())
 	snapshotReads, _ := reader.callCounts()
-	require.Equal(t, 1, snapshotReads, "a hosting change alone does not rebuild the index")
+	require.Equal(t, 1, snapshotReads, "an unknown hosting that reads hosted again needs no replacement")
 }
 
 func TestWriterKeepsTheHostingStateWhenTheHostingReadFails(t *testing.T) {
@@ -1237,5 +1293,7 @@ func TestWriterBuildFailsWhenTheBootstrapHostingReadFails(t *testing.T) {
 	_, hasIndex := served.IndexStatus()
 	require.False(t, hasIndex)
 	require.Equal(t, ServiceReadinessStatusBootstrapping, served.ServiceReadiness().Status())
-	_ = stop()
+	if err := stop(); err != nil {
+		require.ErrorIs(t, err, ErrRebuildAttemptsExhausted, "every build fails, so Run stops after the attempt limit or at cancellation")
+	}
 }

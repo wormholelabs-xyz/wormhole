@@ -194,7 +194,9 @@ var errStalledStream = errors.New("cantondisclosure: core contract update stream
 type followedIndex struct {
 	index              *CoreContractIndex
 	bootstrapLedgerEnd observedLedgerEnd
-	swapPending        bool
+	// readPartyRehostCount is ServedIndex.readPartyRehostCount before the bootstrap snapshot.
+	readPartyRehostCount uint64
+	swapPending          bool
 }
 
 // Run builds and follows indexes until ctx ends. It returns nil when ctx ends, and
@@ -312,6 +314,7 @@ func (writer *CoreContractIndexWriter) readObservedLedgerEnd(ctx context.Context
 
 // readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
 func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+	readPartyRehostCount := writer.served.currentReadPartyRehostCount()
 	bootstrapLedgerEnd, err := writer.readObservedLedgerEnd(ctx)
 	if err != nil {
 		return followedIndex{}, err
@@ -344,7 +347,7 @@ func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context
 		panic("cantondisclosure: bootstrapped index offset is not the snapshot offset")
 	}
 	writer.logger.Info("core disclosure index bootstrapped", zap.Int64("offset", ledgerEnd), zap.Int("liveContracts", status.LiveContractCount), zap.Int64("usedBytes", status.UsedBytes), zap.String("readiness", status.Readiness.String()))
-	return followedIndex{index: index, bootstrapLedgerEnd: bootstrapLedgerEnd}, nil
+	return followedIndex{index: index, bootstrapLedgerEnd: bootstrapLedgerEnd, readPartyRehostCount: readPartyRehostCount}, nil
 }
 
 // buildAndSwapIndex bootstraps a new index and serves it at once. The ledger end is at or above every served offset.
@@ -361,8 +364,8 @@ func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (f
 	if err != nil {
 		return followedIndex{}, err
 	}
-	writer.served.setReadPartyHosted(readPartyHosted)
-	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd)
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
+	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd, built.readPartyRehostCount)
 	return built, nil
 }
 
@@ -524,6 +527,7 @@ func (session *ledgerFollowSession) consumeSubscription(
 				outcome.err = errStalledStream
 				return outcome
 			}
+			session.startRehostReplacementBuildWhenDue(ctx)
 		case <-resnapshotTicks:
 			if session.replacement != nil || session.followed.swapPending {
 				continue
@@ -594,7 +598,7 @@ func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
 	if session.followed.index.Status().Offset < session.writer.served.indexOffset() {
 		return
 	}
-	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd)
+	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd, session.followed.readPartyRehostCount)
 	session.followed.swapPending = false
 	session.writer.logger.Info("replacement core disclosure index serves", zap.Int64("indexOffset", session.followed.index.Status().Offset))
 }
@@ -616,6 +620,17 @@ func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 		return false
 	}
 	return checkedAt.Sub(session.stallStartedAt) >= session.writer.timing.StalledStreamTimeout
+}
+
+// startRehostReplacementBuildWhenDue builds a replacement from a snapshot read after the read party became hosted again.
+// The index missed the updates of the unhosted period, so the service stays not ready until the replacement serves.
+// A failed build starts again at the next check.
+func (session *ledgerFollowSession) startRehostReplacementBuildWhenDue(ctx context.Context) {
+	if session.replacement != nil || session.followed.swapPending || !session.writer.served.readPartyRehostReplacementDue() {
+		return
+	}
+	session.writer.logger.Warn("building a replacement core disclosure index", zap.String("reason", string(IndexRebuildReasonReadPartyRehosted)))
+	session.startReplacementBuild(ctx, IndexRebuildReasonReadPartyRehosted)
 }
 
 // startReplacementBuild bootstraps a new index in the background and follows it until it reaches the served offset.
@@ -714,7 +729,8 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 	return "", nil
 }
 
-// recordReadPartyHosting keeps the last known hosting state when the read fails.
+// recordReadPartyHosting keeps the last known hosting state when the read fails; after the ledger lag bound
+// without a successful read, /v1/readyz reports read_party_hosting_unknown.
 // SECURITY: a participant that stops hosting the read party keeps its ACS and its offset checkpoints, so neither the
 // ledger lag nor the resnapshot comparison detects the frozen index. Only this check makes /v1/readyz fail.
 func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Context) {
@@ -727,8 +743,18 @@ func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Contex
 		writer.logger.Warn("read party hosting read failed", zap.Error(err))
 		return
 	}
-	if writer.served.setReadPartyHosted(readPartyHosted) && !readPartyHosted {
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
+}
+
+func (writer *CoreContractIndexWriter) logReadPartyHostingTransition(transition readPartyHostingTransition) {
+	switch transition {
+	case readPartyHostingTransitionUnchanged:
+	case readPartyHostingTransitionLost:
 		writer.logger.Warn("the participant no longer hosts the read party; /v1/readyz reports read_party_not_hosted", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+	case readPartyHostingTransitionRegained:
+		writer.logger.Info("the participant hosts the read party again; a replacement index must serve before /v1/readyz reports ready", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+	default:
+		panic(fmt.Sprintf("cantondisclosure: unknown hosting transition %d", int(transition)))
 	}
 }
 
