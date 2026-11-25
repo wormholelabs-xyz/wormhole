@@ -176,9 +176,13 @@ func TestLookupErrorsHaveFixedPublicBodies(t *testing.T) {
 		expectedMessage    string
 		expectedRetryAfter string
 	}{
-		{name: "index not ready", target: RoutePathCoreState, lookupErr: fmt.Errorf("wrapped: %w", IndexNotReadyError{Readiness: IndexReadinessSingletonConflict}), expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady, expectedRetryAfter: "1"},
+		{name: "singleton conflict", target: RoutePathCoreState, lookupErr: fmt.Errorf("wrapped: %w", IndexNotReadyError{Readiness: IndexReadinessSingletonConflict}), expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
+		{name: "singleton missing", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessSingletonMissing}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
+		{name: "inconsistent index", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessInconsistent}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
+		{name: "bootstrapping", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessBootstrapping}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
+		{name: "read party not hosted", target: RoutePathCoreState, lookupErr: ReadPartyHostingNotReadyError{Status: ServiceReadinessStatusReadPartyNotHosted}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
 		{name: "replay nodes dropped at the byte cap", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: IndexNotReadyError{Readiness: IndexReadinessByteCapReached}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
-		{name: "lookups suspended after a resnapshot difference", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessResnapshotDifference}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady, expectedRetryAfter: "1"},
+		{name: "lookups suspended after a resnapshot difference", target: RoutePathCoreState, lookupErr: IndexNotReadyError{Readiness: IndexReadinessResnapshotDifference}, expectedStatus: http.StatusServiceUnavailable, expectedMessage: publicMessageIndexNotReady},
 		{name: "no covering node", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: ErrNoCoveringReplayNode, expectedStatus: http.StatusNotFound, expectedMessage: publicMessageNoCoveringNode},
 		{name: "two covering nodes", target: replayNodeTarget(testConsumer, testNamespace, testCoveredDigestHexText), lookupErr: MultipleCoveringReplayNodesError{CoveringNodeCount: 2}, expectedStatus: http.StatusInternalServerError, expectedMessage: publicMessageInternalError},
 		{name: "reserved namespace", target: claimedRootsNodeTarget(testConsumer, claimedRootsNamespace), lookupErr: ErrReservedReplayNamespace, expectedStatus: http.StatusBadRequest, expectedMessage: publicMessageReservedNamespace},
@@ -360,7 +364,7 @@ func TestClaimedRootsNodeQueryParsing(t *testing.T) {
 }
 
 func TestReadyzStates(t *testing.T) {
-	readyReadiness := ServiceReadiness{BootstrapCompleted: true, StreamConnected: true, LedgerLag: time.Second, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady}
+	readyReadiness := ServiceReadiness{BootstrapCompleted: true, ReadPartyHosted: true, StreamConnected: true, LedgerLag: time.Second, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady}
 	testCases := []struct {
 		name           string
 		mutate         func(readiness *ServiceReadiness)
@@ -378,6 +382,10 @@ func TestReadyzStates(t *testing.T) {
 		{name: "singleton missing", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessSingletonMissing }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_singleton_missing"}`},
 		{name: "inconsistent", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessInconsistent }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_inconsistent"}`},
 		{name: "resnapshot difference", mutate: func(readiness *ServiceReadiness) { readiness.IndexReadiness = IndexReadinessResnapshotDifference }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"index_resnapshot_difference"}`},
+		{name: "read party not hosted", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHosted = false }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_not_hosted"}`},
+		{name: "hosting read at the bound", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHostingReadAge = time.Minute }, expectedStatus: http.StatusOK, expectedBody: `{"status":"ready"}`},
+		{name: "hosting read above the bound", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyHostingReadAge = time.Minute + 1 }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_hosting_unknown"}`},
+		{name: "read party rehosted", mutate: func(readiness *ServiceReadiness) { readiness.ReadPartyRehostedBeforeServedSnapshot = true }, expectedStatus: http.StatusServiceUnavailable, expectedBody: `{"status":"read_party_rehosted"}`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -400,7 +408,7 @@ func TestHealthzIsAlwaysOK(t *testing.T) {
 func TestConcurrentLookupLimitAnswers503AndKeepsProbes(t *testing.T) {
 	lookups := &fakeCoreContractLookups{
 		result:        testLookupResult(t),
-		readiness:     ServiceReadiness{BootstrapCompleted: true, StreamConnected: true, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady},
+		readiness:     ServiceReadiness{BootstrapCompleted: true, ReadPartyHosted: true, StreamConnected: true, LedgerLagBound: time.Minute, IndexReadiness: IndexReadinessReady},
 		blockLookups:  make(chan struct{}),
 		lookupStarted: make(chan struct{}, 1),
 	}
@@ -509,7 +517,7 @@ func TestHandlerWithAServedIndexAtTheByteCap(t *testing.T) {
 	require.JSONEq(t, `{"status":"ready_byte_cap_reached"}`, readyz.Body.String())
 }
 
-func TestUnavailableLogsAreRateLimited(t *testing.T) {
+func TestUnavailableLogsAreRateLimitedPerCause(t *testing.T) {
 	observedCore, observedLogs := observer.New(zapcore.WarnLevel)
 	lookups := &fakeCoreContractLookups{lookupErr: IndexNotReadyError{Readiness: IndexReadinessSingletonMissing}}
 	handler, err := NewDisclosureHTTPHandler(lookups, 4, zap.New(observedCore))
@@ -522,19 +530,69 @@ func TestUnavailableLogsAreRateLimited(t *testing.T) {
 	}
 	require.Equal(t, 1, observedLogs.Len())
 	require.Equal(t, uint64(0), observedLogs.All()[0].ContextMap()["suppressedUnavailableLogs"])
+	require.Equal(t, "singleton_missing", observedLogs.All()[0].ContextMap()["cause"])
 
+	lookups.lookupErr = ReadPartyHostingNotReadyError{Status: ServiceReadinessStatusReadPartyNotHosted}
+	require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
+	require.Equal(t, 2, observedLogs.Len(), "another cause has its own interval")
+	require.Equal(t, "read_party_not_hosted", observedLogs.All()[1].ContextMap()["cause"])
+
+	lookups.lookupErr = IndexNotReadyError{Readiness: IndexReadinessSingletonMissing}
 	clock.current = clock.current.Add(unavailableLogInterval - time.Nanosecond)
 	require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
-	require.Equal(t, 1, observedLogs.Len())
+	require.Equal(t, 2, observedLogs.Len())
 
 	clock.current = clock.current.Add(time.Nanosecond)
 	require.Equal(t, http.StatusServiceUnavailable, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
-	require.Equal(t, 2, observedLogs.Len())
-	require.Equal(t, uint64(5), observedLogs.All()[1].ContextMap()["suppressedUnavailableLogs"])
+	require.Equal(t, 3, observedLogs.Len())
+	require.Equal(t, uint64(5), observedLogs.All()[2].ContextMap()["suppressedUnavailableLogs"])
 
 	lookups.lookupErr = errors.New(testInternalErrorDetail)
 	for requestIndex := 0; requestIndex < 3; requestIndex++ {
 		require.Equal(t, http.StatusInternalServerError, serveTestRequest(handler, http.MethodGet, RoutePathCoreState).Code)
 	}
-	require.Equal(t, 5, observedLogs.Len(), "internal errors are logged every time")
+	require.Equal(t, 6, observedLogs.Len(), "internal errors are logged every time")
+}
+
+func TestSuppressedUnavailableLogCountsAreFlushed(t *testing.T) {
+	observedCore, observedLogs := observer.New(zapcore.WarnLevel)
+	lookups := &fakeCoreContractLookups{lookupErr: IndexNotReadyError{Readiness: IndexReadinessInconsistent}}
+	handler, err := NewDisclosureHTTPHandler(lookups, 4, zap.New(observedCore))
+	require.NoError(t, err)
+	clock := &testClock{current: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+	handler.unavailableLogs.now = clock.now
+	for requestIndex := 0; requestIndex < 4; requestIndex++ {
+		serveTestRequest(handler, http.MethodGet, RoutePathCoreState)
+	}
+	require.Equal(t, 1, observedLogs.Len())
+
+	serveTestRequest(handler, http.MethodGet, RoutePathHealthz)
+	require.Equal(t, 1, observedLogs.Len(), "a count within its interval waits")
+	clock.current = clock.current.Add(unavailableLogInterval)
+	serveTestRequest(handler, http.MethodGet, RoutePathHealthz)
+	require.Equal(t, 2, observedLogs.Len(), "any request after the interval logs the last suppressed count")
+	flushed := observedLogs.All()[1]
+	require.Equal(t, "disclosure 503 logs suppressed", flushed.Message)
+	require.Equal(t, uint64(3), flushed.ContextMap()["suppressedUnavailableLogs"])
+	require.Equal(t, "inconsistent", flushed.ContextMap()["cause"])
+	serveTestRequest(handler, http.MethodGet, RoutePathHealthz)
+	require.Equal(t, 2, observedLogs.Len(), "a flushed count logs once")
+
+	serveTestRequest(handler, http.MethodGet, RoutePathCoreState)
+	require.Equal(t, 2, observedLogs.Len(), "the flush starts a new interval")
+	handler.FlushSuppressedUnavailableLogs()
+	require.Equal(t, 3, observedLogs.Len(), "the shutdown flush logs counts within their interval")
+	require.Equal(t, uint64(1), observedLogs.All()[2].ContextMap()["suppressedUnavailableLogs"])
+	handler.FlushSuppressedUnavailableLogs()
+	require.Equal(t, 3, observedLogs.Len())
+}
+
+func TestUnavailableLogCausesAreBounded(t *testing.T) {
+	limiter := newUnavailableLogLimiter(time.Now)
+	for causeIndex := 0; causeIndex < 3*maxUnavailableLogCauses; causeIndex++ {
+		limiter.admitLog(fmt.Sprintf("cause_%d", causeIndex))
+	}
+	require.Len(t, limiter.stateByCause, maxUnavailableLogCauses+1)
+	require.Contains(t, limiter.stateByCause, unavailableCauseOther)
+	require.Equal(t, uint64(2*maxUnavailableLogCauses-1), limiter.stateByCause[unavailableCauseOther].suppressedCount)
 }

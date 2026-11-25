@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,7 +19,7 @@ import (
 type CoreContractLedgerReader interface {
 	GetLedgerEnd(ctx context.Context) (int64, error)
 	ReadPartyIsHosted(ctx context.Context) (bool, error)
-	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, maxReplayNodes int) (cantonclient.ActiveCoreContracts, error)
+	ReadActiveCoreContracts(ctx context.Context, activeAtOffset int64, replayNodeLimit cantonclient.ReplayNodeSnapshotLimit) (cantonclient.ActiveCoreContracts, error)
 	SubscribeCoreContractUpdates(ctx context.Context, beginExclusive int64, out chan<- cantonclient.CoreContractLedgerAdvance) (*cantonclient.Subscription, error)
 }
 
@@ -147,8 +148,13 @@ type CoreContractIndexWriter struct {
 	served             *ServedIndex
 	guardianGovernance cantonclient.PartyID
 	byteCapBytes       int64
-	timing             IndexWriterTiming
-	logger             *zap.Logger
+	// snapshotReplayNodeLimit charges each ReplayNode as the index does, so a snapshot holds at most byteCapBytes of nodes.
+	snapshotReplayNodeLimit cantonclient.ReplayNodeSnapshotLimit
+	timing                  IndexWriterTiming
+	logger                  *zap.Logger
+	// hostingReadMutex orders the hosting reads: each holds it from its RPC through its record, so the records follow
+	// the order in which the reads start. A poll can wait up to one unary RPC timeout behind a build read.
+	hostingReadMutex sync.Mutex
 }
 
 // NewCoreContractIndexWriter checks every parameter. One writer per ServedIndex.
@@ -165,19 +171,20 @@ func NewCoreContractIndexWriter(reader CoreContractLedgerReader, served *ServedI
 	if 2*timing.LedgerEndPollInterval > served.ledgerLagBound {
 		return nil, fmt.Errorf("cantondisclosure: ledger end poll interval %s is above half the ledger lag bound %s", timing.LedgerEndPollInterval, served.ledgerLagBound)
 	}
+	maxSnapshotReplayNodeCount := int(min(byteCapBytes/indexEntryOverheadBytes, int64(cantonclient.MaxActiveCoreContractsPerSnapshot)))
+	snapshotReplayNodeLimit, err := cantonclient.NewReplayNodeSnapshotLimit(maxSnapshotReplayNodeCount, byteCapBytes, indexEntryOverheadBytes)
+	if err != nil {
+		return nil, fmt.Errorf("cantondisclosure: snapshot replay node limit: %w", err)
+	}
 	return &CoreContractIndexWriter{
-		reader:             reader,
-		served:             served,
-		guardianGovernance: guardianGovernance,
-		byteCapBytes:       byteCapBytes,
-		timing:             timing,
-		logger:             logger,
+		reader:                  reader,
+		served:                  served,
+		guardianGovernance:      guardianGovernance,
+		byteCapBytes:            byteCapBytes,
+		snapshotReplayNodeLimit: snapshotReplayNodeLimit,
+		timing:                  timing,
+		logger:                  logger,
 	}, nil
-}
-
-// maxSnapshotReplayNodes is the largest ReplayNode count that fits the byte cap, at most MaxActiveCoreContractsPerSnapshot.
-func (writer *CoreContractIndexWriter) maxSnapshotReplayNodes() int {
-	return int(min(writer.byteCapBytes/indexEntryOverheadBytes, int64(cantonclient.MaxActiveCoreContractsPerSnapshot)))
 }
 
 // ErrRebuildAttemptsExhausted: the writer stopped after MaxConsecutiveRebuildAttempts unstable rebuilds.
@@ -191,7 +198,9 @@ var errStalledStream = errors.New("cantondisclosure: core contract update stream
 type followedIndex struct {
 	index              *CoreContractIndex
 	bootstrapLedgerEnd observedLedgerEnd
-	swapPending        bool
+	// readPartyRehostCount is ServedIndex.readPartyRehostCount before the bootstrap snapshot.
+	readPartyRehostCount uint64
+	swapPending          bool
 }
 
 // Run builds and follows indexes until ctx ends. It returns nil when ctx ends, and
@@ -218,7 +227,8 @@ func (writer *CoreContractIndexWriter) Run(ctx context.Context) error {
 			if consecutiveUnstableBuilds >= writer.timing.MaxConsecutiveRebuildAttempts {
 				return fmt.Errorf("%w: %d consecutive", ErrRebuildAttemptsExhausted, consecutiveUnstableBuilds)
 			}
-			if !waitForDelay(ctx, backoffDelay(consecutiveUnstableBuilds, writer.timing.RebuildInitialDelay, writer.timing.RebuildMaxDelay)) {
+			// A ready replacement is caught up and needs no snapshot read, so it follows at once.
+			if replacement == nil && !waitForDelay(ctx, backoffDelay(consecutiveUnstableBuilds, writer.timing.RebuildInitialDelay, writer.timing.RebuildMaxDelay)) {
 				return nil
 			}
 		}
@@ -277,7 +287,9 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+			// The hosting read goes first, so a slow ledger end read does not age it past the bound.
+			writer.recordReadPartyHosting(ctx)
+			observed, err := writer.readObservedLedgerEnd(ctx)
 			if ctx.Err() != nil {
 				return
 			}
@@ -286,30 +298,54 @@ func (writer *CoreContractIndexWriter) pollLedgerEnd(ctx context.Context) {
 				writer.logger.Warn("ledger end read failed", zap.Error(err))
 				continue
 			}
-			if ledgerEnd < 0 {
-				ledgerEndReadFailuresCounter.Inc()
-				writer.logger.Warn("ledger end read returned a negative offset", zap.Int64("ledgerEnd", ledgerEnd))
-				continue
-			}
-			writer.served.recordLedgerEnd(ledgerEnd, time.Now())
-			writer.recordReadPartyHosting(ctx)
+			writer.served.recordLedgerEnd(observed.offset, observed.observedAt)
 		}
 	}
 }
 
-// readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
-func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+// readObservedLedgerEnd times the read at its start: the ledger end then was at most the returned offset,
+// so the lag measured from that time is an upper bound.
+func (writer *CoreContractIndexWriter) readObservedLedgerEnd(ctx context.Context) (observedLedgerEnd, error) {
+	readStartedAt := time.Now()
 	ledgerEnd, err := writer.reader.GetLedgerEnd(ctx)
+	if err != nil {
+		return observedLedgerEnd{}, err
+	}
+	if ledgerEnd < 0 {
+		return observedLedgerEnd{}, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
+	}
+	return observedLedgerEnd{offset: ledgerEnd, observedAt: readStartedAt}, nil
+}
+
+// recordReadPartyHostingAndCaptureRehostCount reads and records the hosting, then returns the rehost count, all under
+// hostingReadMutex.
+func (writer *CoreContractIndexWriter) recordReadPartyHostingAndCaptureRehostCount(ctx context.Context) (uint64, error) {
+	writer.hostingReadMutex.Lock()
+	defer writer.hostingReadMutex.Unlock()
+	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
+	if err != nil {
+		return 0, err
+	}
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
+	return writer.served.currentReadPartyRehostCount(), nil
+}
+
+// readBootstrappedIndex bootstraps a new index from the active contracts at the ledger end. The caller serves it.
+// The hosting read and the count capture come first, under hostingReadMutex: a re-hosting during the snapshot read
+// then raises the count above the captured one.
+func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context) (followedIndex, error) {
+	readPartyRehostCount, err := writer.recordReadPartyHostingAndCaptureRehostCount(ctx)
 	if err != nil {
 		return followedIndex{}, err
 	}
-	bootstrapLedgerEnd := observedLedgerEnd{offset: ledgerEnd, observedAt: time.Now()}
-	if ledgerEnd < 0 {
-		return followedIndex{}, fmt.Errorf("cantondisclosure: negative ledger end %d", ledgerEnd)
+	bootstrapLedgerEnd, err := writer.readObservedLedgerEnd(ctx)
+	if err != nil {
+		return followedIndex{}, err
 	}
+	ledgerEnd := bootstrapLedgerEnd.offset
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.maxSnapshotReplayNodes())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, ledgerEnd, writer.snapshotReplayNodeLimit)
 	if err != nil {
 		return followedIndex{}, err
 	}
@@ -318,7 +354,7 @@ func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context
 		return followedIndex{}, err
 	}
 	if snapshot.ReplayNodesTruncated() {
-		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodes", writer.maxSnapshotReplayNodes()))
+		writer.logger.Warn("snapshot has more ReplayNodes than the byte cap admits; serving singletons only", zap.Int64("offset", ledgerEnd), zap.Int("maxReplayNodeCount", writer.snapshotReplayNodeLimit.MaxReplayNodeCount()), zap.Int64("maxReplayNodeBytes", writer.snapshotReplayNodeLimit.MaxChargedBytes()))
 		err = index.ApplyBootstrapSnapshotWithoutReplayNodes(ledgerEnd, snapshot.Contracts())
 	} else {
 		err = index.ApplyBootstrapSnapshot(ledgerEnd, snapshot.Contracts())
@@ -334,7 +370,7 @@ func (writer *CoreContractIndexWriter) readBootstrappedIndex(ctx context.Context
 		panic("cantondisclosure: bootstrapped index offset is not the snapshot offset")
 	}
 	writer.logger.Info("core disclosure index bootstrapped", zap.Int64("offset", ledgerEnd), zap.Int("liveContracts", status.LiveContractCount), zap.Int64("usedBytes", status.UsedBytes), zap.String("readiness", status.Readiness.String()))
-	return followedIndex{index: index, bootstrapLedgerEnd: bootstrapLedgerEnd}, nil
+	return followedIndex{index: index, bootstrapLedgerEnd: bootstrapLedgerEnd, readPartyRehostCount: readPartyRehostCount}, nil
 }
 
 // buildAndSwapIndex bootstraps a new index and serves it at once. The ledger end is at or above every served offset.
@@ -347,12 +383,7 @@ func (writer *CoreContractIndexWriter) buildAndSwapIndex(ctx context.Context) (f
 	if built.bootstrapLedgerEnd.offset < servedOffset {
 		return followedIndex{}, fmt.Errorf("cantondisclosure: ledger end %d is below the served index offset %d", built.bootstrapLedgerEnd.offset, servedOffset)
 	}
-	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
-	if err != nil {
-		return followedIndex{}, err
-	}
-	writer.served.setReadPartyHosted(readPartyHosted)
-	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd)
+	writer.served.swapIndex(built.index, built.bootstrapLedgerEnd, built.readPartyRehostCount)
 	return built, nil
 }
 
@@ -508,11 +539,13 @@ func (session *ledgerFollowSession) consumeSubscription(
 			outcome.appliedAdvanceCount++
 		case <-subscription.Done():
 			return session.applyAdvancesBufferedBeforeDone(subscription, advances, outcome.appliedAdvanceCount)
-		case checkedAt := <-stallCheckTicks:
-			if session.streamStalled(checkedAt) {
+		case <-stallCheckTicks:
+			// A tick can wait in the channel while an apply runs, so the check reads the clock itself.
+			if session.streamStalled(time.Now()) {
 				outcome.err = errStalledStream
 				return outcome
 			}
+			session.startRehostReplacementBuildWhenDue(ctx)
 		case <-resnapshotTicks:
 			if session.replacement != nil || session.followed.swapPending {
 				continue
@@ -529,7 +562,8 @@ func (session *ledgerFollowSession) consumeSubscription(
 			}
 			indexBuildFailuresCounter.Inc()
 			writer.logger.Error("replacement core disclosure index build failed", zap.String("reason", string(reason)), zap.Error(result.err))
-			if !session.followed.index.Status().Readiness.ServesSingletonLookups() {
+			// A re-hosting replacement stays due, so Run retries it with its backoff and attempt limit.
+			if reason == IndexRebuildReasonReadPartyRehosted || !session.followed.index.Status().Readiness.ServesSingletonLookups() {
 				return subscriptionOutcome{rebuildReason: reason, err: result.err, appliedAdvanceCount: outcome.appliedAdvanceCount}
 			}
 		}
@@ -583,17 +617,17 @@ func (session *ledgerFollowSession) swapServedIndexWhenCaughtUp() {
 	if session.followed.index.Status().Offset < session.writer.served.indexOffset() {
 		return
 	}
-	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd)
+	session.writer.served.swapIndex(session.followed.index, session.followed.bootstrapLedgerEnd, session.followed.readPartyRehostCount)
 	session.followed.swapPending = false
 	session.writer.logger.Info("replacement core disclosure index serves", zap.Int64("indexOffset", session.followed.index.Status().Offset))
 }
 
-// streamStalled is true when the served ledger lag stayed above the bound for StalledStreamTimeout
-// while the followed index offset did not move.
+// streamStalled is true when, for StalledStreamTimeout, the lag stayed above the bound, the ledger end stayed above the
+// served offset, and the followed offset did not move. Keep the lag bound above the idle checkpoint interval.
 func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 	readiness := session.writer.served.ServiceReadiness()
 	followedOffset := session.followed.index.Status().Offset
-	if readiness.LedgerLag <= readiness.LedgerLagBound {
+	if readiness.LedgerLag <= readiness.LedgerLagBound || session.writer.served.LedgerOffsetsBehind() == 0 {
 		session.stallStartedAt = time.Time{}
 		return false
 	}
@@ -603,6 +637,17 @@ func (session *ledgerFollowSession) streamStalled(checkedAt time.Time) bool {
 		return false
 	}
 	return checkedAt.Sub(session.stallStartedAt) >= session.writer.timing.StalledStreamTimeout
+}
+
+// startRehostReplacementBuildWhenDue builds a replacement from a snapshot read after the read party became hosted again.
+// The index missed the updates of the unhosted period, so the service stays not ready until the replacement serves.
+// A failed build ends the session, and Run retries with its backoff and attempt limit.
+func (session *ledgerFollowSession) startRehostReplacementBuildWhenDue(ctx context.Context) {
+	if session.replacement != nil || session.followed.swapPending || !session.writer.served.readPartyRehostReplacementDue() {
+		return
+	}
+	session.writer.logger.Warn("building a replacement core disclosure index", zap.String("reason", string(IndexRebuildReasonReadPartyRehosted)))
+	session.startReplacementBuild(ctx, IndexRebuildReasonReadPartyRehosted)
 }
 
 // startReplacementBuild bootstraps a new index in the background and follows it until it reaches the served offset.
@@ -691,6 +736,8 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 		return IndexRebuildReasonInconsistentIndex, err
 	}
 	if err != nil {
+		// The refused update is missing from index, so its lookups stop until the rebuilt index serves.
+		index.SuspendLookupsUntilReplaced()
 		return IndexRebuildReasonIndexUpdateRefused, err
 	}
 	if status.Offset != advance.Offset() || status.Offset <= offsetBefore {
@@ -699,10 +746,13 @@ func (writer *CoreContractIndexWriter) applyAdvance(index *CoreContractIndex, ad
 	return "", nil
 }
 
-// recordReadPartyHosting keeps the last known hosting state when the read fails.
+// recordReadPartyHosting keeps the last known hosting state when the read fails; after the ledger lag bound
+// without a successful read, /v1/readyz reports read_party_hosting_unknown.
 // SECURITY: a participant that stops hosting the read party keeps its ACS and its offset checkpoints, so neither the
 // ledger lag nor the resnapshot comparison detects the frozen index. Only this check makes /v1/readyz fail.
 func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Context) {
+	writer.hostingReadMutex.Lock()
+	defer writer.hostingReadMutex.Unlock()
 	readPartyHosted, err := writer.reader.ReadPartyIsHosted(ctx)
 	if ctx.Err() != nil {
 		return
@@ -712,8 +762,18 @@ func (writer *CoreContractIndexWriter) recordReadPartyHosting(ctx context.Contex
 		writer.logger.Warn("read party hosting read failed", zap.Error(err))
 		return
 	}
-	if writer.served.setReadPartyHosted(readPartyHosted) && !readPartyHosted {
+	writer.logReadPartyHostingTransition(writer.served.setReadPartyHosted(readPartyHosted))
+}
+
+func (writer *CoreContractIndexWriter) logReadPartyHostingTransition(transition readPartyHostingTransition) {
+	switch transition {
+	case readPartyHostingTransitionUnchanged, readPartyHostingTransitionFirstReadHosted:
+	case readPartyHostingTransitionLost:
 		writer.logger.Warn("the participant no longer hosts the read party; /v1/readyz reports read_party_not_hosted", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+	case readPartyHostingTransitionRegained:
+		writer.logger.Info("the participant hosts the read party again, or after an unknown hosting; a replacement index must serve before /v1/readyz reports ready", zap.String("guardianGovernance", writer.guardianGovernance.String()))
+	default:
+		panic(fmt.Sprintf("cantondisclosure: unknown hosting transition %d", int(transition)))
 	}
 }
 
@@ -727,7 +787,7 @@ func (writer *CoreContractIndexWriter) resnapshotAndCompare(ctx context.Context,
 	}
 	snapshotCtx, cancel := context.WithTimeout(ctx, writer.timing.SnapshotReadTimeout)
 	defer cancel()
-	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.maxSnapshotReplayNodes())
+	snapshot, err := writer.reader.ReadActiveCoreContracts(snapshotCtx, indexStatus.Offset, writer.snapshotReplayNodeLimit)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil

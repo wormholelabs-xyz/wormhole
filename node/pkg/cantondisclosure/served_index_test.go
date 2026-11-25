@@ -17,9 +17,22 @@ type testClock struct {
 
 func (clock *testClock) now() time.Time { return clock.current }
 
-// swapTestIndex serves index with a bootstrap ledger end read at its offset and the clock time.
+// swapTestIndex records a hosted read party and serves index with a bootstrap ledger end read at its offset and the clock time.
 func swapTestIndex(served *ServedIndex, index *CoreContractIndex, clock *testClock) {
-	served.swapIndex(index, observedLedgerEnd{offset: index.Status().Offset, observedAt: clock.current})
+	served.setReadPartyHosted(true)
+	served.swapIndex(index, observedLedgerEnd{offset: index.Status().Offset, observedAt: clock.current}, served.currentReadPartyRehostCount())
+}
+
+// advanceClockWithHostingReads moves the clock by duration and records a hosted read at each poll interval, as the
+// ledger end poller of the writer does.
+func advanceClockWithHostingReads(served *ServedIndex, clock *testClock, duration time.Duration) {
+	advancedAt := clock.current.Add(duration)
+	for clock.current.Add(ProductionLedgerEndPollInterval).Before(advancedAt) {
+		clock.current = clock.current.Add(ProductionLedgerEndPollInterval)
+		served.setReadPartyHosted(true)
+	}
+	clock.current = advancedAt
+	served.setReadPartyHosted(true)
 }
 
 func newTestServedIndex(t *testing.T) (*ServedIndex, *testClock) {
@@ -106,8 +119,61 @@ func TestServiceReadinessStates(t *testing.T) {
 				served.setReadPartyHosted(false)
 				served.setReadPartyHosted(true)
 			},
+			expectedStatus: ServiceReadinessStatusReadPartyRehosted,
+		},
+		{
+			name: "replacement read before the re-hosting",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				rehostCountBeforeTheReplacementSnapshot := served.currentReadPartyRehostCount()
+				served.setReadPartyHosted(false)
+				served.setReadPartyHosted(true)
+				replacement := newBootstrappedTestIndex(t, testLargeIndexByteCap)
+				served.swapIndex(replacement, observedLedgerEnd{offset: testBootstrapOffset, observedAt: clock.current}, rehostCountBeforeTheReplacementSnapshot)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyRehosted,
+		},
+		{
+			name: "replacement read after the re-hosting",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				served.setReadPartyHosted(false)
+				served.setReadPartyHosted(true)
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+			},
 			expectedStatus: ServiceReadinessStatusReady,
 			expectReady:    true,
+		},
+		{
+			name: "hosting read at the bound",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				clock.current = clock.current.Add(testLedgerLagBound)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+			},
+			expectedStatus: ServiceReadinessStatusReady,
+			expectReady:    true,
+		},
+		{
+			name: "hosting read older than the bound",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+				served.setStreamConnected(true)
+				clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+				served.recordLedgerEnd(testBootstrapOffset, clock.current)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyHostingUnknown,
+		},
+		{
+			name: "no hosting read before the swap",
+			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
+				served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap), observedLedgerEnd{offset: testBootstrapOffset, observedAt: clock.current}, 0)
+				served.setStreamConnected(true)
+			},
+			expectedStatus: ServiceReadinessStatusReadPartyHostingUnknown,
 		},
 		{
 			name: "read party not hosted before the bootstrap",
@@ -133,7 +199,7 @@ func TestServiceReadinessStates(t *testing.T) {
 			prepare: func(t *testing.T, served *ServedIndex, clock *testClock) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
-				clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound+time.Nanosecond)
 			},
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
@@ -143,7 +209,7 @@ func TestServiceReadinessStates(t *testing.T) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound+time.Nanosecond)
 			},
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
@@ -153,9 +219,9 @@ func TestServiceReadinessStates(t *testing.T) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound / 2)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound/2)
 				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound / 2)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound/2)
 			},
 			expectedStatus: ServiceReadinessStatusReady,
 			expectReady:    true,
@@ -166,9 +232,9 @@ func TestServiceReadinessStates(t *testing.T) {
 				swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound)
 				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
-				clock.current = clock.current.Add(time.Second)
+				advanceClockWithHostingReads(served, clock, time.Second)
 			},
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
@@ -179,10 +245,10 @@ func TestServiceReadinessStates(t *testing.T) {
 				swapTestIndex(served, index, clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound)
 				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
 				require.NoError(t, index.AdvanceOffset(testBootstrapOffset+5))
-				clock.current = clock.current.Add(time.Second)
+				advanceClockWithHostingReads(served, clock, time.Second)
 			},
 			expectedStatus: ServiceReadinessStatusLedgerLagAboveBound,
 		},
@@ -193,10 +259,10 @@ func TestServiceReadinessStates(t *testing.T) {
 				swapTestIndex(served, index, clock)
 				served.setStreamConnected(true)
 				served.recordLedgerEnd(testBootstrapOffset+5, clock.current)
-				clock.current = clock.current.Add(testLedgerLagBound)
+				advanceClockWithHostingReads(served, clock, testLedgerLagBound)
 				served.recordLedgerEnd(testBootstrapOffset+9, clock.current)
 				require.NoError(t, index.AdvanceOffset(testBootstrapOffset+9))
-				clock.current = clock.current.Add(time.Second)
+				advanceClockWithHostingReads(served, clock, time.Second)
 			},
 			expectedStatus: ServiceReadinessStatusReady,
 			expectReady:    true,
@@ -248,6 +314,75 @@ func TestServiceReadinessStates(t *testing.T) {
 	}
 }
 
+func TestServedIndexLookupsFailWhileTheHostingRefusesThem(t *testing.T) {
+	testCases := []struct {
+		name           string
+		prepare        func(served *ServedIndex, clock *testClock)
+		expectedStatus ServiceReadinessStatus
+	}{
+		{name: "not hosted", prepare: func(served *ServedIndex, clock *testClock) { served.setReadPartyHosted(false) }, expectedStatus: ServiceReadinessStatusReadPartyNotHosted},
+		{name: "hosted again", prepare: func(served *ServedIndex, clock *testClock) {
+			served.setReadPartyHosted(false)
+			served.setReadPartyHosted(true)
+		}, expectedStatus: ServiceReadinessStatusReadPartyRehosted},
+		{name: "hosting read older than the bound", prepare: func(served *ServedIndex, clock *testClock) {
+			clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+		}, expectedStatus: ServiceReadinessStatusReadPartyHostingUnknown},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			served, clock := newTestServedIndex(t)
+			node := newTestReplayNodeContract(t, 1, testConsumer, testNamespace, "", testReplayNodeBlobBytes)
+			swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap, node), clock)
+			_, err := served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+			require.NoError(t, err)
+
+			testCase.prepare(served, clock)
+			expectedErr := ReadPartyHostingNotReadyError{Status: testCase.expectedStatus}
+			_, err = served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
+			require.Equal(t, expectedErr, err)
+			require.ErrorIs(t, err, ErrIndexNotReady)
+			_, err = served.LookupCoveringReplayNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace), testReplayDigest(t, testCoveredDigestHexText))
+			require.Equal(t, expectedErr, err)
+			_, err = served.LookupClaimedRootsNode(testPartyID(t, testConsumer), testReplayNamespace(t, testNamespace))
+			require.Equal(t, expectedErr, err)
+			require.Equal(t, testCase.expectedStatus, served.ServiceReadiness().Status())
+		})
+	}
+}
+
+func TestReadPartyHostingTransitions(t *testing.T) {
+	served, clock := newTestServedIndex(t)
+	require.Equal(t, readPartyHostingTransitionFirstReadHosted, served.setReadPartyHosted(true), "the first successful read finds the party hosted")
+	require.Zero(t, served.currentReadPartyRehostCount(), "the first hosting read is no re-hosting")
+	require.Equal(t, readPartyHostingTransitionLost, served.setReadPartyHosted(false))
+	require.Equal(t, readPartyHostingTransitionRegained, served.setReadPartyHosted(true))
+	require.Equal(t, uint64(1), served.currentReadPartyRehostCount(), "a regained hosting before the first swap counts")
+	swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+	clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+	require.Equal(t, readPartyHostingTransitionRegained, served.setReadPartyHosted(true), "a hosted read after an unknown hosting")
+	require.Equal(t, uint64(2), served.currentReadPartyRehostCount())
+	require.Equal(t, ServiceReadinessStatusReadPartyRehosted, served.ServiceReadiness().Status())
+	swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock)
+	clock.current = clock.current.Add(testLedgerLagBound)
+	require.Equal(t, readPartyHostingTransitionUnchanged, served.setReadPartyHosted(true), "a hosted read at the bound")
+	require.Equal(t, readPartyHostingTransitionUnchanged, served.setReadPartyHosted(true))
+	require.Equal(t, readPartyHostingTransitionLost, served.setReadPartyHosted(false))
+	require.Equal(t, readPartyHostingTransitionUnchanged, served.setReadPartyHosted(false))
+	require.False(t, served.readPartyRehostReplacementDue(), "an unhosted read party needs no replacement yet")
+	require.Equal(t, readPartyHostingTransitionRegained, served.setReadPartyHosted(true))
+	require.Equal(t, uint64(3), served.currentReadPartyRehostCount())
+	require.True(t, served.readPartyRehostReplacementDue())
+	clock.current = clock.current.Add(testLedgerLagBound + time.Nanosecond)
+	require.False(t, served.readPartyRehostReplacementDue(), "an unknown hosting needs a successful read first")
+
+	clock.current = clock.current.Add(-(testLedgerLagBound + 2*time.Nanosecond))
+	require.Panics(t, func() { served.setReadPartyHosted(true) }, "hosting reads go back in time")
+	require.Panics(t, func() {
+		served.swapIndex(newBootstrappedTestIndex(t, testLargeIndexByteCap), observedLedgerEnd{offset: testBootstrapOffset}, 4)
+	}, "rehost count above the current count")
+}
+
 func TestServedIndexLookupsBeforeTheBootstrap(t *testing.T) {
 	served, _ := newTestServedIndex(t)
 	_, err := served.LookupSingleton(cantonclient.CoreContractTemplateCoreState)
@@ -278,12 +413,12 @@ func TestServedIndexSwapServesTheNewIndex(t *testing.T) {
 	require.Equal(t, int64(0), served.LedgerOffsetsBehind())
 
 	require.Panics(t, func() { swapTestIndex(served, newTestIndex(t, testLargeIndexByteCap), clock) })
-	require.Panics(t, func() { served.swapIndex(nil, observedLedgerEnd{}) })
+	require.Panics(t, func() { served.swapIndex(nil, observedLedgerEnd{}, 0) })
 	require.Panics(t, func() { swapTestIndex(served, newBootstrappedTestIndex(t, testLargeIndexByteCap), clock) }, "offset below the served offset")
 	aboveTheBootstrap := newBootstrappedTestIndex(t, testLargeIndexByteCap)
 	require.NoError(t, aboveTheBootstrap.AdvanceOffset(testBootstrapOffset+7))
 	require.Panics(t, func() {
-		served.swapIndex(aboveTheBootstrap, observedLedgerEnd{offset: testBootstrapOffset + 8, observedAt: clock.current})
+		served.swapIndex(aboveTheBootstrap, observedLedgerEnd{offset: testBootstrapOffset + 8, observedAt: clock.current}, 0)
 	}, "bootstrap ledger end above the index offset")
 }
 
@@ -306,6 +441,7 @@ func simulateConstantLedgerLag(t *testing.T, served *ServedIndex, clock *testClo
 		if elapsed%ProductionLedgerEndPollInterval == 0 {
 			readCount++
 			served.recordLedgerEnd(testBootstrapOffset+int64(readCount), clock.current)
+			served.setReadPartyHosted(true)
 		}
 		elapsedTimes = append(elapsedTimes, elapsed)
 		readinessAfterEachStep = append(readinessAfterEachStep, served.ServiceReadiness())
@@ -444,6 +580,7 @@ func simulateIdleCheckpointCadence(t *testing.T, ledgerLagBound time.Duration, r
 		}
 		if elapsed%ProductionLedgerEndPollInterval == 0 {
 			served.recordLedgerEnd(ledgerEnd, clock.current)
+			served.setReadPartyHosted(true)
 			readinessAfterEachPoll = append(readinessAfterEachPoll, served.ServiceReadiness())
 		}
 	}
