@@ -170,6 +170,57 @@ check_case "created_replay_node_count_in of a split" 0 16 - created_replay_node_
 check_case "created_replay_node_count_in of another namespace" 0 1 - created_replay_node_count_in "$SPLIT_TRANSACTION" wormhole-core:replay-roots
 check_case "created_replay_node_count_in with no match" 0 0 - created_replay_node_count_in "$SPLIT_TRANSACTION" other
 
+# Columns: case | outcome | requirement | expected status
+while IFS='|' read -r case_name outcome requirement expected_status; do
+  check_case "check_hosting_change_outcome: $case_name" "$expected_status" - - check_hosting_change_outcome "$outcome" "$requirement"
+done <<'EOF_TABLE'
+consistent where consistent is required|consistent|consistent|0
+not ready where consistent is required|not_ready|consistent|1
+rebuilt where consistent is required|drift_detected_and_rebuilt|consistent|1
+wrong answers where consistent is required|ready_with_wrong_answers|consistent|1
+not ready where safe is required|not_ready|safe|0
+wrong answers where safe is required|ready_with_wrong_answers|safe|1
+EOF_TABLE
+check_case "check_hosting_change_outcome with an unknown requirement" 2 - "unknown hosting change requirement" check_hosting_change_outcome consistent exact
+
+CONTRACT_ID_A="00$(repeat_character a 66)"
+CONTRACT_ID_B="00$(repeat_character b 66)"
+check_case "check_answers_have_contract_ids of two answers" 0 - - check_answers_have_contract_ids "/v1/core-state $CONTRACT_ID_A
+$DIGEST_A1 $CONTRACT_ID_B"
+# Columns: case | answers text | stderr fragment
+while IFS='|' read -r case_name answers_text stderr_fragment; do
+  check_case "check_answers_have_contract_ids: $case_name" 1 - "$stderr_fragment" check_answers_have_contract_ids "${answers_text//CID/$CONTRACT_ID_A}"
+done <<'EOF_TABLE'
+no answers||no answers
+empty contract id|/v1/core-state |line 1 has no contract id
+null contract id|/v1/core-state null|line 1 has no contract id
+short contract id|/v1/core-state 00ab|line 1 has no contract id
+extra field|/v1/core-state CID extra|line 1 has no contract id
+EOF_TABLE
+check_case "check_answers_have_contract_ids: empty second line" 1 - "line 2 has no contract id" check_answers_have_contract_ids "/v1/core-state $CONTRACT_ID_A
+$DIGEST_A1 "
+
+GO_CONSTANTS_FILE="$work_dir/constants.go"
+printf '%s\n' 'const lagBound = 3 * time.Minute' 'const pollInterval = 5 * time.Second' 'const retention = 2 * time.Hour' \
+  'const overheadBytes = 1536' 'const derivedBytes = overheadBytes * 2' > "$GO_CONSTANTS_FILE"
+check_case "go_duration_constant_seconds of minutes" 0 180 - go_duration_constant_seconds "$GO_CONSTANTS_FILE" lagBound
+check_case "go_duration_constant_seconds of seconds" 0 5 - go_duration_constant_seconds "$GO_CONSTANTS_FILE" pollInterval
+check_case "go_duration_constant_seconds of hours" 0 7200 - go_duration_constant_seconds "$GO_CONSTANTS_FILE" retention
+check_case "go_duration_constant_seconds of a missing name" 1 - "no duration constant" go_duration_constant_seconds "$GO_CONSTANTS_FILE" lag
+check_case "go_integer_constant" 0 1536 - go_integer_constant "$GO_CONSTANTS_FILE" overheadBytes
+check_case "go_integer_constant of an expression" 1 - "no integer constant" go_integer_constant "$GO_CONSTANTS_FILE" derivedBytes
+
+# The suite constants equal the Go constants of the service.
+readonly SUITE_SCRIPT="$LOCALNET_TEST_DIR/../disclosure_service_check.sh"
+readonly CANTONDISCLOSURE_DIR="$LOCALNET_TEST_DIR/../../../node/pkg/cantondisclosure"
+check_case "LEDGER_LAG_BOUND_SECONDS equals DefaultLedgerLagBound" 0 \
+  "$(go_duration_constant_seconds "$CANTONDISCLOSURE_DIR/served_index.go" DefaultLedgerLagBound)" - \
+  shell_readonly_integer "$SUITE_SCRIPT" LEDGER_LAG_BOUND_SECONDS
+check_case "INDEX_ENTRY_OVERHEAD_BYTES equals indexEntryOverheadBytes" 0 \
+  "$(go_integer_constant "$CANTONDISCLOSURE_DIR/indexed_core_contract.go" indexEntryOverheadBytes)" - \
+  shell_readonly_integer "$SUITE_SCRIPT" INDEX_ENTRY_OVERHEAD_BYTES
+check_case "shell_readonly_integer of a missing name" 1 - "no readonly integer" shell_readonly_integer "$SUITE_SCRIPT" NO_SUCH_CONSTANT
+
 if ((failure_count > 0)); then
   echo "disclosure_service_offline_lib_test: $failure_count failure(s)" >&2
   exit 1
