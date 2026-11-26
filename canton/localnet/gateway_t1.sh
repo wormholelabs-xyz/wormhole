@@ -378,7 +378,7 @@ check_register_flow() {
   check_service_answers "register flow by VAA rejects an instrument admin other than gg" \
     "$(register_flow_path "$(jq -c --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY" \
       '. + {gg: $gg, "by-vaa": "true", "instrument-admin": $custody}' <<<"$register_params")")" 400 \
-    '.error == "instrument-admin must be gg when by-vaa=true"'
+    '.error == "disclosure-service: instrument-admin must be gg when by-vaa=true"'
   check_service_answers "control: register flow by VAA with gg as the instrument admin" \
     "$(register_flow_path "$(jq -c --arg gg "$GG_PARTY" '. + {gg: $gg, "by-vaa": "true"}' <<<"$register_params")")" 200 \
     "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\", \"canonical CoinFactory\", \"covering claimed-roots ReplayNode\"])
