@@ -489,10 +489,12 @@ This rehearsal passed live on 2026-11-17, with the two-of-three case (Section 7.
 ### 6.4 New `wormhole-core` versions
 
 Each new version of `wormhole-core` has a new package ID.
-Example: the change from version 0.8.3 to 0.8.4 gives a new package ID.
-The build makes sure that each new version is a valid Daml upgrade of the previous release.
+Example: the change from version 0.12.2 to 0.12.3 gives a new package ID.
+A non-breaking version is a valid Daml upgrade (SCU) of the previous release.
+A breaking version is not a valid Daml upgrade of the previous release.
+Example: it changes the signatories or observers of a template, or the type of a field or a choice argument.
 
-The procedure of Section 6.7 applies only to an upgrade that keeps the signatories and observers of each template.
+The procedure of Section 6.7 applies only to a non-breaking version.
 Version 0.8.0 adds `gg` as a signatory of `EmitterRegistry` and `Emitter`.
 Version 0.8.3 adds `feeCustody` as a signatory of `CoreState`.
 Thus a 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3 or a later version.
@@ -517,15 +519,16 @@ Each informee participant must vet the package that executes the choice.
 Thus a package that no guardian participant vets cannot execute `PublishMessage`.
 
 A dependent package calls `wormhole-core` by package ID.
-Example: `ntt` 0.6.2 calls `wormhole-core` 0.12.3. Thus `ntt` needs a new build on the next core version.
-Thus each dependent package needs a new build on the new core version.
-The new build must be a valid upgrade of the old build.
+Example: `ntt` 0.6.2 calls `wormhole-core` 0.12.3.
+Thus each dependent package needs a new build on the next core version.
+For a non-breaking core version, the new build must be a valid upgrade of the old build.
+For a breaking core version, refer to Section 6.8.
 
 Third-party packages can also call `wormhole-core` by package ID.
 You cannot list these packages.
 The counter `wormhole_canton_unpinned_publish_messages_total` shows their messages under the old package ID.
 
-For a version that keeps the signatories and observers of each template, refer to Section 6.7.
+For a non-breaking version, refer to Section 6.7.
 For a breaking core version, Section 6.7 does not apply. Do the fee withdrawal steps of Section 6.8 before the unvet.
 
 ### 6.5 Check a Wormhole package
@@ -762,7 +765,7 @@ The coordinator tells each integrator about this risk before step 10.
 
 ### 6.8 Breaking core version: fee withdrawals before the unvet
 
-A breaking core version is a `wormhole-core` version that does not keep the signatories and observers of each template (Section 6.4).
+A breaking core version is a `wormhole-core` version that is not a valid Daml upgrade of the previous release (Section 6.4).
 This section applies to a breaking core version that starts from a re-genesis (Section 7.2).
 The NTT repository (`canton/README.md`) gives the migration to a breaking core version.
 This section gives the fee withdrawal steps of that migration.
@@ -771,8 +774,8 @@ A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` for a re-gene
 The re-genesis needs the old and the new versions vetted on each `gg` host at the same time.
 Canton rejects some breaking changes under the same package name, but not all.
 Core 0.8.3 changed signatories and kept the name. `damlc` gave only a warning.
-Core 0.9.0, 0.10.0 and 0.11.0 kept the name.
-Each started from a first genesis, so the old version did not stay vetted.
+Core 0.9.0, 0.10.0, 0.11.0 and 0.12.0 also kept the name.
+No participant outside LocalNet vetted the earlier version, so each started from a first genesis.
 Do not vet a breaking version with a force flag.
 The Canton watcher accepts only the package name `wormhole-core`.
 Thus a new core package name also needs a `guardiand` release.
