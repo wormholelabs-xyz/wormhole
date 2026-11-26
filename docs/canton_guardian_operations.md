@@ -767,13 +767,15 @@ This section applies to a breaking core version that starts from a re-genesis (S
 The NTT repository (`canton/README.md`) gives the migration to a breaking core version.
 This section gives the fee withdrawal steps of that migration.
 
-A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` uses a new package name.
+A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` for a re-genesis uses a new package name.
+The re-genesis needs the old and the new versions vetted on each `gg` host at the same time.
 Canton rejects some breaking changes under the same package name, but not all.
 Core 0.8.3 changed signatories and kept the name. `damlc` gave only a warning.
-The re-genesis needs the old and the new core versions vetted on each `gg` host at the same time.
+Core 0.9.0, 0.10.0 and 0.11.0 kept the name.
+Each started from a first genesis, so the old version did not stay vetted.
 Do not vet a breaking version with a force flag.
 The Canton watcher accepts only the package name `wormhole-core`.
-Thus a breaking core version also needs a `guardiand` release.
+Thus a new core package name also needs a `guardiand` release.
 
 Only `SubmitGovernanceVAA` on the active `CoreState` creates a `FeeWithdrawalAuthorization` from a `TransferFees` VAA.
 The re-genesis archives the old `CoreState` in the `AcceptGenesis` transaction.
