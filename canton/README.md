@@ -1337,6 +1337,7 @@ A larger value aborts with `governance: <field> exceeds the Int range`.
 0.11.0 starts a new `wormhole-core` line. Its main package id is `3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc` (Daml SDK 3.7.3).
 0.11.0 sets a capacity on `consumedGovernance` and `guardianSets` (§4.4, §4.5).
 The 0.10.0 build (`bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb`) is replaced. Its governance collections grow without a bound.
+No participant outside LocalNet vetted 0.10.0. Thus 0.11.0 starts from a fresh genesis.
 
 0.10.0 has no `upgrades:` line and no baseline. It changes the types of template fields, so it is not an SCU upgrade of 0.9.0.
 0.10.0 starts a new `wormhole-core` line. Its main package id is `bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb` (Daml SDK 3.7.3).
@@ -1367,7 +1368,7 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 `node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.3.
 A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0, 0.11.1, 0.12.0, 0.12.1 and 0.12.2 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
-The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
+The procedure below applies only to a non-breaking version: a valid SCU upgrade of the previous release.
 
 **Event package ids.** The watcher compares the package id of each
 `PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`
