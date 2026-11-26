@@ -159,6 +159,18 @@ check_core_package_id_of_dar() {
 # Amounts in units stay below 10^18, so a sum of two fits in a signed 64-bit bash integer.
 readonly MAX_UNITS_DIGITS=18
 
+# The disclosure service form of a Daml Int. Valid in bash ERE and jq; jq's $ also matches before a newline.
+# shellcheck disable=SC2034 # used by gateway_t1.sh and the test
+readonly CANONICAL_DECIMAL_PATTERN='^(0|[1-9][0-9]*)$'
+# jq filters of the C3 responses; $expected_manager_id and $canonical_decimal_pattern come from --arg.
+# shellcheck disable=SC2016,SC2034
+readonly REGISTER_RESPONSE_MANAGER_ID_JQ='((.managerId | type) == "string") and (.managerId == $expected_manager_id)'
+# shellcheck disable=SC2016,SC2034
+readonly MANAGERS_RESPONSE_MANAGER_IDS_JQ='((.managers | length) >= 1)
+  and all(.managers[]; (.managerId | type) == "string")
+  and all(.managers[]; .managerId | contains("\n") | not)
+  and all(.managers[]; .managerId | test($canonical_decimal_pattern))'
+
 # decimal_to_units <decimal-text> <decimals>: the amount in the smallest unit, as an integer string.
 decimal_to_units() {
   local decimal_text="$1" decimals="$2" integer_digits fraction_digits units_text

@@ -321,11 +321,13 @@ service_get() {
 }
 
 # check_service_answers <check-name> <path> <expected-status> <jq-filter of the JSON body, or - for any body>
+#   [<jq option>...]
 check_service_answers() {
   local check_name="$1" path="$2" expected_status="$3" body_filter="$4" response
+  shift 4
   response="$(service_get "$path")"
   if [[ "$(tail -n 1 <<<"$response")" == "$expected_status" ]] \
-      && { [[ "$body_filter" == "-" ]] || sed '$d' <<<"$response" | jq -e "$body_filter" > /dev/null 2>&1; }; then
+      && { [[ "$body_filter" == "-" ]] || sed '$d' <<<"$response" | jq -e "$@" "$body_filter" > /dev/null 2>&1; }; then
     pass "C3 $check_name: GET $path HTTP $expected_status $(sed '$d' <<<"$response" | head -c 120)"
   else
     fail_check "C3 $check_name: GET $path HTTP $(tail -n 1 <<<"$response"), expected $expected_status: $(sed '$d' <<<"$response" | head -c 200)"
@@ -343,7 +345,8 @@ check_service_endpoints() {
   for removed_path in "${REMOVED_SERVICE_PATHS[@]}"; do
     check_service_answers "no route" "$removed_path" 404 -
   done
-  check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
+  check_service_answers "managers list each managerId as a canonical decimal string" /v1/managers 200 \
+    "$MANAGERS_RESPONSE_MANAGER_IDS_JQ" --arg canonical_decimal_pattern "$CANONICAL_DECIMAL_PATTERN"
   check_register_flow
 }
 
@@ -358,7 +361,8 @@ check_register_flow() {
   local register_params next_manager_id expected_claim_namespace expected_claimed_roots_node required_param
   register_params="$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, "instrument-admin": $gg, "instrument-id": "Amulet"}')"
   next_manager_id="$(ntt_governance_next_id)"
-  [[ "$next_manager_id" =~ ^[0-9]+$ ]] || fail "NttGovernance nextId is not a natural number: $next_manager_id"
+  [[ "$next_manager_id" =~ $CANONICAL_DECIMAL_PATTERN ]] \
+    || fail "NttGovernance nextId is not a canonical decimal: $next_manager_id"
   expected_claim_namespace="$(ntt_namespace_for "$(jq -cn --arg gg "$GG_PARTY" '{admin: $gg, id: "Amulet"}')" "$GG_PARTY" \
     "$next_manager_id")"
   expected_claimed_roots_node="$(claimed_roots_node_covering "$GG_PARTY" "$expected_claim_namespace")"
@@ -367,9 +371,17 @@ check_register_flow() {
     "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\", \"covering claimed-roots ReplayNode\"])
      and (.missing == [])
      and (.claimNamespace == \"$expected_claim_namespace\")
-     and (.managerId == $next_manager_id)
+     and ($REGISTER_RESPONSE_MANAGER_ID_JQ)
      and (.disclosures[4].contractId == \"$expected_claimed_roots_node\")
-     and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])"
+     and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])" \
+    --arg expected_manager_id "$next_manager_id"
+  check_service_answers "register flow by VAA rejects an instrument admin other than gg" \
+    "$(register_flow_path "$(jq -c --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY" \
+      '. + {gg: $gg, "by-vaa": "true", "instrument-admin": $custody}' <<<"$register_params")")" 400 \
+    '.error == "instrument-admin must be gg when by-vaa=true"'
+  check_service_answers "control: register flow by VAA with gg as the instrument admin" \
+    "$(register_flow_path "$(jq -c --arg gg "$GG_PARTY" '. + {gg: $gg, "by-vaa": "true"}' <<<"$register_params")")" 200 \
+    "$REGISTER_RESPONSE_MANAGER_ID_JQ" --arg expected_manager_id "$next_manager_id"
   check_service_answers "register flow with the removed namespace parameter" \
     "$(register_flow_path "$(jq -c --arg namespace "$expected_claim_namespace" '. + {namespace: $namespace}' <<<"$register_params")")" 400 -
   for required_param in admin instrument-admin instrument-id; do
