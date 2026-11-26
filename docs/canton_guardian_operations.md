@@ -550,7 +550,7 @@ For the Canton Console commands, refer to <https://docs.canton.network/global-sy
 
 ### 6.7 Core package upgrade
 
-Use this procedure for each new `wormhole-core` version that keeps the signatories and observers of each template.
+Use this procedure for each non-breaking `wormhole-core` version (Section 6.4).
 The sequence prevents a submitter from using the old version to bypass the checks of the new version.
 This is the one-id procedure. It is the default.
 The watcher accepts one core package ID during the procedure.
@@ -1705,7 +1705,7 @@ The flags are `--cantonRetiringPackageID`, `--cantonRetiringPackageVersion` and 
 With these flags, the watcher accepts two package IDs until the deadline.
 Then each restart is a rolling restart, and messages under the new package ID get VAAs without reobservation.
 Section 7.5 of `canton/README.md` gives the two-id window procedure.
-The two-id window applies only to an upgrade that keeps the signatories and observers of each template.
+The two-id window applies only to a non-breaking version (Section 6.4).
 The decision is when the guardians can use the two-id window in place of the one-id procedure.
 Until a decision, use the one-id procedure in Section 6.7, and do not set the retiring flags.
 
