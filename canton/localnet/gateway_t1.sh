@@ -381,7 +381,8 @@ check_register_flow() {
     '.error == "instrument-admin must be gg when by-vaa=true"'
   check_service_answers "control: register flow by VAA with gg as the instrument admin" \
     "$(register_flow_path "$(jq -c --arg gg "$GG_PARTY" '. + {gg: $gg, "by-vaa": "true"}' <<<"$register_params")")" 200 \
-    "$REGISTER_RESPONSE_MANAGER_ID_JQ" --arg expected_manager_id "$next_manager_id"
+    "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\", \"canonical CoinFactory\", \"covering claimed-roots ReplayNode\"])
+     and ($REGISTER_RESPONSE_MANAGER_ID_JQ)" --arg expected_manager_id "$next_manager_id"
   check_service_answers "register flow with the removed namespace parameter" \
     "$(register_flow_path "$(jq -c --arg namespace "$expected_claim_namespace" '. + {namespace: $namespace}' <<<"$register_params")")" 400 -
   for required_param in admin instrument-admin instrument-id; do
