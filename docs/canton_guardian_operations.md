@@ -523,6 +523,7 @@ You cannot list these packages.
 The counter `wormhole_canton_unpinned_publish_messages_total` shows their messages under the old package ID.
 
 For the procedure, refer to Section 6.7.
+For a breaking core version, do the fee withdrawal steps of Section 6.8 before the unvet.
 
 ### 6.5 Check a Wormhole package
 
@@ -756,6 +757,45 @@ Start the drain gate at the first unvet. Complete the unvet after the upgrade ti
 Its `gg` transactions fail after step 10, and its contracts stay frozen until it vets.
 The coordinator tells each integrator about this risk before step 10.
 
+### 6.8 Breaking core version: fee withdrawals before the unvet
+
+A breaking core version is a `wormhole-core` version that does not keep the signatories and observers of each template (Section 6.4).
+This section applies to a breaking core version that starts from a re-genesis (Section 7.2).
+The NTT repository (`canton/README.md`) gives the migration to a breaking core version.
+This section gives the fee withdrawal steps of that migration.
+
+Only `SubmitGovernanceVAA` on the active `CoreState` creates a `FeeWithdrawalAuthorization` from a `TransferFees` VAA.
+The re-genesis archives the old `CoreState` in the `AcceptGenesis` transaction.
+After that transaction, the old core version creates no `FeeWithdrawalAuthorization`.
+The re-genesis also carries the governance replay record of the old `CoreState`.
+Thus the new `CoreState` rejects each `TransferFees` VAA that the old `CoreState` consumed.
+A governance VAA on the old `CoreState` after the agreement of the parameters makes `AcceptGenesis` fail. Then agree new parameters.
+
+Archive each `FeeWithdrawalAuthorization` of the old core version before the unvet.
+An authorization that stays active at the unvet can give a second transfer for one decision.
+`gg` can archive it later if each `gg` host vets the old core version again, or if the new core version can use it.
+If the guardians also made a new `TransferFees` VAA for that decision, one decision gives two transfers.
+
+Do these steps after the re-genesis and before the unvet of the old core version:
+
+1. Make sure that your participant shows no active `CoreState` of the old core version.
+2. If a `CoreState` of the old core version is active, stop. Tell the coordinator.
+3. List each active `FeeWithdrawalAuthorization` of the old core version on your participant.
+4. For each authorization, do transaction 1 of the fee withdrawal (Section 7.6).
+5. For each archived authorization, do transaction 2, or record that the guardians do not do it.
+6. Immediately before the unvet, list each active `FeeWithdrawalAuthorization` of the old core version again.
+7. If the list is not empty, do steps 4 to 6 again.
+8. Tell the coordinator that the list is empty.
+
+Do not unvet the old core version before the coordinator confirms step 8 for each guardian.
+The NTT repository (`canton/README.md`) gives the unvet step of the migration.
+
+WARNING: Do not unvet the old core version while a `FeeWithdrawalAuthorization` of the old core version is active.
+
+Transaction 2 of an archived authorization can commit after the unvet.
+The guardians make a new `TransferFees` VAA only if they stop transaction 2.
+The new VAA has a new digest and a later timestamp, so the new `CoreState` accepts it.
+
 ## 7. Ceremony procedures
 
 ### 7.1 Sign a `gg` transaction
@@ -852,6 +892,7 @@ A re-genesis replaces the roots of an earlier genesis (`genesisKind` `ReGenesisR
 Its parameters carry the earlier governance replay records and the earlier next IDs.
 The new `NttGovernance` keeps the `rootIdentity` of the earlier root.
 Use the genesis procedure of the NTT repository (`canton/README.md`) for a re-genesis.
+Before the unvet of the old core version, do the fee withdrawal steps of Section 6.8.
 
 An emitter ID is an integer from 0 to 2^53 - 1 (`maxEmitterId`).
 
@@ -1100,6 +1141,7 @@ Limits of the rehearsal:
 ### 7.6 Fee withdrawal
 
 A `TransferFees` governance VAA creates a `FeeWithdrawalAuthorization`.
+For a breaking core version, archive each authorization of the old core version before the unvet (Section 6.8).
 `gg` is its only signatory. It has no observer.
 The contract has no choice. Thus only a transaction that `gg` signs can archive it.
 The fees are holdings of `feeCustody`.
@@ -1156,7 +1198,8 @@ If transaction 2 fails:
 3. Prepare transaction 2 again with the same command ID.
 
 Canton rejects a second command with the same command ID in the deduplication period.
-If no attempt commits, the guardians make a new `TransferFees` VAA. The archived authorization gives no other transfer.
+If the guardians stop transaction 2, the coordinator closes the row in the withdrawal record.
+After that, only a new `TransferFees` VAA gives that withdrawal. The archived authorization gives no other transfer.
 
 `feeCustody` must hold only holdings of the fee instrument.
 A third party can send other holdings to `feeCustody`. Do not accept them.
