@@ -371,3 +371,5 @@ GOGC
 GOMEMLIMIT
 rehosted
 resnapshot
+GOFLAGS
+GOPROXY
