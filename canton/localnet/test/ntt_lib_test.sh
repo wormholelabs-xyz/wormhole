@@ -229,6 +229,80 @@ check_case "classify_submit_response with no status line" 1 - "HTTP status" \
 check_case "classify_submit_response with an empty expected text" 1 - "expected text" \
   classify_submit_response "$REJECTED_REPLAY_RESPONSE" ""
 
+# jq_status_on_body <body> <jq-filter> [<jq option>...]: the exit status of jq -e, as check_service_answers runs it.
+jq_status_on_body() {
+  local response_body="$1" body_filter="$2"
+  shift 2
+  jq -e "$@" "$body_filter" > /dev/null <<<"$response_body"
+}
+
+# Columns: case | expected manager id | register response body | expected jq status
+readonly REGISTER_RESPONSE_MANAGER_ID_CASES=(
+  "string equal|3|{\"managerId\":\"3\"}|0"
+  "number equal (image before 3902ace)|3|{\"managerId\":3}|1"
+  "string not equal|3|{\"managerId\":\"4\"}|1"
+  "leading zero|3|{\"managerId\":\"03\"}|1"
+  "trailing newline|3|{\"managerId\":\"3\\n\"}|1"
+  "missing|3|{}|1"
+  "null|3|{\"managerId\":null}|1"
+  "body not an object|3|5|5"
+  "zero string|0|{\"managerId\":\"0\"}|0"
+  "zero number|0|{\"managerId\":0}|1"
+  "negative zero string|0|{\"managerId\":\"-0\"}|1"
+)
+for register_case in "${REGISTER_RESPONSE_MANAGER_ID_CASES[@]}"; do
+  IFS='|' read -r case_name expected_manager_id response_body expected_status <<<"$register_case"
+  check_case "register response managerId $case_name" "$expected_status" - - \
+    jq_status_on_body "$response_body" "$REGISTER_RESPONSE_MANAGER_ID_JQ" --arg expected_manager_id "$expected_manager_id"
+done
+
+# Columns: case | /v1/managers response body | expected jq status
+readonly MANAGERS_RESPONSE_MANAGER_IDS_CASES=(
+  "two canonical strings|{\"managers\":[{\"managerId\":\"0\"},{\"managerId\":\"12\"}]}|0"
+  "empty list|{\"managers\":[]}|1"
+  "missing list|{}|1"
+  "list is a number|{\"managers\":5}|5"
+  "one number|{\"managers\":[{\"managerId\":\"0\"},{\"managerId\":1}]}|1"
+  "leading zero|{\"managers\":[{\"managerId\":\"01\"}]}|1"
+  "negative zero|{\"managers\":[{\"managerId\":\"-0\"}]}|1"
+  "sign|{\"managers\":[{\"managerId\":\"-1\"}]}|1"
+  "empty string|{\"managers\":[{\"managerId\":\"\"}]}|1"
+  "trailing newline|{\"managers\":[{\"managerId\":\"1\\n\"}]}|1"
+  "second line canonical|{\"managers\":[{\"managerId\":\"x\\n1\"}]}|1"
+  "missing managerId|{\"managers\":[{}]}|1"
+  "null managerId|{\"managers\":[{\"managerId\":null}]}|1"
+)
+for managers_case in "${MANAGERS_RESPONSE_MANAGER_IDS_CASES[@]}"; do
+  IFS='|' read -r case_name response_body expected_status <<<"$managers_case"
+  check_case "managers response managerId $case_name" "$expected_status" - - \
+    jq_status_on_body "$response_body" "$MANAGERS_RESPONSE_MANAGER_IDS_JQ" \
+    --arg canonical_decimal_pattern "$CANONICAL_DECIMAL_PATTERN"
+done
+
+text_is_canonical_decimal() {
+  [[ "$1" =~ $CANONICAL_DECIMAL_PATTERN ]]
+}
+# Columns: case | text | expected status
+readonly CANONICAL_DECIMAL_PATTERN_CASES=(
+  "zero|0|0"
+  "one|1|0"
+  "int64 maximum|9223372036854775807|0"
+  "empty||1"
+  "leading zero|01|1"
+  "double zero|00|1"
+  "negative zero|-0|1"
+  "negative|-1|1"
+  "plus sign|+1|1"
+  "fraction|1.0|1"
+  "trailing space|1 |1"
+  "letter|a1|1"
+)
+for decimal_pattern_case in "${CANONICAL_DECIMAL_PATTERN_CASES[@]}"; do
+  IFS='|' read -r case_name decimal_text expected_status <<<"$decimal_pattern_case"
+  check_case "CANONICAL_DECIMAL_PATTERN $case_name" "$expected_status" - - text_is_canonical_decimal "$decimal_text"
+done
+check_case "CANONICAL_DECIMAL_PATTERN trailing newline" 1 - - text_is_canonical_decimal $'1\n'
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_8_0_PACKAGE_ID="03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
