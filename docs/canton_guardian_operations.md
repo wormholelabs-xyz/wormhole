@@ -495,10 +495,13 @@ The build makes sure that each new version is a valid Daml upgrade of the previo
 The procedure of Section 6.7 applies only to an upgrade that keeps the signatories and observers of each template.
 Version 0.8.0 adds `gg` as a signatory of `EmitterRegistry` and `Emitter`.
 Version 0.8.3 adds `feeCustody` as a signatory of `CoreState`.
-Thus a 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3.
-Version 0.8.3 starts from a fresh genesis (Section 7.2).
+Thus a 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3 or a later version.
 Versions 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `gg`.
-The approved list of `guardiand` does not contain 0.8.0, 0.8.1 or 0.8.2.
+Version 0.8.3 is withdrawn: the operator signs its core contracts.
+The current version is 0.12.3. It is not a Daml upgrade of an earlier version.
+No deployment of an earlier version exists outside LocalNet.
+Thus a deployment of 0.12.3 starts from a first genesis (Section 7.2).
+The approved list of `guardiand` contains only 0.12.3.
 
 The watcher accepts a `PublishMessage` only from the package ID in `--cantonPackageID`.
 An `ExercisedEvent` carries the package ID of the package that executes the choice.
@@ -514,7 +517,7 @@ Each informee participant must vet the package that executes the choice.
 Thus a package that no guardian participant vets cannot execute `PublishMessage`.
 
 A dependent package calls `wormhole-core` by package ID.
-Example: `ntt` 0.3.2 calls `wormhole-core` 0.8.0. Thus `ntt` needs a new build on 0.8.3.
+Example: `ntt` 0.6.2 calls `wormhole-core` 0.12.3. Thus `ntt` needs a new build on the next core version.
 Thus each dependent package needs a new build on the new core version.
 The new build must be a valid upgrade of the old build.
 
@@ -522,8 +525,8 @@ Third-party packages can also call `wormhole-core` by package ID.
 You cannot list these packages.
 The counter `wormhole_canton_unpinned_publish_messages_total` shows their messages under the old package ID.
 
-For the procedure, refer to Section 6.7.
-For a breaking core version, do the fee withdrawal steps of Section 6.8 before the unvet.
+For a version that keeps the signatories and observers of each template, refer to Section 6.7.
+For a breaking core version, Section 6.7 does not apply. Do the fee withdrawal steps of Section 6.8 before the unvet.
 
 ### 6.5 Check a Wormhole package
 
@@ -764,6 +767,14 @@ This section applies to a breaking core version that starts from a re-genesis (S
 The NTT repository (`canton/README.md`) gives the migration to a breaking core version.
 This section gives the fee withdrawal steps of that migration.
 
+A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` uses a new package name.
+Canton rejects some breaking changes under the same package name, but not all.
+Core 0.8.3 changed signatories and kept the name. `damlc` gave only a warning.
+The re-genesis needs the old and the new core versions vetted on each `gg` host at the same time.
+Do not vet a breaking version with a force flag.
+The Canton watcher accepts only the package name `wormhole-core`.
+Thus a breaking core version also needs a `guardiand` release.
+
 Only `SubmitGovernanceVAA` on the active `CoreState` creates a `FeeWithdrawalAuthorization` from a `TransferFees` VAA.
 The re-genesis archives the old `CoreState` in the `AcceptGenesis` transaction.
 After that transaction, the old core version creates no `FeeWithdrawalAuthorization`.
@@ -782,7 +793,7 @@ Do these steps after the re-genesis and before the unvet of the old core version
 2. If a `CoreState` of the old core version is active, stop. Tell the coordinator.
 3. List each active `FeeWithdrawalAuthorization` of the old core version on your participant.
 4. For each authorization, do transaction 1 of the fee withdrawal (Section 7.6).
-5. For each archived authorization, do transaction 2, or record that the guardians do not do it.
+5. For each archived authorization, do transaction 2, or tell the coordinator to close the row in the withdrawal record.
 6. Immediately before the unvet, list each active `FeeWithdrawalAuthorization` of the old core version again.
 7. If the list is not empty, do steps 4 to 6 again.
 8. Tell the coordinator that the list is empty.
@@ -814,8 +825,10 @@ Use this procedure for each `gg` signing ceremony.
 
 ### 7.2 Genesis acceptance
 
-Each deployment of `wormhole-core` 0.9.0 starts from a fresh genesis.
-Contracts of an earlier version do not move to 0.9.0.
+A deployment of `wormhole-core` starts from a first genesis or from a re-genesis.
+The current version is 0.12.3. No deployment of an earlier version exists outside LocalNet.
+Thus a deployment of 0.12.3 starts from a first genesis.
+Contracts of an earlier version do not move to 0.12.3.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
 
 The operator does the deployment work.
@@ -1141,11 +1154,11 @@ Limits of the rehearsal:
 ### 7.6 Fee withdrawal
 
 A `TransferFees` governance VAA creates a `FeeWithdrawalAuthorization`.
-For a breaking core version, archive each authorization of the old core version before the unvet (Section 6.8).
 `gg` is its only signatory. It has no observer.
 The contract has no choice. Thus only a transaction that `gg` signs can archive it.
 The fees are holdings of `feeCustody`.
 The `amount` field is in units of 10^-10 of the fee instrument.
+For a breaking core version, archive each authorization of the old core version before the unvet (Section 6.8).
 
 The prepare endpoint accepts one command in each transaction (Section 7.2).
 Thus the withdrawal is two prepared transactions:
