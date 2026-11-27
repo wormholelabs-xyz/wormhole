@@ -1,0 +1,30 @@
+// Print the guardianGovernance decentralized namespace and the PartyToParticipant mapping of each party in it
+// (guardianGovernance, feeCustody, nttCustody) as each LocalNet participant sees them.
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+
+val partyId = PartyId.tryFromProtoPrimitive(sys.env("GG_PARTY_ID"))
+def hostingText(partyToParticipant: PartyToParticipant): String =
+  partyToParticipant.participants.map(host =>
+    s"${host.participantId.uid.identifier}:${host.participantId.uid.namespace.fingerprint.toProtoPrimitive.take(12)}/${host.permission}").mkString(",")
+def signingKeysText(partyToParticipant: PartyToParticipant): String =
+  partyToParticipant.partySigningKeysWithThreshold.map(signingKeys =>
+    s"${signingKeys.threshold}-of-${signingKeys.keys.size}:" + signingKeys.keys.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(","))
+    .getOrElse("none")
+
+participants.remote.foreach { host =>
+  val synchronizer = host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+    .getOrElse(throw new RuntimeException(s"${host.name} is not connected to global"))
+  val synchronizerTopologyStore = TopologyStoreId.Synchronizer(synchronizer.physicalSynchronizerId)
+  host.topology.decentralized_namespaces.list(synchronizerTopologyStore).filter(_.item.namespace == partyId.namespace).foreach { namespaceDefinition =>
+    val owners = namespaceDefinition.item.owners.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")
+    println(s"TOPOLOGY ${host.name} DN serial=${namespaceDefinition.context.serial} threshold=${namespaceDefinition.item.threshold} owners=$owners")
+  }
+  host.topology.party_to_participant_mappings.list(synchronizerTopologyStore).filter(_.item.partyId.namespace == partyId.namespace)
+    .sortBy(_.item.partyId.toProtoPrimitive).foreach { partyToParticipant =>
+    println(s"TOPOLOGY ${host.name} PTP party=${partyToParticipant.item.partyId.uid.identifier} serial=${partyToParticipant.context.serial} " +
+      s"confirmationThreshold=${partyToParticipant.item.threshold} hosts=${hostingText(partyToParticipant.item)} " +
+      s"signingKeys=${signingKeysText(partyToParticipant.item)}")
+  }
+}

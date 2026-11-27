@@ -1,0 +1,6 @@
+# Daml build output / compiler cache (dpm build / dpm test).
+# The compiled DAR lands in .daml/dist/ and is regenerated from daml/ sources.
+.daml/
+
+# Test-vector bootstrap artifacts written by the devnet bootstrap (not sources).
+setup-result.json

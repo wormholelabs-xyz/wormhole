@@ -1,0 +1,172 @@
+-- | Ledger-boundary checks for forged byte values. A Ledger API client can send
+-- an invalid value of a 'Wormhole.Core.Bytes' type: @dpm script --input-file@
+-- decodes JSON straight into Daml values, as the Ledger API does.
+-- canton/test/forged_byte_values_test.sh feeds forged values through
+-- 'runForgedValueCases' and checks each outcome.
+module Test.ForgedByteValues where
+
+import Daml.Script
+import DA.Date (Month(Jan), date)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import DA.Time (time)
+import DA.Set qualified as Set
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet (GuardianSet(..), GuardianSetMember(..))
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Test.TestCore (claimedRootsNodeCovering, devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, registerEmitter, setupWithPartyLabel)
+
+-- | One value at one ledger boundary.
+data ForgedValueCase
+  = CoreStateGovernanceContract EmitterAddress
+  | CoreStateGuardianAddress GuardianAddress
+  | CoreStateExpiredSetGuardianAddress GuardianAddress
+  | CoreStateConsumedGovernanceDigest VaaDigest
+  | CoreStateGuardianPublicKey GuardianPublicKey
+  | ParseAndVerifyEncodedVaa EncodedVaa
+  | SubmitGovernanceEncodedVaa EncodedVaa
+  | VerifyAndConsumeEncodedVaa EncodedVaa
+  | AttachGuardianPublicKey GuardianPublicKey
+  | PublishMessagePayload MessagePayload
+  | ConsumeDigestArgument VaaDigest
+  | ReplayNodePrefix DigestNibblePrefix
+  | ReplayNodeConsumedSuffix DigestNibbleSuffix
+  | EmitterEmitterAddress EmitterAddress
+  | FeeWithdrawalRecipient UniversalAddress
+  | FeeWithdrawalVaaDigest VaaDigest
+  deriving (Eq, Show)
+
+acceptedOutcome : Text
+acceptedOutcome = "accepted"
+
+-- | "accepted", or "rejected: " and the submission error.
+describeSubmitOutcome : Either SubmitError a -> Text
+describeSubmitOutcome submitResult = case submitResult of
+  Right _ -> acceptedOutcome
+  Left (FailureStatusError failureStatus) -> "rejected: " <> failureStatus.message
+  Left otherError -> "rejected: " <> show otherError
+
+-- | Runs each case on a fresh genesis; the outcomes keep the input order.
+runForgedValueCases : [ForgedValueCase] -> Script [Text]
+runForgedValueCases forgedCases = do
+  assertMsg "no forged value cases" (not (null forgedCases))
+  forA (zip [0 .. length forgedCases - 1] forgedCases) \(caseIndex, forgedCase) ->
+    runForgedValueCase ("-forged-" <> show caseIndex) forgedCase
+
+runForgedValueCase : Text -> ForgedValueCase -> Script Text
+runForgedValueCase partyLabel forgedCase = do
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel partyLabel None
+  Some coreState <- queryContractId guardianGovernance coreStateCid
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  relayer <- allocateParty ("Relayer" <> partyLabel)
+  -- A governance digest lifts the genesis rule that each guardian holds a key.
+  let coreStateWithSet0Member hasGovernanceHistory set0Member = coreState with
+        guardianSets = Map.fromList [(0, GuardianSet with members = [set0Member], expirationTime = None)]
+        consumedGovernance =
+          if hasGovernanceHistory then Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0 else Map.empty
+      createCoreStateWith forgedCoreState =
+        trySubmit (actAs guardianGovernance <> actAs coreState.feeRecipient) do createCmd forgedCoreState
+      verifyAndConsumeWith encodedVAA = do
+        rootCid <- claimReplayRoot guardianGovernance relayer
+        trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+          exerciseCmd coreStateCid VerifyAndConsumeVAA with
+            encodedVAA, consumer = relayer, namespace = "forged", replayNodeCid = rootCid
+      parseAndVerifyWith encodedVAA =
+        trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+          exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = relayer, encodedVAA
+  case forgedCase of
+    CoreStateGovernanceContract forgedAddress -> describeSubmitOutcome <$>
+      createCoreStateWith (coreState with governanceContract = forgedAddress)
+    CoreStateGuardianAddress forgedAddress -> describeSubmitOutcome <$>
+      createCoreStateWith (coreStateWithSet0Member True (GuardianSetMember with address = forgedAddress, publicKey = None))
+    CoreStateGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
+      createCoreStateWith (coreStateWithSet0Member False (GuardianSetMember with address = devnetGuardian, publicKey = Some forgedKey))
+    CoreStateExpiredSetGuardianAddress forgedAddress -> describeSubmitOutcome <$>
+      createCoreStateWith (coreState with
+        consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
+        guardianSetIndex = 1
+        guardianSets = Map.fromList
+          [ (0, GuardianSet with
+              members = [GuardianSetMember with address = forgedAddress, publicKey = None]
+              expirationTime = Some (time (date 2026 Jan 1) 0 0 0))
+          , (1, GuardianSet with members = [GuardianSetMember with address = devnetGuardian, publicKey = Some devnetGuardianPubKey], expirationTime = None) ])
+    CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
+      createCoreStateWith (coreState with consumedGovernance = Map.singleton forgedDigest 0)
+    ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
+      parseAndVerifyWith forgedVaa
+    SubmitGovernanceEncodedVaa forgedVaa -> describeSubmitOutcome <$>
+      trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+        exerciseCmd coreStateCid SubmitGovernanceVAA with
+          submitter = relayer, encodedVAA = forgedVaa
+    VerifyAndConsumeEncodedVaa forgedVaa -> describeSubmitOutcome <$>
+      verifyAndConsumeWith forgedVaa
+    AttachGuardianPublicKey forgedKey -> do
+      unkeyedCoreStateCid <- submit (actAs guardianGovernance <> actAs coreState.feeRecipient) do
+        createCmd (coreStateWithSet0Member True (GuardianSetMember with address = devnetGuardian, publicKey = None))
+      unkeyedDisclosure <- fromSome <$> queryDisclosure guardianGovernance unkeyedCoreStateCid
+      describeSubmitOutcome <$> trySubmit (actAs relayer <> disclose unkeyedDisclosure) do
+        exerciseCmd unkeyedCoreStateCid AttachGuardianPublicKeys with
+          submitter = relayer, targetGuardianSetIndex = 0, guardianPublicKeys = [forgedKey]
+    PublishMessagePayload forgedPayload -> do
+      emitterOwner <- allocateParty ("EmitterOwner" <> partyLabel)
+      emitterCid <- registerEmitter guardianGovernance emitterOwner
+      describeSubmitOutcome <$> trySubmit (actAs emitterOwner <> disclose coreStateDisclosure) do
+        exerciseCmd emitterCid PublishMessage with
+          nonce = 0, payload = forgedPayload, consistencyLevel = 0
+          coreStateCid, payer = emitterOwner, feeAllocation = None
+    ConsumeDigestArgument forgedDigest -> do
+      rootCid <- claimReplayRoot guardianGovernance relayer
+      describeSubmitOutcome <$> trySubmit relayer do exerciseCmd rootCid ConsumeDigest with digest = forgedDigest
+    ReplayNodePrefix forgedPrefix -> describeSubmitOutcome <$>
+      trySubmit (actAs relayer <> actAs guardianGovernance) do
+        createCmd ReplayNode with
+          consumer = relayer, guardianGovernance, namespace = "forged"
+          prefix = forgedPrefix, splitThreshold = defaultSplitThreshold, consumed = Set.empty
+    ReplayNodeConsumedSuffix forgedSuffix -> describeSubmitOutcome <$>
+      trySubmit (actAs relayer <> actAs guardianGovernance) do
+        createCmd ReplayNode with
+          consumer = relayer, guardianGovernance, namespace = "forged"
+          prefix = parseHexTextOrAbort "", splitThreshold = defaultSplitThreshold
+          consumed = Set.singleton forgedSuffix
+    EmitterEmitterAddress forgedAddress -> describeSubmitOutcome <$>
+      trySubmit (actAs relayer <> actAs guardianGovernance) do
+        createCmd Emitter with
+          guardianGovernance, owner = relayer, emitterId = 0, emitterAddress = forgedAddress, sequence = 0
+    FeeWithdrawalRecipient forgedRecipient -> describeSubmitOutcome <$>
+      trySubmit guardianGovernance do
+        createCmd FeeWithdrawalAuthorization with
+          guardianGovernance, amount = 1, recipient = forgedRecipient
+          vaaHash = parseHexTextOrAbort (mconcat (replicate 64 "a"))
+    FeeWithdrawalVaaDigest forgedDigest -> describeSubmitOutcome <$>
+      trySubmit guardianGovernance do
+        createCmd FeeWithdrawalAuthorization with
+          guardianGovernance, amount = 1, recipient = parseHexTextOrAbort (mconcat (replicate 64 "a"))
+          vaaHash = forgedDigest
+
+claimReplayRoot : Party -> Party -> Script (ContractId ReplayNode)
+claimReplayRoot guardianGovernance consumer = do
+  [(registryCid, _)] <- query @ReplayRootRegistry guardianGovernance
+  registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance registryCid
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance consumer "forged"
+  submit (actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
+    exerciseCmd registryCid ClaimReplayRoot with
+      consumer, namespace = "forged", splitThreshold = defaultSplitThreshold
+      payer = consumer, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
+
+-- | Valid control values: the harness accepts each one, so a rejection in the
+-- shell table comes from the forged value.
+testForgedValueControlsAreAccepted : Script ()
+testForgedValueControlsAreAccepted = do
+  outcomes <- runForgedValueCases
+    [ CoreStateGovernanceContract defaultGovernanceContract
+    , CoreStateGuardianAddress devnetGuardian
+    , CoreStateGuardianPublicKey devnetGuardianPubKey
+    , AttachGuardianPublicKey devnetGuardianPubKey
+    , ParseAndVerifyEncodedVaa govSetFeeVAA
+    , PublishMessagePayload (parseHexTextOrAbort "00")
+    , ConsumeDigestArgument (parseHexTextOrAbort (mconcat (replicate 64 "a")))
+    ]
+  assertMsg ("each control must be accepted, got " <> show outcomes) (all (== acceptedOutcome) outcomes)

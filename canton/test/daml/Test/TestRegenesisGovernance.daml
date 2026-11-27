@@ -1,0 +1,199 @@
+-- | Re-genesis helpers of 'Wormhole.Core.State': the governance replay record
+-- and the guardian sets of a 'CoreState' that replaces earlier roots.
+module Test.TestRegenesisGovernance where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Either (isLeft)
+import DA.Foldable (forA_)
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Text qualified as T
+import DA.Time (addRelTime, hours)
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.State
+import Test.TestCore
+  ( devnetGuardianMember, devnetGuardianSet1Key, devnetGuardianSet1PubKey, govGuardianSetUpgradeVAA, govSetFeeVAA
+  , unkeyedMembersOf )
+import Test.TestGovernanceBounds
+  ( createCoreState, digestOfVAA, evictedFloorErrorText, genesisStateWithLabel, readCoreState
+  , submitGovernanceVAA, syntheticConsumedGovernance, syntheticDigest, timestampOf, trySubmitGovernanceVAA )
+import Test.TestRedTeamCore (checkAttackFailedWith)
+
+withReplayState : Map VaaDigest Int -> Optional Int -> CoreState -> CoreState
+withReplayState consumed floorSeconds root = root with
+  consumedGovernance = consumed
+  evictedGovernanceMaxTimestampSeconds = floorSeconds
+
+-- | Synthetic digests from position @firstPosition@, timestamps from @firstTimestampSeconds@ in steps of 1.
+syntheticDigestsFrom : Int -> Int -> Int -> Map VaaDigest Int
+syntheticDigestsFrom firstPosition digestCount firstTimestampSeconds =
+  Map.fromList
+    [ (syntheticDigest (firstPosition + position), firstTimestampSeconds + position)
+    | position <- [0 .. digestCount - 1] ]
+
+data RegenesisReplayCase = RegenesisReplayCase with
+    caseName       : Text
+    earlierRecords : [(Map VaaDigest Int, Optional Int)]
+    expectedRecord : Either Text (Map VaaDigest Int, Optional Int)  -- Left: error fragment
+
+-- | Rows shared by both variants: each earlier record is (consumed digests, floor).
+regenesisReplayCases : [RegenesisReplayCase]
+regenesisReplayCases =
+  let rootDigests = syntheticDigestsFrom 0 3 1000
+      floorOnlyDigests = syntheticDigestsFrom 10 2 120
+      unionFirst = syntheticDigestsFrom 100 20 1000
+      unionSecond = syntheticDigestsFrom 200 20 2000
+      unionAll = Map.union unionFirst unionSecond
+      evictedUnionCount = Map.size unionAll - maxRetainedGovernanceDigests
+      unionRetained = Map.fromList (drop evictedUnionCount (Map.toList (syntheticDigestsFrom 100 20 1000)) <> Map.toList unionSecond)
+      tiedDigests = Map.fromList [(syntheticDigest (300 + position), 500) | position <- [0 .. maxRetainedGovernanceDigests]]
+  in
+    [ RegenesisReplayCase "single root copy" [(rootDigests, Some 999)] (Right (rootDigests, Some 999))
+    , RegenesisReplayCase "single root without floor" [(rootDigests, None)] (Right (rootDigests, None))
+    , RegenesisReplayCase "two roots, the higher floor wins and covers lower digests"
+        [(Map.fromList [(syntheticDigest 20, 200)], Some 100), (floorOnlyDigests <> Map.fromList [(syntheticDigest 21, 160)], Some 150)]
+        (Right (Map.fromList [(syntheticDigest 20, 200), (syntheticDigest 21, 160)], Some 150))
+    , RegenesisReplayCase "two roots, one floor and one None" [(rootDigests, None), (Map.empty, Some 1000)]
+        (Right (Map.filter (> 1000) rootDigests, Some 1000))
+    , RegenesisReplayCase "union over capacity evicts the oldest and raises the floor"
+        [(unionFirst, None), (unionSecond, None)]
+        (Right (unionRetained, Some (1000 + evictedUnionCount - 1)))
+    , RegenesisReplayCase "union with ties at capacity + 1 evicts each tie" [(tiedDigests, None)]
+        (Right (Map.empty, Some 500))
+    , RegenesisReplayCase "same digest, same timestamp in two roots" [(rootDigests, None), (rootDigests, None)]
+        (Right (rootDigests, None))
+    , RegenesisReplayCase "same digest, two timestamps"
+        [(Map.fromList [(syntheticDigest 0, 1000)], None), (Map.fromList [(syntheticDigest 0, 1001)], None)]
+        (Left "regenesis: a digest carries two timestamps")
+    , RegenesisReplayCase "no earlier root" [] (Left "regenesis: no earlier")
+    ]
+
+replayRecordOf : (Map VaaDigest Int, Optional Int) -> GovernanceReplayRecord
+replayRecordOf (consumed, floorSeconds) = GovernanceReplayRecord with
+  consumedGovernance = consumed
+  evictedGovernanceMaxTimestampSeconds = floorSeconds
+
+checkRegenesisReplayOutcome : RegenesisReplayCase -> Either Text GovernanceReplayRecord -> Script ()
+checkRegenesisReplayOutcome replayCase outcome =
+  case (replayCase.expectedRecord, outcome) of
+    (Right (expectedConsumed, expectedFloor), Right record) -> do
+      assertMsg (replayCase.caseName <> ": consumed " <> show record.consumedGovernance)
+        (record.consumedGovernance == expectedConsumed)
+      assertMsg (replayCase.caseName <> ": floor " <> show record.evictedGovernanceMaxTimestampSeconds)
+        (record.evictedGovernanceMaxTimestampSeconds == expectedFloor)
+      assertMsg (replayCase.caseName <> ": result is not bounded")
+        (checkConsumedGovernanceIsBounded record.evictedGovernanceMaxTimestampSeconds record.consumedGovernance)
+    (Left expectedText, Left message) ->
+      assertMsg (replayCase.caseName <> ": error " <> message) (expectedText `T.isInfixOf` message)
+    (_, unexpected) -> abort (replayCase.caseName <> ": unexpected outcome " <> show unexpected)
+
+-- | Each rule of 'tryGovernanceReplayRecordForRegenesis' (earlier 'CoreState' roots).
+testGovernanceReplayRecordForRegenesis : Script ()
+testGovernanceReplayRecordForRegenesis = do
+  root <- genesisStateWithLabel "RegenesisReplay" 0
+  forA_ regenesisReplayCases \replayCase -> do
+    let earlierRoots = map (\(consumed, floorSeconds) -> withReplayState consumed floorSeconds root) replayCase.earlierRecords
+    checkRegenesisReplayOutcome replayCase (tryGovernanceReplayRecordForRegenesis earlierRoots)
+
+-- | Each rule of 'tryGovernanceReplayRecordForRegenesisFromRecords' (earlier replay records).
+testGovernanceReplayRecordForRegenesisFromRecords : Script ()
+testGovernanceReplayRecordForRegenesisFromRecords =
+  forA_ regenesisReplayCases \replayCase ->
+    checkRegenesisReplayOutcome replayCase
+      (tryGovernanceReplayRecordForRegenesisFromRecords (map replayRecordOf replayCase.earlierRecords))
+
+-- | Both variants give the same record, and fail on the same rows.
+testRegenesisReplayRecordVariantsAgree : Script ()
+testRegenesisReplayRecordVariantsAgree = do
+  root <- genesisStateWithLabel "RegenesisVariants" 0
+  forA_ regenesisReplayCases \replayCase -> do
+    let earlierRoots = map (\(consumed, floorSeconds) -> withReplayState consumed floorSeconds root) replayCase.earlierRecords
+        fromRoots = tryGovernanceReplayRecordForRegenesis earlierRoots
+        fromRecords = tryGovernanceReplayRecordForRegenesisFromRecords (map replayRecordOf replayCase.earlierRecords)
+    case (fromRoots, fromRecords) of
+      (Right rootsRecord, Right recordsRecord) ->
+        assertMsg (replayCase.caseName <> ": variants differ") (rootsRecord == recordsRecord)
+      (Left _, Left _) -> pure ()
+      _ -> abort (replayCase.caseName <> ": one variant failed: " <> show (fromRoots, fromRecords))
+  governanceReplayRecordForRegenesisFromRecords [replayRecordOf (syntheticDigestsFrom 0 3 1000, Some 999)]
+    === governanceReplayRecordForRegenesis [withReplayState (syntheticDigestsFrom 0 3 1000) (Some 999) root]
+
+-- | Each rule of 'tryGuardianSetsForRegenesis'.
+testGuardianSetsForRegenesis : Script ()
+testGuardianSetsForRegenesis = do
+  now <- getTime
+  root <- genesisStateWithLabel "RegenesisSets" 7
+  let keyedSet1Member = GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey
+      set7 = GuardianSet with members = [devnetGuardianMember], expirationTime = None
+      set7Expiring = set7 with expirationTime = Some (addRelTime now (hours 24))
+      set8 = GuardianSet with members = [keyedSet1Member], expirationTime = None
+      unkeyedSet8 = set8 with members = [keyedSet1Member with publicKey = None]
+      atSeven = root
+      atEight = root with guardianSetIndex = 8, guardianSets = Map.fromList [(7, set7Expiring), (8, set8)]
+      atEightUnkeyed = root with guardianSetIndex = 8, guardianSets = Map.fromList [(7, set7Expiring), (8, unkeyedSet8)]
+      atEightOnlyKeyed = root with guardianSetIndex = 8, guardianSets = Map.fromList [(8, set8)]
+      conflictingAtEight = atEight with
+        guardianSets = Map.fromList [(7, set7Expiring with members = unkeyedMembersOf [devnetGuardianSet1Key]), (8, set8)]
+      cases =
+        [ ("single root copy", [atEight], Right (8, atEight.guardianSets))
+        , ("highest index wins", [atSeven, atEight], Right (8, atEight.guardianSets))
+        , ("highest index wins in any order", [atEight, atSeven], Right (8, atEight.guardianSets))
+        , ("unkeyed root takes the key another root attached", [atEightUnkeyed, atEightOnlyKeyed], Right (8, atEight.guardianSets))
+        , ("unkeyed root alone stays unkeyed", [atEightUnkeyed], Right (8, atEightUnkeyed.guardianSets))
+        , ("different addresses at one index", [conflictingAtEight, atSeven], Left "regenesis: earlier roots disagree on the guardian set addresses at index 7")
+        , ("no earlier root", [], Left "regenesis: no earlier CoreState")
+        ]
+  forA_ cases \(caseName, earlierRoots, expected) ->
+    case (expected, tryGuardianSetsForRegenesis earlierRoots) of
+      (Right (expectedIndex, expectedSets), Right regenesisSets) -> do
+        assertMsg (caseName <> ": index") (regenesisSets.guardianSetIndex == expectedIndex)
+        assertMsg (caseName <> ": sets") (regenesisSets.guardianSets == expectedSets)
+      (Left expectedText, Left message) -> assertMsg (caseName <> ": error " <> message) (expectedText `T.isInfixOf` message)
+      (_, outcome) -> abort (caseName <> ": unexpected outcome " <> show outcome)
+
+-- | The aborting helpers equal the Either helpers on valid input and abort on invalid input.
+testRegenesisHelpersAbortOnInvalidRoots : Script ()
+testRegenesisHelpersAbortOnInvalidRoots = do
+  root <- genesisStateWithLabel "RegenesisAbort" 0
+  governanceReplayRecordForRegenesis [root] === GovernanceReplayRecord with
+    consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
+  (guardianSetsForRegenesis [root]).guardianSetIndex === 0
+  assertMsg "empty replay roots" (isLeft (tryGovernanceReplayRecordForRegenesis []))
+  assertMsg "empty set roots" (isLeft (tryGuardianSetsForRegenesis []))
+
+-- | A 'CoreState' built from the helpers on the ledger: a floor-covered earlier
+-- digest fails on the floor, a retained one fails as consumed, and an earlier
+-- GuardianSetUpgrade fails on the carried index.
+testRegenesisCoreStateRejectsEarlierGovernance : Script ()
+testRegenesisCoreStateRejectsEarlierGovernance = do
+  firstRoot <- genesisStateWithLabel "RegenesisLedgerFirst" 0
+  let gg = firstRoot.guardianGovernance
+  firstRootCid <- createCoreState firstRoot
+  upgradedCid <- submitGovernanceVAA gg firstRootCid govGuardianSetUpgradeVAA
+  upgradedRoot <- readCoreState gg upgradedCid
+  let feeTimestamp = timestampOf govSetFeeVAA
+      feeRoot = firstRoot with consumedGovernance = Map.fromList [(digestOfVAA govSetFeeVAA, feeTimestamp)]
+      newerRoot = firstRoot with
+        consumedGovernance = syntheticConsumedGovernance (maxRetainedGovernanceDigests - 1) (feeTimestamp + 1) 1
+      earlierRoots = [feeRoot, newerRoot, upgradedRoot]
+      replayRecord = governanceReplayRecordForRegenesis earlierRoots
+      regenesisSets = guardianSetsForRegenesis earlierRoots
+  replayRecord.evictedGovernanceMaxTimestampSeconds === Some feeTimestamp
+  Map.member (digestOfVAA govGuardianSetUpgradeVAA) replayRecord.consumedGovernance === True
+  regenesisSets.guardianSetIndex === 1
+  secondRoot <- genesisStateWithLabel "RegenesisLedgerSecond" 0
+  regenesisCid <- createCoreState secondRoot with
+    guardianSetIndex = regenesisSets.guardianSetIndex
+    guardianSets = regenesisSets.guardianSets
+    consumedGovernance = replayRecord.consumedGovernance
+    evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
+  let secondGg = secondRoot.guardianGovernance
+  upgradeReplay <- trySubmitGovernanceVAA secondGg regenesisCid govGuardianSetUpgradeVAA
+  checkAttackFailedWith "earlier GuardianSetUpgrade" "governance: not signed by current guardian set" upgradeReplay
+  regenesisAtSetZeroCid <- createCoreState secondRoot with
+    consumedGovernance = replayRecord.consumedGovernance
+    evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
+  feeReplay <- trySubmitGovernanceVAA secondGg regenesisAtSetZeroCid govSetFeeVAA
+  checkAttackFailedWith "floor-covered earlier digest" evictedFloorErrorText feeReplay

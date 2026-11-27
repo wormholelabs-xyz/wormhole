@@ -1,0 +1,372 @@
+-- | Constrained byte-string and nibble-string types for the Wormhole core bridge.
+--
+-- The @DA.Crypto.Text@ builtins operate on lowercase hex 'Text', so each type
+-- below wraps unprefixed lowercase hex and accepts exactly one valid form per
+-- value. Widths follow @sdk/vaa/structs.go@ and @sdk/vaa/payloads.go@.
+--
+-- SECURITY: each type is a positional single-constructor @data@, and the export
+-- list keeps the constructor private. Record-update syntax needs a named field,
+-- so it fails to compile on these types in another package. The
+-- Ledger API sends arbitrary values: every template @ensure@ and every choice
+-- re-checks its byte-typed fields with 'checkHexValueIsWellFormed'.
+--
+-- Offsets and lengths in the 'HexBytes' helpers are in BYTES.
+module Wormhole.Core.Bytes
+  ( HexEncodedValue (..)
+  , HexEncodedBytes
+  , HexBytes
+  , EncodedVaa
+  , MessagePayload
+  , VaaDigest
+  , EmitterAddress
+  , UniversalAddress
+  , GuardianAddress
+  , GuardianPublicKey
+  , EcdsaSignatureR
+  , EcdsaSignatureS
+  , DigestNibblePrefix
+  , DigestNibbleSuffix
+  , parseHexTextOrAbort
+  , checkHexValueIsWellFormed
+  , hexBytesOf
+  , parseHexBytesAs
+  , parseHexBytesAsOrAbort
+  , minimumEncodedVaaBytes
+  , byteLength
+  , sliceBytes
+  , sliceFrom
+  , bytesToInt
+  , intToHexByte
+  , intToBytesN
+  , leftPadTo
+  , stripLeadingZeroBytes
+  , highBitSet
+  , keccak256Bytes
+  , utf8Bytes
+  , nibbleCountOfPrefix
+  , nibbleCountOfSuffix
+  , LenPrefixed
+  , unLenPrefixed
+  , lenPrefixed
+  , DomainTag (..)
+  , RegistrarText (..)
+  , OwnerText (..)
+  , RegistryId (..)
+  , derivedAddressFromText
+  , derivedAddress
+  ) where
+
+import DA.Crypto.Text (keccak256, toHex)
+import DA.Text qualified as T
+
+-- | A type whose value is lowercase hex text with one exact valid form.
+-- 'parseHexText' is the only way to build a value.
+class HexEncodedValue a where
+  hexTextOf : a -> Text
+  parseHexText : Text -> Either Text a
+
+-- | A 'HexEncodedValue' that holds whole bytes (even hex length), so it converts to 'HexBytes'.
+class HexEncodedValue a => HexEncodedBytes a
+
+parseHexTextOrAbort : HexEncodedValue a => Text -> a
+parseHexTextOrAbort hexText = either error identity (parseHexText hexText)
+
+-- | The boundary re-check for a value that arrived through the Ledger API:
+-- the value passes the constructor rule of its type.
+checkHexValueIsWellFormed : (HexEncodedValue a, Eq a) => a -> Bool
+checkHexValueIsWellFormed hexValue = parseHexText (hexTextOf hexValue) == Right hexValue
+
+hexBytesOf : HexEncodedBytes a => a -> HexBytes
+hexBytesOf byteValue = HexBytes (hexTextOf byteValue)
+
+parseHexBytesAs : HexEncodedBytes a => HexBytes -> Either Text a
+parseHexBytesAs (HexBytes hexText) = parseHexText hexText
+
+parseHexBytesAsOrAbort : HexEncodedBytes a => HexBytes -> a
+parseHexBytesAsOrAbort (HexBytes hexText) = parseHexTextOrAbort hexText
+
+----------------------------------------------------------------------
+-- Constructor rules
+----------------------------------------------------------------------
+
+checkIsLowercaseHex : Text -> Bool
+checkIsLowercaseHex hexText = all isLowercaseHexDigit (T.toCodePoints hexText)
+  where
+    isLowercaseHexDigit codePoint =
+      (codePoint >= codePoint0 && codePoint <= codePoint9) || (codePoint >= codePointA && codePoint <= codePointF)
+    [codePoint0, codePoint9, codePointA, codePointF] = T.toCodePoints "09af"
+
+parseLowercaseHexNibbles : Text -> Text -> Either Text Text
+parseLowercaseHexNibbles typeName hexText
+  | not (checkIsLowercaseHex hexText) = Left (typeName <> ": not lowercase hex")
+  | otherwise = Right hexText
+
+parseLowercaseHexBytes : Text -> Text -> Either Text Text
+parseLowercaseHexBytes typeName hexText = do
+  nibbles <- parseLowercaseHexNibbles typeName hexText
+  if T.length nibbles % 2 /= 0
+    then Left (typeName <> ": odd hex length " <> show (T.length nibbles))
+    else Right nibbles
+
+parseExactByteWidthHex : Text -> Int -> Text -> Either Text Text
+parseExactByteWidthHex typeName expectedBytes hexText = do
+  byteHex <- parseLowercaseHexBytes typeName hexText
+  if T.length byteHex == expectedBytes * 2
+    then Right byteHex
+    else Left (typeName <> ": expected " <> show expectedBytes <> " bytes, got "
+      <> show (T.length byteHex) <> " hex characters")
+
+parseNibbleCountInRange : Text -> Int -> Int -> Text -> Either Text Text
+parseNibbleCountInRange typeName minimumNibbles maximumNibbles hexText = do
+  nibbles <- parseLowercaseHexNibbles typeName hexText
+  if T.length nibbles >= minimumNibbles && T.length nibbles <= maximumNibbles
+    then Right nibbles
+    else Left (typeName <> ": expected " <> show minimumNibbles <> " to " <> show maximumNibbles
+      <> " nibbles, got " <> show (T.length nibbles))
+
+----------------------------------------------------------------------
+-- Types
+----------------------------------------------------------------------
+
+-- | Any whole number of bytes, 0 included.
+data HexBytes = HexBytes Text deriving (Eq, Ord, Show)
+instance HexEncodedValue HexBytes where
+  hexTextOf (HexBytes hexText) = hexText
+  parseHexText = fmap HexBytes . parseLowercaseHexBytes "HexBytes"
+instance HexEncodedBytes HexBytes
+
+-- | Concatenation keeps lowercase hex and an even length.
+instance Semigroup HexBytes where
+  HexBytes leftHex <> HexBytes rightHex = HexBytes (leftHex <> rightHex)
+instance Monoid HexBytes where
+  mempty = HexBytes ""
+
+-- | Header with zero signatures (version 1, index 4, count 1) plus the fixed body
+-- (timestamp 4, nonce 4, chain 2, emitter 32, sequence 8, consistency 1).
+minimumEncodedVaaBytes : Int
+minimumEncodedVaaBytes = 57
+
+-- | A signed VAA as submitted: at least 'minimumEncodedVaaBytes'. 'parseVAA' checks the structure.
+data EncodedVaa = EncodedVaa Text deriving (Eq, Ord, Show)
+instance HexEncodedValue EncodedVaa where
+  hexTextOf (EncodedVaa hexText) = hexText
+  parseHexText hexText = do
+    byteHex <- parseLowercaseHexBytes "EncodedVaa" hexText
+    if T.length byteHex >= minimumEncodedVaaBytes * 2
+      then Right (EncodedVaa byteHex)
+      else Left ("EncodedVaa: expected at least " <> show minimumEncodedVaaBytes <> " bytes, got "
+        <> show (T.length byteHex) <> " hex characters")
+instance HexEncodedBytes EncodedVaa
+
+-- | A VAA payload and a 'WormholeMessage' payload, 0 or more bytes.
+data MessagePayload = MessagePayload Text deriving (Eq, Ord, Show)
+instance HexEncodedValue MessagePayload where
+  hexTextOf (MessagePayload hexText) = hexText
+  parseHexText = fmap MessagePayload . parseLowercaseHexBytes "MessagePayload"
+instance HexEncodedBytes MessagePayload
+
+-- | @keccak256(keccak256(body))@, 32 bytes (@structs.go@ @SigningDigest@).
+data VaaDigest = VaaDigest Text deriving (Eq, Ord, Show)
+instance HexEncodedValue VaaDigest where
+  hexTextOf (VaaDigest hexText) = hexText
+  parseHexText = fmap VaaDigest . parseExactByteWidthHex "VaaDigest" 32
+instance HexEncodedBytes VaaDigest
+
+-- | The 32-byte emitter address of a VAA (@structs.go@ @Address@).
+data EmitterAddress = EmitterAddress Text deriving (Eq, Ord, Show)
+instance HexEncodedValue EmitterAddress where
+  hexTextOf (EmitterAddress hexText) = hexText
+  parseHexText = fmap EmitterAddress . parseExactByteWidthHex "EmitterAddress" 32
+instance HexEncodedBytes EmitterAddress
+
+-- | A 32-byte address on any chain: ContractUpgrade @NewContract@ and TransferFees @Recipient@.
+data UniversalAddress = UniversalAddress Text deriving (Eq, Ord, Show)
+instance HexEncodedValue UniversalAddress where
+  hexTextOf (UniversalAddress hexText) = hexText
+  parseHexText = fmap UniversalAddress . parseExactByteWidthHex "UniversalAddress" 32
+instance HexEncodedBytes UniversalAddress
+
+-- | A 20-byte Ethereum-style guardian address (@BodyGuardianSetUpdate.Keys@).
+data GuardianAddress = GuardianAddress Text deriving (Eq, Ord, Show)
+instance HexEncodedValue GuardianAddress where
+  hexTextOf (GuardianAddress hexText) = hexText
+  parseHexText = fmap GuardianAddress . parseExactByteWidthHex "GuardianAddress" 20
+instance HexEncodedBytes GuardianAddress
+
+-- | An uncompressed secp256k1 public key: 65 bytes, @04 ‖ X ‖ Y@.
+data GuardianPublicKey = GuardianPublicKey Text deriving (Eq, Ord, Show)
+instance HexEncodedValue GuardianPublicKey where
+  hexTextOf (GuardianPublicKey hexText) = hexText
+  parseHexText hexText = do
+    keyHex <- parseExactByteWidthHex "GuardianPublicKey" 65 hexText
+    if T.take 2 keyHex == "04"
+      then Right (GuardianPublicKey keyHex)
+      else Left "GuardianPublicKey: first byte must be 04 (uncompressed point)"
+instance HexEncodedBytes GuardianPublicKey
+
+-- | The 32-byte ECDSA @r@ of a guardian signature.
+data EcdsaSignatureR = EcdsaSignatureR Text deriving (Eq, Ord, Show)
+instance HexEncodedValue EcdsaSignatureR where
+  hexTextOf (EcdsaSignatureR hexText) = hexText
+  parseHexText = fmap EcdsaSignatureR . parseExactByteWidthHex "EcdsaSignatureR" 32
+instance HexEncodedBytes EcdsaSignatureR
+
+-- | The 32-byte ECDSA @s@ of a guardian signature.
+data EcdsaSignatureS = EcdsaSignatureS Text deriving (Eq, Ord, Show)
+instance HexEncodedValue EcdsaSignatureS where
+  hexTextOf (EcdsaSignatureS hexText) = hexText
+  parseHexText = fmap EcdsaSignatureS . parseExactByteWidthHex "EcdsaSignatureS" 32
+instance HexEncodedBytes EcdsaSignatureS
+
+-- | The prefix of a replay trie node: 0 to 63 nibbles of a 'VaaDigest'.
+data DigestNibblePrefix = DigestNibblePrefix Text deriving (Eq, Ord, Show)
+instance HexEncodedValue DigestNibblePrefix where
+  hexTextOf (DigestNibblePrefix hexText) = hexText
+  parseHexText = fmap DigestNibblePrefix . parseNibbleCountInRange "DigestNibblePrefix" 0 63
+
+-- | A consumed digest suffix under a trie node prefix: 1 to 64 nibbles.
+data DigestNibbleSuffix = DigestNibbleSuffix Text deriving (Eq, Ord, Show)
+instance HexEncodedValue DigestNibbleSuffix where
+  hexTextOf (DigestNibbleSuffix hexText) = hexText
+  parseHexText = fmap DigestNibbleSuffix . parseNibbleCountInRange "DigestNibbleSuffix" 1 64
+
+nibbleCountOfPrefix : DigestNibblePrefix -> Int
+nibbleCountOfPrefix (DigestNibblePrefix hexText) = T.length hexText
+
+nibbleCountOfSuffix : DigestNibbleSuffix -> Int
+nibbleCountOfSuffix (DigestNibbleSuffix hexText) = T.length hexText
+
+----------------------------------------------------------------------
+-- HexBytes helpers
+----------------------------------------------------------------------
+
+byteLength : HexBytes -> Int
+byteLength (HexBytes hexText) = T.length hexText / 2
+
+-- | @sliceBytes start len bytes@ returns @len@ bytes of @bytes@ from byte
+-- offset @start@. Fails if the slice runs past the end.
+sliceBytes : Int -> Int -> HexBytes -> HexBytes
+sliceBytes start len (HexBytes hexText)
+  | start < 0 || len < 0 = error ("sliceBytes: negative offset or length (" <> show start <> ", " <> show len <> ")")
+  | T.length hexText < (start + len) * 2 =
+      error ("sliceBytes: out of range (need " <> show ((start + len) * 2) <> " hex chars, have "
+        <> show (T.length hexText) <> ")")
+  | otherwise = HexBytes (T.substring (start * 2) (len * 2) hexText)
+
+-- | Bytes from @start@ (inclusive) to the end.
+sliceFrom : Int -> HexBytes -> HexBytes
+sliceFrom start hexBytes = sliceBytes start (byteLength hexBytes - start) hexBytes
+
+-- | Code-point arithmetic: a @where@-bound lookup table would be rebuilt per nibble under strict evaluation.
+hexDigitValue : Int -> Int
+hexDigitValue codePoint
+  | codePoint >= codePoint0 && codePoint <= codePoint9 = codePoint - codePoint0
+  | codePoint >= codePointA && codePoint <= codePointF = codePoint - codePointA + 10
+  | otherwise = error ("invalid hex digit: " <> T.fromCodePoints [codePoint])
+  where
+    [codePoint0, codePoint9, codePointA, codePointF] = T.toCodePoints "09af"
+
+-- | Big-endian bytes as an 'Int'. Values must fit in 63 bits (chain ids,
+-- sequences, nonces, fees); callers that need uint256 bound-check upstream.
+bytesToInt : HexBytes -> Int
+bytesToInt (HexBytes hexText) = foldl (\accumulated codePoint -> accumulated * 16 + hexDigitValue codePoint) 0 (T.toCodePoints hexText)
+
+hexChar : Int -> Text
+hexChar nibble
+  | 0 <= nibble && nibble <= 15 = T.substring nibble 1 "0123456789abcdef"
+  | otherwise = error ("hexChar: out of range: " <> show nibble)
+
+-- | One byte value (0..255) as one byte.
+intToHexByte : Int -> HexBytes
+intToHexByte byteValue =
+  if byteValue < 0 || byteValue > 255
+    then error ("intToHexByte: out of range: " <> show byteValue)
+    else HexBytes (hexChar (byteValue / 16) <> hexChar (byteValue % 16))
+
+-- | A non-negative 'Int' as exactly @numBytes@ big-endian bytes. Fails if the
+-- width or value is negative, or the value does not fit.
+intToBytesN : Int -> Int -> HexBytes
+intToBytesN value numBytes
+  | numBytes < 0 = error ("intToBytesN: negative width: " <> show numBytes)
+  | value < 0 = error ("intToBytesN: negative value: " <> show value)
+  | numBytes == 0 =
+      if value == 0 then HexBytes "" else error ("intToBytesN: value does not fit in the requested width")
+  | otherwise = intToBytesN (value / 256) (numBytes - 1) <> intToHexByte (value % 256)
+
+-- | Left-pads with zero bytes to @numBytes@; a value at least that wide is returned unchanged.
+leftPadTo : Int -> HexBytes -> HexBytes
+leftPadTo numBytes hexBytes =
+  let currentBytes = byteLength hexBytes
+  in if currentBytes >= numBytes
+       then hexBytes
+       else HexBytes (mconcat (replicate (numBytes - currentBytes) "00")) <> hexBytes
+
+-- | Drops leading zero bytes and keeps at least one byte (minimal DER integer).
+stripLeadingZeroBytes : HexBytes -> HexBytes
+stripLeadingZeroBytes hexBytes@(HexBytes hexText)
+  | byteLength hexBytes <= 1 = hexBytes
+  | otherwise =
+      let zeroBytes = T.length (T.takeWhile (== "0") hexText) / 2
+      in sliceFrom (min zeroBytes (byteLength hexBytes - 1)) hexBytes
+
+-- | True if the most-significant bit of the first byte is set (DER sign pad).
+highBitSet : HexBytes -> Bool
+highBitSet (HexBytes hexText) = case T.toCodePoints (T.take 1 hexText) of
+  codePoint :: _ -> hexDigitValue codePoint >= 8
+  [] -> False
+
+-- | Wraps the @keccak256@ builtin and asserts its 32-byte lowercase result.
+-- The builtin rejects empty input, so this asserts at least one byte.
+keccak256Bytes : HexBytes -> HexBytes
+keccak256Bytes (HexBytes hexText)
+  | T.length hexText == 0 = error "keccak256Bytes: empty input"
+  | otherwise = case parseExactByteWidthHex "keccak256 result" 32 (keccak256 hexText) of
+      Right digestHex -> HexBytes digestHex
+      Left parseError -> error parseError
+
+-- | The UTF-8 encoding of @text@ (@toHex@ builtin).
+utf8Bytes : Text -> HexBytes
+utf8Bytes text = parseHexTextOrAbort (toHex text)
+
+----------------------------------------------------------------------
+-- Registry identity addresses
+----------------------------------------------------------------------
+
+-- | A 4-byte big-endian length followed by the bytes. A distinct type so it
+-- cannot be concatenated as unprefixed bytes: the prefix makes the address
+-- preimage injective ("ab"‖"c" vs "a"‖"bc").
+data LenPrefixed = LenPrefixed HexBytes
+  deriving (Eq, Show)
+
+unLenPrefixed : LenPrefixed -> HexBytes
+unLenPrefixed (LenPrefixed prefixedBytes) = prefixedBytes
+
+lenPrefixed : HexBytes -> LenPrefixed
+lenPrefixed hexBytes = LenPrefixed (intToBytesN (byteLength hexBytes) 4 <> hexBytes)
+
+-- | Typed address-preimage inputs, so 'derivedAddressFromText' arguments cannot be transposed.
+data DomainTag     = DomainTag     Text deriving (Eq, Show)
+data RegistrarText = RegistrarText Text deriving (Eq, Show)
+data OwnerText     = OwnerText     Text deriving (Eq, Show)
+data RegistryId    = RegistryId    Int  deriving (Eq, Show)
+
+-- | Canonical 32-byte registry address of a registry-allocated identity:
+--
+-- > keccak256( utf8(tag) ‖ lp(utf8(registrar)) ‖ lp(utf8(owner)) ‖ uint64be(id) )
+--
+-- where @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'). The Go
+-- watcher recomputes the same value; a shared test vector pins the encoding.
+derivedAddressFromText : DomainTag -> RegistrarText -> OwnerText -> RegistryId -> HexBytes
+derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (OwnerText ownerText) (RegistryId registryId) =
+  keccak256Bytes (utf8Bytes domainTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes registrarText))
+    <> unLenPrefixed (lenPrefixed (utf8Bytes ownerText))
+    <> intToBytesN registryId 8)
+
+-- | Address of the registry-allocated identity @(registrar, owner, id)@ under
+-- @domainTag@. The @owner@ is in the preimage and co-signs the identity
+-- contract, so a compromised registrar mints only a duplicate under a different
+-- owner, with a different address.
+derivedAddress : DomainTag -> Party -> Party -> RegistryId -> HexBytes
+derivedAddress domainTag registrar owner registryId =
+  derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) registryId

@@ -1,0 +1,169 @@
+-- | Guardian-set representation and expiry, mirroring the EVM
+-- @Structs.GuardianSet@ (@ethereum/contracts/Structs.sol@) and the expiry logic
+-- in @Setters.sol@.
+module Wormhole.Core.GuardianSet where
+
+import DA.Date (Month(Jan), date)
+import DA.Foldable (forA_)
+import DA.List (elemIndex)
+import DA.List.Total ((!!))
+import DA.Map qualified as Map
+import DA.Optional (isNone, isSome)
+import DA.Set qualified as Set
+import DA.Time (convertMicrosecondsToRelTime, convertRelTimeToMicroseconds, subTime, time, addRelTime)
+import Wormhole.Core.Bytes
+
+-- | One day, matching the EVM @GUARDIAN_SET_EXPIRY@ (86400 seconds). After a new
+-- set is installed, the previous set remains valid for this long so in-flight
+-- VAAs signed by it still verify.
+guardianSetExpirySeconds : Int
+guardianSetExpirySeconds = 86400
+
+-- | Capacity of 'CoreState.guardianSets': the current set and up to three
+-- unexpired previous sets. A fourth upgrade within 'guardianSetExpirySeconds'
+-- evicts the oldest previous set ('pruneStoredGuardianSets').
+maxStoredGuardianSets : Int
+maxStoredGuardianSets = 4
+
+-- | sdk/vaa encodes the index as uint32 (@structs.go@ GuardianSetIndex, @payloads.go@ NewIndex).
+maxGuardianSetIndex : Int
+maxGuardianSetIndex = 4294967295
+
+-- | One-byte key count and signature guardian index; EVM @Messages.sol@ requires fewer than 256.
+maxGuardiansPerSet : Int
+maxGuardiansPerSet = 255
+
+-- | No private key exists for it. EVM @Setters.storeGuardianSet@ rejects it.
+zeroGuardianAddress : GuardianAddress
+zeroGuardianAddress = parseHexTextOrAbort "0000000000000000000000000000000000000000"
+
+checkGuardianSetIndexFitsUint32 : Int -> Bool
+checkGuardianSetIndexFitsUint32 index = index >= 0 && index <= maxGuardianSetIndex
+
+-- | Applies to each stored set (CoreState precondition) and to each
+-- GuardianSetUpgrade. Addresses must be distinct: 'verifyVAA' requires
+-- ascending signature positions only, so a repeated address counts one key twice.
+checkGuardianAddressesAreWellFormed : [GuardianAddress] -> Either Text ()
+checkGuardianAddressesAreWellFormed addresses = do
+  let guardianCount = length addresses
+  assertMsg "guardian set: empty set" (guardianCount >= 1)
+  assertMsg "guardian set: more than 255 guardians" (guardianCount <= maxGuardiansPerSet)
+  forA_ (zip [0 .. guardianCount - 1] addresses) \(position, address) -> do
+    assertMsg ("guardian set: address at position " <> show position <> " is not 20 bytes of lowercase hex")
+      (checkHexValueIsWellFormed address)
+    assertMsg ("guardian set: zero address at position " <> show position)
+      (address /= zeroGuardianAddress)
+  assertMsg "guardian set: duplicate address"
+    (Set.size (Set.fromList addresses) == guardianCount)
+
+-- | One guardian: its 20-byte address, exactly as a GuardianSetUpgrade VAA
+-- carries it, and its 65-byte public key once attached. Daml has no ecrecover,
+-- so 'verifyVAA' checks each signature against this key.
+-- SECURITY: a present key derives @address@ ('checkGuardianSetMembersAreWellFormed').
+data GuardianSetMember = GuardianSetMember with
+    address   : GuardianAddress
+    publicKey : Optional GuardianPublicKey
+  deriving (Eq, Show)
+
+-- | A guardian set: the ordered members and an optional expiration time.
+-- @None@ means "never expires" (the current set).
+data GuardianSet = GuardianSet with
+    members        : [GuardianSetMember]
+    expirationTime : Optional Time
+  deriving (Eq, Show)
+
+guardianAddressesOf : GuardianSet -> [GuardianAddress]
+guardianAddressesOf gs = map (.address) gs.members
+
+-- | Number of guardians in the set.
+numGuardians : GuardianSet -> Int
+numGuardians gs = length gs.members
+
+attachedPublicKeyCount : GuardianSet -> Int
+attachedPublicKeyCount gs = length (filter (isSome . (.publicKey)) gs.members)
+
+-- | The 20-byte Ethereum-style address of a secp256k1 public key:
+-- @keccak256(X ‖ Y)[12..32]@, after the 0x04 tag is dropped.
+guardianAddressFromPublicKey : GuardianPublicKey -> GuardianAddress
+guardianAddressFromPublicKey publicKey =
+  parseHexBytesAsOrAbort (sliceBytes 12 20 (keccak256Bytes (sliceFrom 1 (hexBytesOf publicKey))))
+
+-- | The address rules of 'checkGuardianAddressesAreWellFormed', and each
+-- present key is well formed and derives its member address.
+checkGuardianSetMembersAreWellFormed : [GuardianSetMember] -> Either Text ()
+checkGuardianSetMembersAreWellFormed members = do
+  checkGuardianAddressesAreWellFormed (map (.address) members)
+  forA_ (zip [0 .. length members - 1] members) \(position, member) -> case member.publicKey of
+    None -> pure ()
+    Some publicKey -> do
+      assertMsg ("guardian set: public key at position " <> show position <> " is not a well-formed GuardianPublicKey")
+        (checkHexValueIsWellFormed publicKey)
+      assertMsg ("guardian set: public key at position " <> show position <> " does not derive its address")
+        (guardianAddressFromPublicKey publicKey == member.address)
+
+-- | Each address of @newAddresses@ with the key that a member of @storedSets@
+-- holds for it, else no key. Sound because a stored key derives its address.
+guardianSetMembersWithKnownKeys : [GuardianSet] -> [GuardianAddress] -> [GuardianSetMember]
+guardianSetMembersWithKnownKeys storedSets newAddresses =
+  let knownKeyByAddress = Map.fromList
+        [ (member.address, publicKey)
+        | storedSet <- storedSets, member <- storedSet.members, Some publicKey <- [member.publicKey] ]
+  in map (\address -> GuardianSetMember with address, publicKey = Map.lookup address knownKeyByAddress) newAddresses
+
+-- | Attaches each key to the member whose address it derives. Each key must
+-- derive an address of the set, and that member must hold no key.
+attachGuardianPublicKeysToSet : Int -> [GuardianPublicKey] -> GuardianSet -> Either Text GuardianSet
+attachGuardianPublicKeysToSet guardianSetIndex publicKeys gs = do
+  let keyCount = length publicKeys
+      addresses = guardianAddressesOf gs
+  assertMsg "attach: no public keys" (keyCount >= 1)
+  assertMsg "attach: more public keys than guardians" (keyCount <= numGuardians gs)
+  assertMsg "attach: duplicate public key" (Set.size (Set.fromList publicKeys) == keyCount)
+  positionedKeys <- forA publicKeys \publicKey ->
+    case elemIndex (guardianAddressFromPublicKey publicKey) addresses of
+      None -> Left ("attach: public key " <> hexTextOf publicKey <> " derives no guardian address of set " <> show guardianSetIndex)
+      Some position -> pure (position, publicKey)
+  forA_ positionedKeys \(position, _) ->
+    assertMsg ("attach: public key already attached at position " <> show position)
+      (optional False (isNone . (.publicKey)) (gs.members !! position))
+  let keyByPosition = Map.fromList positionedKeys
+      attachAt (position, member) = case Map.lookup position keyByPosition of
+        None -> member
+        Some publicKey -> member with publicKey = Some publicKey
+      attached = gs with members = map attachAt (zip [0 .. numGuardians gs - 1] gs.members)
+  assertMsg "attach: addresses changed" (guardianAddressesOf attached == addresses)
+  assertMsg "attach: attached key count must grow by exactly the submitted count"
+    (attachedPublicKeyCount attached == attachedPublicKeyCount gs + keyCount)
+  checkGuardianSetMembersAreWellFormed attached.members
+  pure attached
+
+-- | Quorum threshold, identical to EVM @Messages.quorum@:
+-- @floor(n * 2 / 3) + 1@.
+quorum : Int -> Int
+quorum n = (n * 2) / 3 + 1
+
+-- | The member at @index@ (0-based). Total: returns None out of range.
+memberAt : GuardianSet -> Int -> Optional GuardianSetMember
+memberAt gs index = gs.members !! index
+
+-- | A set is usable at @now@ if it is the current set (no expiry) or @now@ is
+-- in or before its expiry second. EVM @Messages.sol:80@ rejects only when
+-- @expirationTime < block.timestamp@ in whole seconds, so both sides are
+-- truncated to the second: the whole expiry second is accepted.
+isActiveAt : GuardianSet -> Time -> Bool
+isActiveAt gs now = case gs.expirationTime of
+  None -> True
+  Some expiry -> truncateToWholeSecond now <= truncateToWholeSecond expiry
+
+microsecondsPerSecond : Int
+microsecondsPerSecond = 1000000
+
+-- | Floors @t@ to its whole second; Daml 'Time' has microsecond resolution.
+truncateToWholeSecond : Time -> Time
+truncateToWholeSecond t =
+  let unixEpoch = time (date 1970 Jan 1) 0 0 0
+      microsecondsSinceEpoch = convertRelTimeToMicroseconds (subTime t unixEpoch)
+      subSecondMicroseconds = microsecondsSinceEpoch % microsecondsPerSecond
+      flooredSubSecondMicroseconds =
+        if subSecondMicroseconds < 0 then subSecondMicroseconds + microsecondsPerSecond else subSecondMicroseconds
+  in addRelTime unixEpoch (convertMicrosecondsToRelTime (microsecondsSinceEpoch - flooredSubSecondMicroseconds))

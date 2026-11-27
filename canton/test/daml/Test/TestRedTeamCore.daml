@@ -1,0 +1,1135 @@
+{-# OPTIONS_GHC -Wno-deprecated-exceptions #-}
+-- | Red-team tests for the core bridge (findings in canton/REDTEAM.md). Each
+-- test asserts that its attack FAILS; a failing test is an open finding.
+-- Signed VAA literals are generated and drift-guarded by
+-- node/pkg/cantonclient/redteam_vectorgen_test.go. Guardian set 0 is devnet
+-- key 0; 'rtGuardianSetUpgradeToSet1' installs set 1 = devnet keys 0..3.
+module Test.TestRedTeamCore where
+
+import Daml.Script
+import DA.Action (foldlA, void)
+import DA.Assert ((===))
+import DA.Exception (GeneralError(..), throw)
+import DA.Foldable (forA_)
+import DA.List (sort)
+import DA.Map qualified as Map
+import DA.Optional (catOptionals, fromSome, optionalToList)
+import DA.Text qualified as T
+import DA.Time (microseconds, seconds)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.AllocationV1 (Allocation)
+import Wormhole.Core.Bytes
+import Wormhole.Core.Fees (FeeChargeParties(..), feeToDecimal)
+import Wormhole.Core.Governance
+import Wormhole.Core.GuardianSet (attachedPublicKeyCount, guardianSetExpirySeconds)
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Wormhole.Core.VAA (VAA)
+import Test.MockToken
+import Test.TestCore (claimedRootsNodeCovering, setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGenesisGuardian)
+
+----------------------------------------------------------------------
+-- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
+----------------------------------------------------------------------
+
+redTeamGuardianPubKey1 : GuardianPublicKey
+redTeamGuardianPubKey1 = parseHexTextOrAbort "04de9544a079988df10b0c847a401862b62d8074b02b994ed5a4f96e6078ee048bd5fd0b55e75345d60511e8d822f8b618c5e8e1fa7a9db841014a8a091f7c4119"
+
+redTeamGuardianPubKey2 : GuardianPublicKey
+redTeamGuardianPubKey2 = parseHexTextOrAbort "04d0ddfb81eed4d5ccbb879285c9e52641ca72cc9e89e09b4236a1530abce2d73cfcc72a3d05efaec400e7eca3dcb2bb6ddf5e1f798f8c3fa3de97fd71d4e33aa0"
+
+redTeamGuardianPubKey3 : GuardianPublicKey
+redTeamGuardianPubKey3 = parseHexTextOrAbort "0412081327a05666bb31510a6930b05d9b103dc36f47bc5bbd858162e0bdfdfc7fe944d406d173a54d57366aae6a0cb805ea5942b714f64bfc057aca35b6265967"
+
+rtGuardianSetUpgradeToSet1 : EncodedVaa
+rtGuardianSetUpgradeToSet1 = parseHexTextOrAbort "01000000000100c3f4e28013cd27d8410df0a959aeebe61771fccb7b68daea599a359f2f5ab2b9404a8493c8ed162a7a8dde734e34f7c6614b746ab1253d0d636f8f7a94f00438006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000640000000000000000000000000000000000000000000000000000000000436f726502004b0000000104befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeSkipsIndex : EncodedVaa
+rtGuardianSetUpgradeSkipsIndex = parseHexTextOrAbort "010000000001006fb62128f5bf3de324260b53ed583d0fbbbc3a58e09102903ea8114ee7a187ab2ac6a7c80d06b3e7a64502484953041498285407e055a21a8124f8a1e8d740cc016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000436f726502004b0000000204befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeSameIndex : EncodedVaa
+rtGuardianSetUpgradeSameIndex = parseHexTextOrAbort "01000000000100e321b0656e979cb196a62fde956e9f423c4d27fff51e0803cc579f823e50c4755498dbe14c64f4979968c71671d4c88d6f167fbf4e382236da42774020312888016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000660000000000000000000000000000000000000000000000000000000000436f726502004b0000000004befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeLowerIndexBySet1 : EncodedVaa
+rtGuardianSetUpgradeLowerIndexBySet1 = parseHexTextOrAbort "0100000001030009c4782be9d231a1ede408cf607cc91228cc85021e3edb81158d7afbffc09ece03acde36c74f11c2d46bef05608616bf86a00129b92a19f6885c17bbb4e9f9420101102ac483f79dbdc4a7ee99dacef13216d9f9f7f4dca2d29ee25fc802e3125f5b63dea50579146f343129594073fed7d39b333dca072e32b0becaf933db0133bb00026e3e45617bb7a3ce8743e37766fad5a91264d6aa9fa68b18b7adad35f6ff3a370f115117f6e074629ae275ae66e7ec90330a9410c54f4ef9e5362f35204179f5016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000670000000000000000000000000000000000000000000000000000000000436f726502004b0000000001befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+
+rtGuardianSetUpgradeWrongEmitterChain : EncodedVaa
+rtGuardianSetUpgradeWrongEmitterChain = parseHexTextOrAbort "01000000000100330192b4fe596d749ebd92f071170644c9f400c66836078a5a2ebfa0c1f9e0ed7086a919b286bdec1fdcebf540f3cebccde844c7c7cac42afce56a810aa22954016553f100000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000436f726502004b0000000104befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeWrongEmitterAddress : EncodedVaa
+rtGuardianSetUpgradeWrongEmitterAddress = parseHexTextOrAbort "01000000000100df9e94d4123c0a653d8ca36f2e245aa34673cade1446e9a9966db878ef4ba54a001944b7dc51750cdd54353fac03b50a739c1837a95b23a489809dc2faeace67016553f100000000000001000000000000000000000000000000000000000000000000000000000000000500000000000000690000000000000000000000000000000000000000000000000000000000436f726502004b0000000104befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeWrongTargetChain : EncodedVaa
+rtGuardianSetUpgradeWrongTargetChain = parseHexTextOrAbort "0100000000010041d21b04d9ac8fe550d6e9c12226d98204b9951ce82564feafba9c396f9ec06247d00e8b10682046590e7183230b0ebe1eb0f729d7ff2577b19a0dda2bdc61c6016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006a0000000000000000000000000000000000000000000000000000000000436f72650200020000000104befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd29074"
+
+rtGuardianSetUpgradeEmptySet : EncodedVaa
+rtGuardianSetUpgradeEmptySet = parseHexTextOrAbort "0100000000010097badc8b0aa44b038c3f588d405eb21821aa4d1f51cfefe5a210663e8435e8a575f575a068e02690b7f7c1ccc92d338446bed516ef5660d366c542b74846ce5d016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006b0000000000000000000000000000000000000000000000000000000000436f726502004b0000000100"
+
+rtGuardianSetUpgradeTrailingByte : EncodedVaa
+rtGuardianSetUpgradeTrailingByte = parseHexTextOrAbort "0100000000010068b24cf448d508a8a4f63fbd5bfc475ac92771dad3219e0b3cb7cc54737f3a0b7858486b4f495b3d9491d8bd15fed434e38388ab9714ab8da923d4152169a5c6016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006c0000000000000000000000000000000000000000000000000000000000436f726502004b0000000104befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd000bd6e9833490f8fa87c733a183cd076a6cbd2907400"
+
+rtSetMessageFeeTrailingByte : EncodedVaa
+rtSetMessageFeeTrailingByte = parseHexTextOrAbort "0100000000010049e638a221ad8a8de42efd647289f575cc0a0cccc894fcf1eef38be153a46cb34bc96436173147bf32296d6914d995f2374844d968e12e3e3c226893296ceb36016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006d0000000000000000000000000000000000000000000000000000000000436f726503004b000000000000000000000000000000000000000000000000000000000000000700"
+
+rtSetMessageFeeWrongModule : EncodedVaa
+rtSetMessageFeeWrongModule = parseHexTextOrAbort "01000000000100560efbd3a517108fb8e295914d5df055b03bb64b4df83101a9957bbe931200ee6cc9e5ae777492f7efbafce03aee8f1f97ae2a4c3c2c4f8dd9d7841c2c60de7b016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006e00000000000000000000000000000000000000000000546f6b656e42726964676503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtRecoverChainIDUnsupported : EncodedVaa
+rtRecoverChainIDUnsupported = parseHexTextOrAbort "01000000000100b4231fe06868b766266208062528b3344a2ccea48c8e45311ac729594d0685d149bc495679b3e90a68ec12f06f2a66d22fb173ab244534ecbeae892bcfe492c7016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000006f0000000000000000000000000000000000000000000000000000000000436f726505004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtGovernanceEmptyPayload : EncodedVaa
+rtGovernanceEmptyPayload = parseHexTextOrAbort "010000000001008e81f8d4dbd0dbaa5ac919e65799f355dbc92b6cbbf2954c3c0642448ef6513e329a478fd5ac5a23f4b839cefb3681ee5c620ca6a8a7d28a04df4c4de9dffde6016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007000"
+
+rtSetMessageFeeOverflowsInt64 : EncodedVaa
+rtSetMessageFeeOverflowsInt64 = parseHexTextOrAbort "01000000000100c9fed7cb4f343eaba77c19c1f190ac6e04ec8ee41fe267edfbeb82bbc5e87033424a239a6c26c5ae8353d8961ac5a0955669ee7e945cb8f106f47a0812399626016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000710000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000010000000000000000"
+
+rtContractUpgradeTruncated : EncodedVaa
+rtContractUpgradeTruncated = parseHexTextOrAbort "01000000000100f1d8e49007b589911d133e8e2d20d262c772af3e0f906057b0082bb2cfada670457228bc351064f23aa866d87869e3c366ccb2f54f7477cbb347c08052fb6bea016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000720000000000000000000000000000000000000000000000000000000000436f726501004b"
+
+rtSetMessageFeeBySet1Quorum : EncodedVaa
+rtSetMessageFeeBySet1Quorum = parseHexTextOrAbort "010000000103000e6bbaeba94e8582601482e04d904ecfa8705a75cf50df92f830f77aa81f12a2150321149da7b4dde864dd49837576a24b098882d984ce4db5cff49392eacfd3000196f9cd7fefcbd15a3c22da654105be8509153234b4bd34e63fb6e832d32e559e47012401764fc8132712565e08eacafb4d4da1f40e1ae41cb5ef7185dc544c2e00024523a45dad253cd2ddb50bc046ef3a45906040d4778e3120a183e1a3d1b13dfb0bfdddb315ae9789c0a1498dd2eb3dee06d844cb007d70dfd37eae6476a6a6c8016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000780000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet1BelowQuorum : EncodedVaa
+rtSetMessageFeeBySet1BelowQuorum = parseHexTextOrAbort "010000000102006dcdd4905d041266f11a5c7e5a7b03e7faf2a150a581c5b11661b62811edcab465ef335c48ea8f869955ec2a08565b1ad636c7d8646c7823e2953ab2ab64d535000123c8f3fbf4ebd8beedb3ff6f9edfe100250b301f53d8d792ff7be458534a464e256a772de71480b1869dc972ec8db97bd7e015c9909fe8ab8aa629e71eabfb1a016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000790000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet1DuplicateSigner : EncodedVaa
+rtSetMessageFeeBySet1DuplicateSigner = parseHexTextOrAbort "01000000010300740abbae63121c9667d1e1bbe067deaa5a7950c659844643be7ad980815d26492f4fae0748b7bd48339545c9d6a93b6ab8004d1c9c7701a005a19233e63cdc640000740abbae63121c9667d1e1bbe067deaa5a7950c659844643be7ad980815d26492f4fae0748b7bd48339545c9d6a93b6ab8004d1c9c7701a005a19233e63cdc640001991a0d53429c047741a9d99bcf67bc6261e4c9daa5821091c6af7eda8887d72c0e9115eb75634df4aab655018678431749d599386eac892ddecb47964451db10016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007a0000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet1SignersOutOfOrder : EncodedVaa
+rtSetMessageFeeBySet1SignersOutOfOrder = parseHexTextOrAbort "010000000103012b4fc23fad5ed3592a650b9f3a77a423d61b63ffd1c35cccd34faaab9f5b312134d7f06fdd83c19bd4a444066d9fe26fb7a442b3b6623490bb4816b5633f130a010047bf2b52e59be81df5cf3156b241725d743fcfebf46233f47953910b68e708764e4477940c7f6a46a07fa45e080c6ae4af6a9ee97db1adecf0a0be38e763bfe80002c088e9276c45dfb434ffb3ad501edd20fae4a7a57e961f8dee30c3c42f7962273d5e2c9a2d17781544bb74022c6038171e233a09977a3253f72abc9fe62d1a24016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007b0000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet1WrongKeyAtIndex : EncodedVaa
+rtSetMessageFeeBySet1WrongKeyAtIndex = parseHexTextOrAbort "01000000010300c3a12aa002e678c56da0134f169d1218037f35bee037c008629416991f7978fd0510c48a511d771cb07d6b69f597aa6293cf26320599ed04958d7ba36a3737780001dbc9cdc8ff90728acdfbbb4510ed3c1004bfaa49a561693e6eba9abc3d672a992614e719bcc2735a539130d1799555ad0e9ef71085be5dc9416f20bfae95307b0002e26fc7483a64d15e98332e5c003a5caee153ac4d93c48e35ede96527d355119e2f94df7277441947e1cec8790a130762c02883e936b8e171b93b271615344c27006553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007c0000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet1IndexOutOfRange : EncodedVaa
+rtSetMessageFeeBySet1IndexOutOfRange = parseHexTextOrAbort "01000000010300a434cd956939773ce23f0122715912c499c5471bf6ead31928a24f75c9446d7e2117eb972f39f4cbd45a225e23cc4b3dc953b90ef9e0f785f7a84d088471b2c00101544e70e454b8ed2b1ebdd2939858d4ee23a9a1466ccffc395b50935c3cb13cc45fe556042bf920750ac9a39d6d30f9e09484fcbf0bfcef93271099741981f26c01072f145f7d78fa2d9725ce7929919103823accb865090ad63f4bf74b4fbfa358825e09a1c9e7840a3f9aa0d1ad0dea0a1c37a1fbc61fa7b03f90d934fe19213f4f006553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007d0000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtSetMessageFeeBySet0AfterUpgrade : EncodedVaa
+rtSetMessageFeeBySet0AfterUpgrade = parseHexTextOrAbort "01000000000100855cc536c7b1f4a46d9f3961c7e8bd93f6c903ad3bcbadd8217667ab4e4a3bb91284768f508b8e6c33f58824c3504088d8a801913041cfd122d024a7a87a13e4006553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007e0000000000000000000000000000000000000000000000000000000000436f726503004b0000000000000000000000000000000000000000000000000000000000000007"
+
+rtGuardianSetUpgradeZeroAddress : EncodedVaa
+rtGuardianSetUpgradeZeroAddress = parseHexTextOrAbort "010000000001004bbbc0ca638d89c490cd355cabb73cf6c6140fbb6ec962d1da99acf6fa214b8d72e8729c18db6823f5b3f57da5db0dfa9a7931c8a3fd0fdedfc071f937cb80de016553f1000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000007f0000000000000000000000000000000000000000000000000000000000436f726502004b0000000102befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe0000000000000000000000000000000000000000"
+
+rtGuardianSetUpgradeOnlyZeroAddress : EncodedVaa
+rtGuardianSetUpgradeOnlyZeroAddress = parseHexTextOrAbort "01000000000100e492378084ca0c359924129dba0451ac38d3794709d14106e658bf825638a3f273a990c813b73242e7ea4b32a8b1bc3e5c5ba69ee9e19b9c4b96cddcf4aad11c006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000800000000000000000000000000000000000000000000000000000000000436f726502004b00000001010000000000000000000000000000000000000000"
+
+rtGuardianSetUpgradeDuplicateAddress : EncodedVaa
+rtGuardianSetUpgradeDuplicateAddress = parseHexTextOrAbort "01000000000100f9073c67c138ae5fcbbf9e11dbe9e1c506503d85a43610362d53b4075958fe40354193c0728e53f3a69b1f037f949fd28799f87594536ed83ca32bfd6a56983a006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000810000000000000000000000000000000000000000000000000000000000436f726502004b000000010388d7d8b32a9105d228100e72dffe2fae0705d31c58076f561cc62a47087b567c86f986426dfcd00088d7d8b32a9105d228100e72dffe2fae0705d31c"
+
+rtAppMessageBySet0 : EncodedVaa
+rtAppMessageBySet0 = parseHexTextOrAbort "01000000000100b7548e756f828db7766338fe68d638879110c3ef200d3489668da6c0e0d23ddc264b61be4b4032da30b7a5e26fe45cde18139600c7322ad57c1090861e47a33f006553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000010068656c6c6f"
+
+rtAppMessageBySet1AllSigners : EncodedVaa
+rtAppMessageBySet1AllSigners = parseHexTextOrAbort "01000000010400a0d18db2827151f8e8b497be10f45c27d459f75ee9a685a84ff7dac2ba239d8f4dd45e15677ef227d0b0274077152bb77c1615e3f83328d5f307eea94565076f0001f2a11eacadc48dd34a74faadcd5f2e9985716100e615fa5b0c36c0df90d6e6171e7a8a1d4f9cd5fac23f15cdc0d4c836b15b23c7eeabeeaadb76e7bec533adf7010217d0da63523ad92d8e9fb57f7df9b46ee2fd61d7a10cca6ba84fd8ef3d43d36c47f86ea6054a541ab924fcdc8ba226f14cf489f1524ec42fa276a87ee1a023c60103f4b68b83c5fbf81927aa5450f38354a4984e953a8dd90e454168a5414c8a91101ff320ff15898eb8a63a412a1c4595ee5a745d9a0e71fc6fbd72edc71c8b2782006553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000030068656c6c6f"
+
+rtAppMessageEmptyPayloadBySet0 : EncodedVaa
+rtAppMessageEmptyPayloadBySet0 = parseHexTextOrAbort "01000000000100f1c92fe71d26b52b6d00ac8f41125d78fc241a10ec98adb5d09033d96601728f3acd881088e4bf15766be28b6a29e241790da92583cbe347301a9733e319cde6016553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa000000000000000200"
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+
+-- | Keys of set 1 that the upgrade does not carry over: devnet key 0 is a set 0 member.
+set1NewGuardianPublicKeys : [GuardianPublicKey]
+set1NewGuardianPublicKeys = [redTeamGuardianPubKey1, redTeamGuardianPubKey2, redTeamGuardianPubKey3]
+
+checkAttackFailedWith : Text -> Text -> Either SubmitError a -> Script ()
+checkAttackFailedWith attack expectedSubstring submitResult = do
+  assertMsg (attack <> ": the expected failure text is empty") (expectedSubstring /= "")
+  case submitResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> failureStatus.message)
+        (expectedSubstring `T.isInfixOf` failureStatus.message)
+    Left otherError ->
+      assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> show otherError)
+        (expectedSubstring `T.isInfixOf` show otherError)
+    Right _ -> abort (attack <> ": attack succeeded")
+
+isAttackAccepted : Either SubmitError a -> Bool
+isAttackAccepted submitResult = case submitResult of
+  Left _ -> False
+  Right _ -> True
+
+-- | Aborts with every accepted attack name, so one run reports all of them.
+checkNoAttackAccepted : Text -> [Text] -> Script ()
+checkNoAttackAccepted finding acceptedAttacks =
+  assertMsg (finding <> ": attacks accepted: " <> show acceptedAttacks) (null acceptedAttacks)
+
+submitGovernance : Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
+submitGovernance submitter coreStateCid encodedVAA = submit submitter do
+  exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA
+
+checkGovernanceRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> Script ()
+checkGovernanceRejectedWith attack expectedSubstring submitter coreStateCid encodedVAA = do
+  submitResult <- trySubmit submitter do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA
+  checkAttackFailedWith attack expectedSubstring submitResult
+
+verifyVAA : Party -> ContractId CoreState -> EncodedVaa -> Script VAA
+verifyVAA verifier coreStateCid encodedVAA = submit verifier do
+  exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA
+
+checkVerifyRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> Script ()
+checkVerifyRejectedWith attack expectedSubstring verifier coreStateCid encodedVAA = do
+  submitResult <- trySubmit verifier do
+    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA
+  checkAttackFailedWith attack expectedSubstring submitResult
+
+-- | Applies 'rtGuardianSetUpgradeToSet1', then attaches the keys of its new guardians.
+upgradeToSet1 : Party -> ContractId CoreState -> Script (ContractId CoreState)
+upgradeToSet1 guardianGovernance coreStateCid = do
+  upgradedCid <- submitGovernance guardianGovernance coreStateCid rtGuardianSetUpgradeToSet1
+  Some upgradedState <- queryContractId guardianGovernance upgradedCid
+  upgradedState.guardianSetIndex === 1
+  attachedPublicKeyCount (fromSome (Map.lookup 1 upgradedState.guardianSets)) === 1
+  set1CoreStateCid <- submit guardianGovernance do
+    exerciseCmd upgradedCid AttachGuardianPublicKeys with
+      submitter = guardianGovernance, targetGuardianSetIndex = 1, guardianPublicKeys = set1NewGuardianPublicKeys
+  Some set1CoreState <- queryContractId guardianGovernance set1CoreStateCid
+  attachedPublicKeyCount (fromSome (Map.lookup 1 set1CoreState.guardianSets)) === 4
+  pure set1CoreStateCid
+
+-- | @byteCount@ bytes of 0xab.
+hexPayloadOfBytes : Int -> MessagePayload
+hexPayloadOfBytes byteCount = parseHexTextOrAbort (mconcat (replicate byteCount "ab"))
+
+encodedVaaByteLength : EncodedVaa -> Int
+encodedVaaByteLength encodedVaa = byteLength (hexBytesOf encodedVaa)
+
+replaceVaaByteAt : Int -> Int -> EncodedVaa -> EncodedVaa
+replaceVaaByteAt byteOffset replacementByte encodedVaa =
+  let encoded = hexBytesOf encodedVaa
+  in parseHexBytesAsOrAbort (sliceBytes 0 byteOffset encoded <> intToHexByte replacementByte <> sliceFrom (byteOffset + 1) encoded)
+
+oneZeroBytePayload : MessagePayload
+oneZeroBytePayload = parseHexTextOrAbort "00"
+
+takeVaaBytes : Int -> EncodedVaa -> EncodedVaa
+takeVaaBytes byteCount encodedVaa = parseHexBytesAsOrAbort (sliceBytes 0 byteCount (hexBytesOf encodedVaa))
+
+appendVaaBytes : EncodedVaa -> HexBytes -> EncodedVaa
+appendVaaBytes encodedVaa suffixBytes = parseHexBytesAsOrAbort (hexBytesOf encodedVaa <> suffixBytes)
+
+----------------------------------------------------------------------
+-- A1: fee bypass
+----------------------------------------------------------------------
+
+-- | A fee-charging registry or a raised message fee cannot be skipped by
+-- omitting the CoreState or the allocation. Shadow-CoreState redirection on all
+-- three paths: Test.TestFees.test*PinsGuardianGovernance.
+testRedTeamA1FeeCannotBeSkipped : Script ()
+testRedTeamA1FeeCannotBeSkipped = do
+  (guardianGovernance, coreStateCid) <- setup
+  registrant <- allocateParty "RedTeamFeeRegistrant"
+  emitterCid <- registerEmitter guardianGovernance registrant
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  feeRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialEmitterRegistry registryParties 500)
+  feeRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeRegistryCid
+  registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
+    exerciseCmd feeRegistryCid RegisterEmitter with
+      requester = registrant, payer = registrant, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
+  checkAttackFailedWith "A1 RegisterEmitter without CoreState" "registration fee due" registerResult
+
+  feeRootRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialReplayRootRegistry registryParties 300)
+  feeRootRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeRootRegistryCid
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance registrant "redteam"
+  claimResult <- trySubmit (actAs registrant <> disclose feeRootRegistryDisclosure <> disclose claimedRootsNodeDisclosure) do
+    exerciseCmd feeRootRegistryCid ClaimReplayRoot with
+      consumer = registrant, namespace = "redteam", splitThreshold = 4
+      payer = registrant, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
+  checkAttackFailedWith "A1 ClaimReplayRoot without CoreState" "claim fee due" claimResult
+
+  feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeCoreStateCid
+  publishResult <- trySubmit (actAs registrant <> disclose coreStateDisclosure) do
+    exerciseCmd emitterCid PublishMessage with
+      nonce = 0, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+      coreStateCid = feeCoreStateCid, payer = registrant, feeAllocation = None
+  checkAttackFailedWith "A1 PublishMessage without allocation" "fee required" publishResult
+
+----------------------------------------------------------------------
+-- A6: guardian set
+----------------------------------------------------------------------
+
+testRedTeamA6GuardianSetUpgradeRules : Script ()
+testRedTeamA6GuardianSetUpgradeRules = do
+  (guardianGovernance, coreStateCid) <- setup
+  checkGovernanceRejectedWith "A6 upgrade skips an index" "index must be current + 1"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSkipsIndex
+  checkGovernanceRejectedWith "A6 upgrade to the same index" "index must be current + 1"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSameIndex
+  checkGovernanceRejectedWith "A6 upgrade from a wrong emitter chain" "wrong emitter chain"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterChain
+  checkGovernanceRejectedWith "A6 upgrade from a wrong emitter address" "wrong emitter address"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterAddress
+  checkGovernanceRejectedWith "A6 upgrade for another chain" "wrong target chain"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongTargetChain
+  checkGovernanceRejectedWith "A6 upgrade to an empty set" "empty set"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeEmptySet
+  checkGovernanceRejectedWith "A6 upgrade with a zero address" "zero address at position 1"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeZeroAddress
+  checkGovernanceRejectedWith "A6 upgrade to only a zero address" "zero address at position 0"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeOnlyZeroAddress
+  checkGovernanceRejectedWith "A6 upgrade with a duplicate address" "duplicate address"
+    guardianGovernance coreStateCid rtGuardianSetUpgradeDuplicateAddress
+
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
+  checkGovernanceRejectedWith "A6 upgrade to a lower index" "index must be current + 1"
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeLowerIndexBySet1
+  checkGovernanceRejectedWith "A6 replay of the applied upgrade" "not signed by current guardian set"
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeToSet1
+
+testRedTeamA6QuorumAndSignerOrder : Script ()
+testRedTeamA6QuorumAndSignerOrder = do
+  (guardianGovernance, coreStateCid) <- setup
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
+  checkGovernanceRejectedWith "A6 two of four signatures" "no quorum"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1BelowQuorum
+  checkGovernanceRejectedWith "A6 duplicate signer index" "strictly ascending"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1DuplicateSigner
+  checkGovernanceRejectedWith "A6 signatures out of order" "strictly ascending"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1SignersOutOfOrder
+  checkGovernanceRejectedWith "A6 key 3 signs as guardian 0" "invalid signature for guardian index 0"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex
+  attachKey3AgainResult <- trySubmit guardianGovernance do
+    exerciseCmd set1CoreStateCid AttachGuardianPublicKeys with
+      submitter = guardianGovernance, targetGuardianSetIndex = 1, guardianPublicKeys = [redTeamGuardianPubKey3]
+  checkAttackFailedWith "A6 key 3 attached a second time" "attach: public key already attached at position 3"
+    attachKey3AgainResult
+  checkGovernanceRejectedWith "A6 signer index out of range" "guardian index out of range"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange
+  supersededSetVAA <- verifyVAA guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade
+  supersededSetVAA.guardianSetIndex === 0
+  checkGovernanceRejectedWith "A6 governance by the superseded set" "not signed by current guardian set"
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade
+
+  feeCoreStateCid <- submitGovernance guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1Quorum
+  Some feeCoreState <- queryContractId guardianGovernance feeCoreStateCid
+  feeCoreState.messageFee === 7
+
+-- | The superseded set verifies application VAAs through the whole expiry second
+-- (EVM @Messages.sol@: rejects only when @expirationTime < block.timestamp@,
+-- with @block.timestamp@ in whole seconds).
+testRedTeamA6ExpiredGuardianSet : Script ()
+testRedTeamA6ExpiredGuardianSet = do
+  (guardianGovernance, coreStateCid) <- setup
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
+  verifiedAtUpgrade <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
+  verifiedAtUpgrade.guardianSetIndex === 0
+  passTime (seconds guardianSetExpirySeconds)
+  verifiedAtExpiry <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
+  verifiedAtExpiry.guardianSetIndex === 0
+  passTime (microseconds 999999)
+  verifiedAtLastMicrosecond <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
+  verifiedAtLastMicrosecond.guardianSetIndex === 0
+  passTime (microseconds 1)
+  checkVerifyRejectedWith "A6 VAA signed by an expired set" "guardian set has expired"
+    guardianGovernance set1CoreStateCid rtAppMessageBySet0
+
+----------------------------------------------------------------------
+-- A9: malformed VAAs
+----------------------------------------------------------------------
+
+testRedTeamA9MalformedEncodings : Script ()
+testRedTeamA9MalformedEncodings = do
+  (guardianGovernance, coreStateCid) <- setup
+  _ <- verifyVAA guardianGovernance coreStateCid govSetFeeVAA
+  let malformedCases =
+        -- Odd length, 0x prefix, non-hex and inputs under 57 bytes are
+        -- unrepresentable in 'EncodedVaa': Test.TestByteTypes and
+        -- canton/test/forged_byte_values_test.sh cover them.
+        [ ("A9 truncated signature", "sliceBytes: out of range", takeVaaBytes 60 govSetFeeVAA)
+        , ("A9 body missing its last byte", "invalid signature", takeVaaBytes (encodedVaaByteLength govSetFeeVAA - 1) govSetFeeVAA)
+        , ("A9 extra trailing byte", "invalid signature", appendVaaBytes govSetFeeVAA (intToHexByte 0))
+        , ("A9 signature count zero", "ArithmeticError", replaceVaaByteAt 5 0 govSetFeeVAA)
+        , ("A9 signature count two", "invalid signature", replaceVaaByteAt 5 2 govSetFeeVAA)
+        , ("A9 version two", "unsupported VAA version", replaceVaaByteAt 0 2 govSetFeeVAA)
+        , ("A9 version zero", "unsupported VAA version", replaceVaaByteAt 0 0 govSetFeeVAA)
+        ]
+  forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
+    checkVerifyRejectedWith attack expectedSubstring guardianGovernance coreStateCid encodedVAA
+  forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
+    checkGovernanceRejectedWith (attack <> " (governance)") expectedSubstring guardianGovernance coreStateCid encodedVAA
+
+testRedTeamA9MalformedGovernancePayloads : Script ()
+testRedTeamA9MalformedGovernancePayloads = do
+  (guardianGovernance, coreStateCid) <- setup
+  checkGovernanceRejectedWith "A9 TokenBridge module" "not the Core module"
+    guardianGovernance coreStateCid rtSetMessageFeeWrongModule
+  checkGovernanceRejectedWith "A9 RecoverChainId action" "unsupported action 5"
+    guardianGovernance coreStateCid rtRecoverChainIDUnsupported
+  checkGovernanceRejectedWith "A9 empty governance payload" "packet must be at least 35 bytes"
+    guardianGovernance coreStateCid rtGovernanceEmptyPayload
+  checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
+    guardianGovernance coreStateCid rtContractUpgradeTruncated
+  checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "governance: SetMessageFee fee exceeds the Int range"
+    guardianGovernance coreStateCid rtSetMessageFeeOverflowsInt64
+
+-- | EVM GovernanceStructs.sol requires @encoded.length == index@ for every
+-- action; a guardian-signed packet with trailing bytes must not apply.
+testRedTeamA9GovernancePayloadExactLength : Script ()
+testRedTeamA9GovernancePayloadExactLength = do
+  (setFeeGovernance, setFeeCoreStateCid) <- setup
+  setFeeResult <- trySubmit setFeeGovernance do
+    exerciseCmd setFeeCoreStateCid SubmitGovernanceVAA with
+      submitter = setFeeGovernance, encodedVAA = rtSetMessageFeeTrailingByte
+  (upgradeGovernance, upgradeCoreStateCid) <- setup
+  upgradeResult <- trySubmit upgradeGovernance do
+    exerciseCmd upgradeCoreStateCid SubmitGovernanceVAA with
+      submitter = upgradeGovernance, encodedVAA = rtGuardianSetUpgradeTrailingByte
+  checkNoAttackAccepted "A9 governance payload with a trailing byte"
+    ([ "SetMessageFee" | isAttackAccepted setFeeResult ] <> [ "GuardianSetUpgrade" | isAttackAccepted upgradeResult ])
+
+-- | Runs 'parseGovernance' in a transaction so its abort is a submit error.
+template GovernancePacketParser
+  with
+    parser : Party
+  where
+    signatory parser
+
+    nonconsuming choice ParseGovernancePacket : GovernanceAction
+      with
+        packet : MessagePayload
+      controller parser
+      do pure (parseGovernance packet)
+
+coreGovernanceHeader : Int -> HexBytes
+coreGovernanceHeader action = coreModule <> intToBytesN action 1 <> intToBytesN 75 2
+
+guardianSetUpgradePacket : Int -> [HexBytes] -> HexBytes
+guardianSetUpgradePacket declaredKeyCount guardianKeys =
+  coreGovernanceHeader 2 <> intToBytesN 1 4 <> intToBytesN declaredKeyCount 1 <> mconcat guardianKeys
+
+-- | The uint256 SetMessageFee fee and TransferFees amount parse only below 2^63
+-- (Daml Int max + 1); each larger word aborts with the field's range error.
+testParseGovernanceBoundsUint256AmountsToInt : Script ()
+testParseGovernanceBoundsUint256AmountsToInt = do
+  parser <- allocateParty "GovernanceAmountParser"
+  parserCid <- submit parser do createCmd GovernancePacketParser with parser
+  let repeatedBytes count byteHex = parseHexTextOrAbort @HexBytes (mconcat (replicate count byteHex))
+      maxIntAmount = 9223372036854775807
+      maxIntWord = intToBytesN maxIntAmount 32
+      twoPow63Word = repeatedBytes 24 "00" <> intToHexByte 128 <> repeatedBytes 7 "00"
+      twoPow64Word = repeatedBytes 23 "00" <> intToHexByte 1 <> repeatedBytes 8 "00"
+      twoPow255Word = intToHexByte 128 <> repeatedBytes 31 "00"
+      maxUint256Word = repeatedBytes 32 "ff"
+      recipient = repeatedBytes 32 "d4"
+      setMessageFeePacket feeWord = coreGovernanceHeader 3 <> feeWord
+      transferFeesPacket amountWord = coreGovernanceHeader 4 <> amountWord <> recipient
+      parsePacket packetBytes = trySubmit parser do
+        exerciseCmd parserCid ParseGovernancePacket with packet = parseHexBytesAsOrAbort packetBytes
+      acceptedCases =
+        [ ("SetMessageFee 0", setMessageFeePacket (intToBytesN 0 32), SetMessageFee with chain = 75, fee = 0)
+        , ("SetMessageFee 2^63 - 1", setMessageFeePacket maxIntWord, SetMessageFee with chain = 75, fee = maxIntAmount)
+        , ("TransferFees 0", transferFeesPacket (intToBytesN 0 32)
+          , TransferFees with chain = 75, amount = 0, recipient = parseHexBytesAsOrAbort recipient)
+        , ("TransferFees 2^63 - 1", transferFeesPacket maxIntWord
+          , TransferFees with chain = 75, amount = maxIntAmount, recipient = parseHexBytesAsOrAbort recipient)
+        ]
+      oversizedWords =
+        [ ("2^63", twoPow63Word)
+        , ("2^64", twoPow64Word)
+        , ("2^255", twoPow255Word)
+        , ("2^256 - 1", maxUint256Word)
+        ]
+      rejectedCases =
+        [ ("SetMessageFee " <> wordName, "governance: SetMessageFee fee exceeds the Int range", setMessageFeePacket amountWord)
+        | (wordName, amountWord) <- oversizedWords ] ++
+        [ ("TransferFees " <> wordName, "governance: TransferFees amount exceeds the Int range", transferFeesPacket amountWord)
+        | (wordName, amountWord) <- oversizedWords ]
+  byteLength maxIntWord === uint256WordBytes
+  maxGovernanceAmount === maxIntAmount
+  intToBytesN maxGovernanceAmount intWordBytes === parseHexTextOrAbort "7fffffffffffffff"
+  forA_ acceptedCases \(caseName, packetBytes, expectedAction) -> do
+    parseResult <- parsePacket packetBytes
+    case parseResult of
+      Right parsedAction -> parsedAction === expectedAction
+      Left parseError -> abort (caseName <> ": rejected: " <> show parseError)
+  forA_ rejectedCases \(caseName, expectedSubstring, packetBytes) -> do
+    parseResult <- parsePacket packetBytes
+    checkAttackFailedWith caseName expectedSubstring parseResult
+
+-- | Exact packet lengths of sdk/vaa/payloads.go: ContractUpgrade 67,
+-- GuardianSetUpgrade 40 + 20 * keys, SetMessageFee 67, TransferFees 99.
+testParseGovernanceRequiresExactPacketLength : Script ()
+testParseGovernanceRequiresExactPacketLength = do
+  parser <- allocateParty "GovernancePacketParser"
+  parserCid <- submit parser do createCmd GovernancePacketParser with parser
+  let repeatedBytes count byteHex = parseHexTextOrAbort @HexBytes (mconcat (replicate count byteHex))
+      takeBytes count packetBytes = sliceBytes 0 count packetBytes
+      guardianKeyA = repeatedBytes 20 "aa"
+      guardianKeyB = repeatedBytes 20 "bb"
+      contractUpgrade = coreGovernanceHeader 1 <> repeatedBytes 32 "c1"
+      setMessageFee = coreGovernanceHeader 3 <> intToBytesN 7 32
+      transferFees = coreGovernanceHeader 4 <> intToBytesN 9 32 <> repeatedBytes 32 "d4"
+      parsePacket packetBytes = trySubmit parser do
+        exerciseCmd parserCid ParseGovernancePacket with packet = parseHexBytesAsOrAbort packetBytes
+      acceptedCases =
+        [ (contractUpgrade, ContractUpgrade with chain = 75, newContract = parseHexBytesAsOrAbort (repeatedBytes 32 "c1"))
+        , (guardianSetUpgradePacket 1 [guardianKeyA], GuardianSetUpgrade with chain = 75, newIndex = 1, newKeys = map parseHexBytesAsOrAbort [guardianKeyA])
+        , (guardianSetUpgradePacket 2 [guardianKeyA, guardianKeyB], GuardianSetUpgrade with chain = 75, newIndex = 1, newKeys = map parseHexBytesAsOrAbort [guardianKeyA, guardianKeyB])
+        , (setMessageFee, SetMessageFee with chain = 75, fee = 7)
+        , (transferFees, TransferFees with chain = 75, amount = 9, recipient = parseHexBytesAsOrAbort (repeatedBytes 32 "d4"))
+        ]
+      -- An odd trailing nibble is unrepresentable in 'MessagePayload' (Test.TestByteTypes).
+      rejectedCases =
+        [ ("ContractUpgrade plus one byte", "ContractUpgrade packet must be 67 bytes", contractUpgrade <> intToHexByte 0)
+        , ("ContractUpgrade minus one byte", "ContractUpgrade packet must be 67 bytes", takeBytes 66 contractUpgrade)
+        , ("header minus one byte", "packet must be at least 35 bytes", takeBytes 34 contractUpgrade)
+        , ("GuardianSetUpgrade without its key count", "GuardianSetUpgrade packet must be at least 40 bytes", takeBytes 39 (guardianSetUpgradePacket 1 []))
+        , ("GuardianSetUpgrade plus one byte", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA] <> intToHexByte 0)
+        , ("GuardianSetUpgrade plus one undeclared key", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA, guardianKeyB])
+        , ("GuardianSetUpgrade missing a declared key", "GuardianSetUpgrade packet must be 80 bytes", guardianSetUpgradePacket 2 [guardianKeyA])
+        , ("SetMessageFee plus one byte", "SetMessageFee packet must be 67 bytes", setMessageFee <> intToHexByte 0)
+        , ("SetMessageFee minus one byte", "SetMessageFee packet must be 67 bytes", takeBytes 66 setMessageFee)
+        , ("TransferFees plus one byte", "TransferFees packet must be 99 bytes", transferFees <> intToHexByte 0)
+        , ("TransferFees minus one byte", "TransferFees packet must be 99 bytes", takeBytes 98 transferFees)
+        ]
+  forA_ acceptedCases \(packetBytes, expectedAction) -> do
+    parsedAction <- submit parser do
+      exerciseCmd parserCid ParseGovernancePacket with packet = parseHexBytesAsOrAbort packetBytes
+    parsedAction === expectedAction
+  forA_ rejectedCases \(attack, expectedSubstring, packetBytes) -> do
+    parseResult <- parsePacket packetBytes
+    checkAttackFailedWith attack expectedSubstring parseResult
+
+testRedTeamA9EmptyApplicationPayloadVerifies : Script ()
+testRedTeamA9EmptyApplicationPayloadVerifies = do
+  (guardianGovernance, coreStateCid) <- setup
+  verified <- verifyVAA guardianGovernance coreStateCid rtAppMessageEmptyPayloadBySet0
+  verified.payload === parseHexTextOrAbort ""
+  verified.sequence === 2
+
+-- | No core bridge caps the payload size. Each size publishes and takes the
+-- next sequence.
+testRedTeamA9PublishAcceptsAnyPayloadSize : Script ()
+testRedTeamA9PublishAcceptsAnyPayloadSize = do
+  (guardianGovernance, coreStateCid) <- setup
+  owner <- allocateParty "RedTeamPayloadSizeOwner"
+  emitterCid <- registerEmitter guardianGovernance owner
+  let payloadByteCounts = [0, 750, 751, 65536]
+      publishPayloadOfBytes (currentEmitterCid, expectedSequence) payloadByteCount = do
+        (successorCid, message) <- publishVia guardianGovernance coreStateCid owner currentEmitterCid 0 (hexPayloadOfBytes payloadByteCount) 0
+        message.payload === hexPayloadOfBytes payloadByteCount
+        message.sequence === expectedSequence
+        pure (successorCid, expectedSequence + 1)
+  (_, nextSequence) <- foldlA publishPayloadOfBytes (emitterCid, 0) payloadByteCounts
+  nextSequence === length payloadByteCounts
+
+-- | The watcher drops a message whose nonce / consistency level is outside
+-- uint32 / uint8 (cantongrpc.go decodeWormholeMessage). PublishMessage must
+-- reject them: an accepted one consumes a sequence number the guardians never
+-- sign. Malformed payloads: canton/test/forged_byte_values_test.sh.
+testRedTeamA9PublishRejectsFieldsTheWatcherDrops : Script ()
+testRedTeamA9PublishRejectsFieldsTheWatcherDrops = do
+  (guardianGovernance, coreStateCid) <- setup
+  owner <- allocateParty "RedTeamUndecodableOwner"
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  let undecodableCases =
+        [ ("nonce 2^32", 4294967296, oneZeroBytePayload, 0)
+        , ("negative nonce", -1, oneZeroBytePayload, 0)
+        , ("consistency level 256", 0, oneZeroBytePayload, 256)
+        , ("negative consistency level", 0, oneZeroBytePayload, -1)
+        ]
+      tryPublish (currentEmitterCid, acceptedAttacks) (attack, nonce, payload, consistencyLevel) = do
+        publishResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
+          exerciseCmd currentEmitterCid PublishMessage with
+            nonce, payload, consistencyLevel
+            coreStateCid, payer = owner, feeAllocation = None
+        pure $ case publishResult of
+          Right (successorCid, _) -> (successorCid, acceptedAttacks <> [attack])
+          Left _ -> (currentEmitterCid, acceptedAttacks)
+  (_, acceptedAttacks) <- foldlA tryPublish (emitterCid, []) undecodableCases
+  checkNoAttackAccepted "A9 PublishMessage fields the watcher drops" acceptedAttacks
+
+-- | Each field at its wire boundary publishes; one step past it aborts with a
+-- named reason, and a rejected publish does not advance the sequence.
+testRedTeamA9PublishFieldBoundaries : Script ()
+testRedTeamA9PublishFieldBoundaries = do
+  (guardianGovernance, coreStateCid) <- setup
+  owner <- allocateParty "RedTeamFieldBoundaryOwner"
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  let rejectedCases =
+        [ ("nonce 2^32", "nonce exceeds uint32", 4294967296, oneZeroBytePayload, 0)
+        , ("nonce -1", "nonce is negative", -1, oneZeroBytePayload, 0)
+        , ("consistency level 256", "consistency level exceeds uint8", 0, oneZeroBytePayload, 256)
+        , ("consistency level -1", "consistency level is negative", 0, oneZeroBytePayload, -1)
+        ]
+  forA_ rejectedCases \(attack, expectedSubstring, nonce, payload, consistencyLevel) -> do
+    publishResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
+      exerciseCmd emitterCid PublishMessage with
+        nonce, payload, consistencyLevel
+        coreStateCid, payer = owner, feeAllocation = None
+    checkAttackFailedWith ("A9 " <> attack) expectedSubstring publishResult
+  (emitterAfterMaxima, maximaMessage) <- publishVia guardianGovernance coreStateCid owner emitterCid 4294967295 oneZeroBytePayload 255
+  (maximaMessage.sequence, maximaMessage.nonce, maximaMessage.consistencyLevel) === (0, 4294967295, 255)
+  (_, minimaMessage) <- publishVia guardianGovernance coreStateCid owner emitterAfterMaxima 0 (parseHexTextOrAbort "") 0
+  (minimaMessage.sequence, minimaMessage.nonce, minimaMessage.consistencyLevel) === (1, 0, 0)
+
+----------------------------------------------------------------------
+-- A14: Emitter created outside RegisterEmitter
+----------------------------------------------------------------------
+
+testRedTeamA14PartyWithNoRoleCannotForgeThirdPartyEmitter : Script ()
+testRedTeamA14PartyWithNoRoleCannotForgeThirdPartyEmitter = do
+  (guardianGovernance, _) <- setup
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
+  victim <- allocateParty "RedTeamVictimOwner"
+  accomplice <- allocateParty "RedTeamAccomplice"
+  victimEmitterCid <- registerEmitter guardianGovernance victim
+  Some victimEmitter <- queryContractId victim victimEmitterCid
+  let forgedVictimEmitter = victimEmitter with sequence = 0
+  forA_ [ ("party with no role alone", actAs partyWithNoRole)
+        , ("party with no role and accomplice", actAs partyWithNoRole <> actAs accomplice)
+        , ("party with no role and guardianGovernance", actAs partyWithNoRole <> actAs guardianGovernance) ]
+    \(forgers, forgerAuthority) -> do
+      forgeResult <- trySubmit forgerAuthority do createCmd forgedVictimEmitter
+      checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "Authorization failure" forgeResult
+
+-- | guardianGovernance co-signs every 'Emitter' (A14-2), so an owner without
+-- guardianGovernance cannot create one outside 'RegisterEmitter': a rewound
+-- duplicate of an issued identity is refused.
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter : Script ()
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
+  (guardianGovernance, coreStateCid) <- setup
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
+  colludingOwner <- allocateParty "RedTeamColludingOwner"
+  colludingEmitterCid <- registerEmitter guardianGovernance colludingOwner
+  partyWithNoRoleEmitterCid <- registerEmitter guardianGovernance partyWithNoRole
+  (_, firstMessage) <- publishVia guardianGovernance coreStateCid colludingOwner colludingEmitterCid 1 (parseHexTextOrAbort "aa") 0
+  (_, partyWithNoRoleMessage) <- publishVia guardianGovernance coreStateCid partyWithNoRole partyWithNoRoleEmitterCid 2 (parseHexTextOrAbort "bb") 0
+  let rewoundEmitterOf owner message = Emitter with
+        guardianGovernance, owner
+        emitterId = message.emitterId
+        emitterAddress = emitterAddressFor guardianGovernance owner message.emitterId
+        sequence = message.sequence
+      duplicateAttempts =
+        [ ("owner alone", actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("party with no role and owner", actAs partyWithNoRole <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("party with no role as its own owner", actAs partyWithNoRole, rewoundEmitterOf partyWithNoRole partyWithNoRoleMessage)
+        , ("party with no role and guardianGovernance", actAs partyWithNoRole <> actAs guardianGovernance,
+            rewoundEmitterOf colludingOwner firstMessage)
+        ]
+  forA_ duplicateAttempts \(colluders, colluderAuthority, rewoundEmitter) -> do
+    duplicateResult <- trySubmit colluderAuthority do createCmd rewoundEmitter
+    checkAttackFailedWith ("A14 " <> colluders <> " duplicates an issued emitter") "Authorization failure" duplicateResult
+  guardianVisibleEmitters <- query @Emitter guardianGovernance
+  length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 1
+  length (filter (\(_, emitter) -> emitter.owner == partyWithNoRole) guardianVisibleEmitters) === 1
+
+-- | Exactly the owner and guardianGovernance sign an 'Emitter': both together
+-- can create one directly.
+testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance : Script ()
+testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance = do
+  (guardianGovernance, _) <- setup
+  owner <- allocateParty "RedTeamSignatoryOwner"
+  emitterCid <- submit (actAs owner <> actAs guardianGovernance) do
+    createCmd Emitter with
+      guardianGovernance, owner
+      emitterId = 0
+      emitterAddress = emitterAddressFor guardianGovernance owner 0
+      sequence = 0
+  Some emitter <- queryContractId guardianGovernance emitterCid
+  sort (signatory emitter) === sort [owner, guardianGovernance]
+
+-- | A registry reset with a reused id would give an honest owner's second
+-- emitter the address and sequence 0 of its first. guardianGovernance is the
+-- only signatory of 'EmitterRegistry', so a party with no role cannot create one
+-- that names the real guardianGovernance. A registry under a rogue
+-- guardianGovernance needs the rogue party's signature, and its emitters abort
+-- on the real 'CoreState' pin:
+-- Test.TestGuardianVisibility.testRogueGovernanceEmitterCannotPublishOnRealCoreState.
+testRedTeamA14PartyWithNoRoleCannotResetEmitterRegistry : Script ()
+testRedTeamA14PartyWithNoRoleCannotResetEmitterRegistry = do
+  (guardianGovernance, coreStateCid) <- setup
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
+  honestOwner <- allocateParty "RedTeamHonestOwner"
+  firstEmitterCid <- registerEmitter guardianGovernance honestOwner
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = partyWithNoRole
+  resetResult <- trySubmit (actAs partyWithNoRole) do
+    createCmd (mkInitialEmitterRegistry registryParties 0)
+  checkAttackFailedWith "A14 party with no role resets the EmitterRegistry" "Authorization failure" resetResult
+
+  [(realRegistryCid, realRegistry)] <- query @EmitterRegistry guardianGovernance
+  realRegistry.nextId === 1
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
+  let partyWithNoRoleAttacks =
+        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs partyWithNoRole <> disclose realRegistryDisclosure) do
+            archiveCmd realRegistryCid)
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs partyWithNoRole <> disclose realRegistryDisclosure) do
+            exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
+        ]
+  forA_ partyWithNoRoleAttacks \(attack, runAttack) -> do
+    attackResult <- runAttack
+    checkAttackFailedWith ("A14 party with no role " <> attack) "Authorization failure" attackResult
+  [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
+  survivingRegistryCid === realRegistryCid
+  survivingRegistry.nextId === 1
+
+  secondEmitterCid <- registerEmitter guardianGovernance honestOwner
+  (_, firstMessage) <- publishVia guardianGovernance coreStateCid honestOwner firstEmitterCid 1 (parseHexTextOrAbort "aa") 0
+  (_, secondMessage) <- publishVia guardianGovernance coreStateCid honestOwner secondEmitterCid 2 (parseHexTextOrAbort "bb") 0
+  firstMessage.emitterId === 0
+  secondMessage.emitterId === 1
+  assert (emitterAddressFor guardianGovernance honestOwner secondMessage.emitterId
+            /= emitterAddressFor guardianGovernance honestOwner firstMessage.emitterId)
+
+-- | A registry create or archive needs guardianGovernance: guardianGovernance
+-- alone succeeds, a stranger fails.
+testRedTeamA14RegistryNeedsGuardianGovernance : Script ()
+testRedTeamA14RegistryNeedsGuardianGovernance = do
+  (guardianGovernance, _) <- setup
+  stranger <- allocateParty "RedTeamRegistryStranger"
+  [(realRegistryCid, _)] <- query @EmitterRegistry guardianGovernance
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = stranger
+      strangerAttacks =
+        [ ("creates an EmitterRegistry", void <$> trySubmit (actAs stranger) do
+            createCmd (mkInitialEmitterRegistry registryParties 0))
+        , ("archives the real EmitterRegistry", void <$> trySubmit (actAs stranger <> disclose realRegistryDisclosure) do
+            archiveCmd realRegistryCid)
+        ]
+  forA_ strangerAttacks \(attack, runAttack) -> do
+    attackResult <- runAttack
+    checkAttackFailedWith ("A14 stranger " <> attack) "Authorization failure" attackResult
+  [(survivingRegistryCid, _)] <- query @EmitterRegistry guardianGovernance
+  survivingRegistryCid === realRegistryCid
+  secondRegistryCid <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
+  submit guardianGovernance do archiveCmd secondRegistryCid
+  submit guardianGovernance do archiveCmd realRegistryCid
+  remainingRegistries <- query @EmitterRegistry guardianGovernance
+  remainingRegistries === []
+
+----------------------------------------------------------------------
+-- R1: rolled-back publish
+----------------------------------------------------------------------
+
+-- | Publishes inside @try@, then throws, to make the publish a rollback node.
+template RollbackPublisher
+  with
+    owner : Party
+  where
+    signatory owner
+
+    nonconsuming choice PublishThenRollBack : ()
+      with
+        emitterCid   : ContractId Emitter
+        coreStateCid : ContractId CoreState
+      controller owner
+      do
+        try do
+          (_, rolledBackMessage) <- exercise emitterCid PublishMessage with
+            nonce = 91, payload = parseHexTextOrAbort "0bad", consistencyLevel = 0
+            coreStateCid, payer = owner, feeAllocation = None
+          throw (GeneralError ("red team rollback of sequence " <> show rolledBackMessage.sequence))
+        catch
+          GeneralError _ -> pure ()
+
+-- | A stream that surfaced rolled-back publishes would yield two VAAs for one
+-- (emitter, sequence). The engine rejects the rollback of the consuming
+-- PublishMessage, and the emitter keeps sequence 0.
+testRedTeamR1RollbackOfPublishRejected : Script ()
+testRedTeamR1RollbackOfPublishRejected = do
+  (guardianGovernance, coreStateCid) <- setup
+  owner <- allocateParty "RedTeamRollbackOwner"
+  emitterCid <- registerEmitter guardianGovernance owner
+  publisherCid <- submit owner do createCmd RollbackPublisher with owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  rollbackResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
+    exerciseCmd publisherCid PublishThenRollBack with emitterCid, coreStateCid
+  checkAttackFailedWith "R1 rolled-back publish" "rollback" rollbackResult
+  (_, committedMessage) <- publishVia guardianGovernance coreStateCid owner emitterCid 92 (parseHexTextOrAbort "600d") 0
+  committedMessage.sequence === 0
+
+----------------------------------------------------------------------
+-- F1-core: fee registry code runs with the authority of the allocation controllers
+----------------------------------------------------------------------
+
+data FeeChargePoint = ChargeOnPublish | ChargeOnRegisterEmitter | ChargeOnClaimReplayRoot
+  deriving (Eq, Show, Enum, Bounded)
+
+allFeeChargePoints : [FeeChargePoint]
+allFeeChargePoints = [minBound .. maxBound]
+
+-- | 10^-10 units. The message fee is what 'govSetFeeVAA' sets.
+feeDueAtChargePoint : FeeChargePoint -> Int
+feeDueAtChargePoint chargePoint = case chargePoint of
+  ChargeOnPublish -> 1000
+  ChargeOnRegisterEmitter -> 500
+  ChargeOnClaimReplayRoot -> 300
+
+data MessageFeeAtSetup = MessageFeeZero | MessageFeeRaised
+  deriving (Eq, Show)
+
+-- | A bridge whose registries charge a fee, with a mock fee registry.
+data PaidChargeBridge = PaidChargeBridge with
+    guardianGovernance          : Party
+    feeRecipient                : Party
+    feeRegistryAdmin            : Party
+    feeInstrument               : InstrumentId
+    coreStateCid                : ContractId CoreState
+    feeEmitterRegistryCid       : ContractId EmitterRegistry
+    feeReplayRootRegistryCid    : ContractId ReplayRootRegistry
+    publisher                   : Party
+    publisherEmitterCid         : ContractId Emitter
+    guardianGovernanceEmitterCid : ContractId Emitter
+
+setupPaidChargeBridge : MessageFeeAtSetup -> Script PaidChargeBridge
+setupPaidChargeBridge messageFeeAtSetup = do
+  feeRegistryAdmin <- allocateParty "F1HostileFeeRegistryAdmin"
+  let feeInstrument = InstrumentId with admin = feeRegistryAdmin, id = "MOCK"
+  (guardianGovernance, genesisCoreStateCid) <- setupWithInstrument (Some feeInstrument)
+  Some genesisCoreState <- queryContractId guardianGovernance genesisCoreStateCid
+  publisher <- allocateParty "F1Publisher"
+  publisherEmitterCid <- registerEmitter guardianGovernance publisher
+  guardianGovernanceEmitterCid <- registerEmitter guardianGovernance guardianGovernance
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  feeEmitterRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialEmitterRegistry registryParties (feeDueAtChargePoint ChargeOnRegisterEmitter))
+  feeReplayRootRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+  coreStateCid <- case messageFeeAtSetup of
+    MessageFeeZero -> pure genesisCoreStateCid
+    MessageFeeRaised -> submitGovernance guardianGovernance genesisCoreStateCid govSetFeeVAA
+  Some coreState <- queryContractId guardianGovernance coreStateCid
+  coreState.messageFee === (if messageFeeAtSetup == MessageFeeRaised then feeDueAtChargePoint ChargeOnPublish else 0)
+  pure PaidChargeBridge with
+    guardianGovernance, feeRecipient = genesisCoreState.feeRecipient
+    feeRegistryAdmin, feeInstrument, coreStateCid, feeEmitterRegistryCid
+    feeReplayRootRegistryCid, publisher, publisherEmitterCid, guardianGovernanceEmitterCid
+
+-- | Charges @payer@ at @chargePoint@ with @feeAllocation@. @publisher@ is the
+-- emitter owner, requester or consumer. An archived registry gives a
+-- contract-not-found failure.
+submitPaidCharge : PaidChargeBridge -> FeeChargePoint -> Party -> (ContractId Allocation, ExtraArgs) -> [Disclosure] -> Script (Either SubmitError ())
+submitPaidCharge bridge chargePoint payer feeAllocation extraDisclosures = do
+  coreStateDisclosure <- fromSome <$> queryDisclosure bridge.guardianGovernance bridge.coreStateCid
+  let submitOptions disclosures = actAs bridge.publisher <> actAs payer <> discloseMany (disclosures <> extraDisclosures)
+  case chargePoint of
+    ChargeOnPublish -> void <$> trySubmit (submitOptions [coreStateDisclosure]) do
+      exerciseCmd bridge.publisherEmitterCid PublishMessage with
+        nonce = 0, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+        coreStateCid = bridge.coreStateCid, payer, feeAllocation = Some feeAllocation
+    ChargeOnRegisterEmitter -> do
+      registryDisclosure <- queryDisclosure bridge.guardianGovernance bridge.feeEmitterRegistryCid
+      void <$> trySubmit (submitOptions (coreStateDisclosure :: optionalToList registryDisclosure)) do
+        exerciseCmd bridge.feeEmitterRegistryCid RegisterEmitter with
+          requester = bridge.publisher, payer
+          coreStateCid = Some bridge.coreStateCid, feeAllocation = Some feeAllocation
+          expectedGuardianGovernance = bridge.guardianGovernance
+    ChargeOnClaimReplayRoot -> do
+      registryDisclosure <- queryDisclosure bridge.guardianGovernance bridge.feeReplayRootRegistryCid
+      (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering bridge.guardianGovernance bridge.publisher "f1-core"
+      void <$> trySubmit (submitOptions (coreStateDisclosure :: claimedRootsNodeDisclosure :: optionalToList registryDisclosure)) do
+        exerciseCmd bridge.feeReplayRootRegistryCid ClaimReplayRoot with
+          consumer = bridge.publisher, namespace = "f1-core", splitThreshold = 4
+          payer, coreStateCid = Some bridge.coreStateCid, feeAllocation = Some feeAllocation
+          expectedGuardianGovernance = bridge.guardianGovernance, claimedRootsNodeCid
+
+-- | 'checkAttackFailedWith' as a value: 'Some' description when the outcome is
+-- not a failure that contains @expectedSubstring@.
+describeUnexpectedOutcome : Text -> Text -> Either SubmitError a -> Optional Text
+describeUnexpectedOutcome attack expectedSubstring submitResult = case submitResult of
+  Right _ -> Some (attack <> ": accepted")
+  Left (FailureStatusError failureStatus)
+    | expectedSubstring `T.isInfixOf` failureStatus.message -> None
+    | otherwise -> Some (attack <> ": failed with: " <> failureStatus.message)
+  Left otherError
+    | expectedSubstring `T.isInfixOf` show otherError -> None
+    | otherwise -> Some (attack <> ": failed with: " <> show otherError)
+
+checkFeeRecipientIsADistinctCustodyParty : PaidChargeBridge -> Script ()
+checkFeeRecipientIsADistinctCustodyParty bridge = do
+  assertMsg "feeRecipient is guardianGovernance" (bridge.feeRecipient /= bridge.guardianGovernance)
+
+-- | Fee registry code runs with the authority of the allocation controllers. It
+-- must not get guardianGovernance authority on any paid charge.
+testRedTeamF1FeeRegistryCannotActAsGuardianGovernance : Script ()
+testRedTeamF1FeeRegistryCannotActAsGuardianGovernance = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  let probedParties = [("guardianGovernance", bridge.guardianGovernance)]
+  unexpectedOutcomes <- forA [ (chargePoint, probed) | chargePoint <- allFeeChargePoints, probed <- probedParties ]
+    \(chargePoint, (probedPartyName, probedParty)) -> do
+      hostileAllocation <- allocateWithFeeRegistryAttack bridge.feeRegistryAdmin bridge.publisher bridge.feeRecipient
+        bridge.feeInstrument (feeToDecimal (feeDueAtChargePoint chargePoint)) (CreateProbeSignedBy probedParty)
+      attackResult <- submitPaidCharge bridge chargePoint bridge.publisher hostileAllocation []
+      pure (describeUnexpectedOutcome ("F1-core " <> show chargePoint <> " probe signed by " <> probedPartyName)
+        "Authorization failure" attackResult)
+  checkNoAttackAccepted "F1-core" (catOptionals unexpectedOutcomes)
+  guardianGovernanceProbes <- query @RegistryAuthorityProbe bridge.guardianGovernance
+  guardianGovernanceProbes === []
+  Some publisherEmitter <- queryContractId bridge.publisher bridge.publisherEmitterCid
+  publisherEmitter.sequence === 0
+  Some feeEmitterRegistry <- queryContractId bridge.guardianGovernance bridge.feeEmitterRegistryCid
+  feeEmitterRegistry.nextId === 0
+  collectedFees <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
+  collectedFees === 0.0
+
+-- | With guardianGovernance authority, fee registry code could publish on any
+-- emitter that guardianGovernance owns, and the guardians would sign it.
+testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter : Script ()
+testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter = do
+  bridge <- setupPaidChargeBridge MessageFeeZero
+  guardianGovernanceEmitterDisclosure <- fromSome <$> queryDisclosure bridge.guardianGovernance bridge.guardianGovernanceEmitterCid
+  let forgedPublish = PublishOnEmitter with
+        targetEmitterCid = bridge.guardianGovernanceEmitterCid
+        coreStateCid = bridge.coreStateCid
+        forgedPayload = parseHexTextOrAbort "f0"
+  unexpectedOutcomes <- forA [ChargeOnRegisterEmitter, ChargeOnClaimReplayRoot] \chargePoint -> do
+    hostileAllocation <- allocateWithFeeRegistryAttack bridge.feeRegistryAdmin bridge.publisher bridge.feeRecipient
+      bridge.feeInstrument (feeToDecimal (feeDueAtChargePoint chargePoint)) forgedPublish
+    attackResult <- submitPaidCharge bridge chargePoint bridge.publisher hostileAllocation [guardianGovernanceEmitterDisclosure]
+    pure (describeUnexpectedOutcome ("F1-core " <> show chargePoint <> " publishes on the guardianGovernance emitter")
+      "Authorization failure" attackResult)
+  checkNoAttackAccepted "F1-core" (catOptionals unexpectedOutcomes)
+  Some guardianGovernanceEmitter <- queryContractId bridge.guardianGovernance bridge.guardianGovernanceEmitterCid
+  guardianGovernanceEmitter.sequence === 0
+
+-- | Positive control for the probe harness. The fee registry acts as the fee
+-- recipient, which holds only collected fees of its own instrument.
+testFeeRegistryActsOnlyAsFeeCustody : Script ()
+testFeeRegistryActsOnlyAsFeeCustody = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  checkFeeRecipientIsADistinctCustodyParty bridge
+  forA_ allFeeChargePoints \chargePoint -> do
+    probeAllocation <- allocateWithFeeRegistryAttack bridge.feeRegistryAdmin bridge.publisher bridge.feeRecipient
+      bridge.feeInstrument (feeToDecimal (feeDueAtChargePoint chargePoint)) (CreateProbeSignedBy bridge.feeRecipient)
+    chargeResult <- submitPaidCharge bridge chargePoint bridge.publisher probeAllocation []
+    case chargeResult of
+      Right () -> pure ()
+      Left chargeError -> abort (show chargePoint <> ": paid charge rejected: " <> show chargeError)
+  feeCustodyProbes <- query @RegistryAuthorityProbe bridge.feeRecipient
+  map (\(_, probe) -> probe.probedParty) feeCustodyProbes === replicate (length allFeeChargePoints) bridge.feeRecipient
+
+-- | A privileged payer is an allocation controller, so a fee charge must not
+-- accept it. At fee 0 no registry code runs and the payer stays valid.
+testRedTeamF1PrivilegedPartyCannotPayAFee : Script ()
+testRedTeamF1PrivilegedPartyCannotPayAFee = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  let privilegedPayers =
+        [ (bridge.guardianGovernance, "fee payer must not be guardianGovernance")
+        ]
+  unexpectedOutcomes <- forA [ (chargePoint, payer) | chargePoint <- allFeeChargePoints, payer <- privilegedPayers ]
+    \(chargePoint, (payer, expectedFailure)) -> do
+      hostileAllocation <- allocateWithFeeRegistryAttack bridge.feeRegistryAdmin payer bridge.feeRecipient
+        bridge.feeInstrument (feeToDecimal (feeDueAtChargePoint chargePoint)) (CreateProbeSignedBy payer)
+      attackResult <- submitPaidCharge bridge chargePoint payer hostileAllocation []
+      pure (describeUnexpectedOutcome ("F1-core " <> show chargePoint <> ": " <> expectedFailure) expectedFailure attackResult)
+  checkNoAttackAccepted "F1-core privileged payer" (catOptionals unexpectedOutcomes)
+  guardianGovernanceProbes <- query @RegistryAuthorityProbe bridge.guardianGovernance
+  guardianGovernanceProbes === []
+
+  (guardianGovernance, freeCoreStateCid) <- setup
+  freePublisher <- allocateParty "F1FreePublisher"
+  freeEmitterCid <- registerEmitter guardianGovernance freePublisher
+  freeCoreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance freeCoreStateCid
+  (_, freeMessage) <- submit (actAs freePublisher <> actAs guardianGovernance <> disclose freeCoreStateDisclosure) do
+    exerciseCmd freeEmitterCid PublishMessage with
+      nonce = 0, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+      coreStateCid = freeCoreStateCid, payer = guardianGovernance, feeAllocation = None
+  freeMessage.sequence === 0
+
+data ExpectedCoreStateCreate
+  = CoreStateCreateCommits
+  | CoreStateCreateRejectedByEnsure
+  | CoreStateCreateRejectedForMissingAuthority
+  deriving (Eq, Show)
+
+-- | The fee recipient co-signs 'CoreState'. The fee recipient is not
+-- guardianGovernance. The fee instrument admin is neither guardianGovernance
+-- nor the fee recipient.
+testCoreStateFeeRecipientIsADistinctCustodyParty : Script ()
+testCoreStateFeeRecipientIsADistinctCustodyParty = do
+  guardianGovernance <- allocateParty "F1GenesisGovernance"
+  feeCustody <- allocateParty "F1GenesisFeeCustody"
+  feeInstrumentAdmin <- allocateParty "F1GenesisFeeInstrumentAdmin"
+  let genesisState feeRecipient admin = mkInitialCoreState guardianGovernance
+        solanaGovernanceChainId defaultGovernanceContract
+        (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+        (InstrumentId with admin, id = "UNUSED") feeRecipient
+      bothSigners = actAs guardianGovernance <> actAs feeCustody
+      -- Columns: case name | submitters | feeRecipient | fee instrument admin | expected outcome
+      genesisCases =
+        [ ("feeRecipient is guardianGovernance", bothSigners, guardianGovernance, feeInstrumentAdmin,
+            CoreStateCreateRejectedByEnsure)
+        , ("fee instrument admin is guardianGovernance", bothSigners, feeCustody, guardianGovernance,
+            CoreStateCreateRejectedByEnsure)
+        , ("fee instrument admin is feeCustody", bothSigners, feeCustody, feeCustody, CoreStateCreateRejectedByEnsure)
+        , ("guardianGovernance alone", actAs guardianGovernance, feeCustody, feeInstrumentAdmin,
+            CoreStateCreateRejectedForMissingAuthority)
+        , ("feeCustody alone", actAs feeCustody, feeCustody, feeInstrumentAdmin, CoreStateCreateRejectedForMissingAuthority)
+        , ("guardianGovernance and feeCustody", bothSigners, feeCustody, feeInstrumentAdmin, CoreStateCreateCommits)
+        ]
+  unexpectedOutcomes <- forA genesisCases \(caseName, submitters, feeRecipient, admin, expectedOutcome) -> do
+    createResult <- trySubmit submitters do createCmd (genesisState feeRecipient admin)
+    pure (describeUnexpectedCoreStateCreate caseName expectedOutcome createResult)
+  checkNoAttackAccepted "F1-core CoreState genesis" (catOptionals unexpectedOutcomes)
+  [(_, committedGenesisState)] <- query @CoreState guardianGovernance
+  sort (signatory committedGenesisState) === sort [guardianGovernance, feeCustody]
+
+-- | 'Some' description when @createResult@ does not match @expectedOutcome@.
+describeUnexpectedCoreStateCreate : Text -> ExpectedCoreStateCreate -> Either SubmitError a -> Optional Text
+describeUnexpectedCoreStateCreate caseName expectedOutcome createResult = case (expectedOutcome, createResult) of
+  (CoreStateCreateCommits, Right _) -> None
+  (CoreStateCreateCommits, Left createError) -> Some (caseName <> ": rejected: " <> show createError)
+  (CoreStateCreateRejectedByEnsure, Left (FailureStatusError failureStatus))
+    | "PreconditionFailed" `T.isInfixOf` failureStatus.errorId -> None
+  (CoreStateCreateRejectedForMissingAuthority, Left (AuthorizationError _)) -> None
+  (_, Right _) -> Some (caseName <> ": accepted")
+  (_, Left createError) -> Some (caseName <> ": expected " <> show expectedOutcome <> ", got: " <> show createError)
+
+-- | The 'CoreState' ensure holds the invariants that the genesis signers
+-- otherwise check by hand. Each row breaks exactly one invariant.
+testCoreStateEnsureRejectsInconsistentGenesis : Script ()
+testCoreStateEnsureRejectsInconsistentGenesis = do
+  guardianGovernance <- allocateParty "EnsureGovernance"
+  feeCustody <- allocateParty "EnsureFeeCustody"
+  feeInstrumentAdmin <- allocateParty "EnsureFeeInstrumentAdmin"
+  let consistentGenesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
+        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+        (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody
+      bothSigners = actAs guardianGovernance <> actAs feeCustody
+      -- Columns: case name | submitters | CoreState | expected outcome
+      genesisCases =
+        [ ("negative message fee", bothSigners, (consistentGenesisState with messageFee = -1),
+            CoreStateCreateRejectedByEnsure)
+        , ("no guardian set at guardianSetIndex", bothSigners, (consistentGenesisState with guardianSetIndex = 1),
+            CoreStateCreateRejectedByEnsure)
+        , ("zero message fee and guardian set 0", bothSigners, consistentGenesisState, CoreStateCreateCommits)
+        ]
+  unexpectedOutcomes <- forA genesisCases \(caseName, submitters, candidateState, expectedOutcome) -> do
+    createResult <- trySubmit submitters do createCmd candidateState
+    pure (describeUnexpectedCoreStateCreate caseName expectedOutcome createResult)
+  checkNoAttackAccepted "CoreState ensure" (catOptionals unexpectedOutcomes)
+
+-- | B1: the fee instrument admin signs every fee allocation, so the fee
+-- registry body runs with its authority. With guardianGovernance as the admin,
+-- an unrelated payer's paid claim publishes on a guardianGovernance emitter.
+-- Genesis must reject that admin. If genesis commits, the forged publish must
+-- still fail.
+testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter : Script ()
+testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
+  guardianGovernance <- allocateParty "B1Governance"
+  feeCustody <- allocateParty "B1FeeCustody"
+  unrelatedPayer <- allocateParty "B1UnrelatedPayer"
+  let guardianGovernanceInstrument = InstrumentId with admin = guardianGovernance, id = "GG-ADMINISTERED"
+      registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  genesisResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
+    createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+      (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) guardianGovernanceInstrument feeCustody)
+  case genesisResult of
+    Left _ -> checkNoAttackAccepted "B1 genesis"
+      (optionalToList (describeUnexpectedCoreStateCreate "fee instrument admin is guardianGovernance"
+        CoreStateCreateRejectedByEnsure genesisResult))
+    Right coreStateCid -> do
+      _ <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
+      guardianGovernanceEmitterCid <- registerEmitter guardianGovernance guardianGovernance
+      replayRootRegistryCid <- submit guardianGovernance do
+        createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+      claimedRootsNodeCid <- submit guardianGovernance do createCmd (mkInitialClaimedRootsNode guardianGovernance)
+      forgedPublishAllocation <- allocateWithFeeRegistryAttack guardianGovernance unrelatedPayer feeCustody
+        guardianGovernanceInstrument (feeToDecimal (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+        PublishOnEmitter with
+          targetEmitterCid = guardianGovernanceEmitterCid
+          coreStateCid
+          forgedPayload = parseHexTextOrAbort "f0"
+      coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+      registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance replayRootRegistryCid
+      emitterDisclosure <- fromSome <$> queryDisclosure guardianGovernance guardianGovernanceEmitterCid
+      claimedRootsNodeDisclosure <- fromSome <$> queryDisclosure guardianGovernance claimedRootsNodeCid
+      attackResult <- trySubmit (actAs unrelatedPayer
+          <> discloseMany [coreStateDisclosure, registryDisclosure, emitterDisclosure, claimedRootsNodeDisclosure]) do
+        exerciseCmd replayRootRegistryCid ClaimReplayRoot with
+          consumer = unrelatedPayer, namespace = "b1", splitThreshold = 4
+          payer = unrelatedPayer, coreStateCid = Some coreStateCid, feeAllocation = Some forgedPublishAllocation
+          expectedGuardianGovernance = guardianGovernance, claimedRootsNodeCid
+      checkNoAttackAccepted "B1 forged publish on the guardianGovernance emitter"
+        (optionalToList (describeUnexpectedOutcome "paid ClaimReplayRoot"
+          "fee instrument admin must not be guardianGovernance" attackResult))
+      Some guardianGovernanceEmitter <- queryContractId guardianGovernance guardianGovernanceEmitterCid
+      guardianGovernanceEmitter.sequence === 0
+      abort "B1: genesis accepted guardianGovernance as the fee instrument admin"
+
+-- | 'chargeFee' rejects each privileged party before it fetches the
+-- allocation, independent of the 'CoreState' ensure. Each rejected row breaks
+-- exactly one rule.
+testChargeFeeRejectsEachPrivilegedParty : Script ()
+testChargeFeeRejectsEachPrivilegedParty = do
+  harnessOwner <- allocateParty "DirectChargeHarnessOwner"
+  guardianGovernance <- allocateParty "DirectChargeGovernance"
+  feeCustody <- allocateParty "DirectChargeFeeCustody"
+  feeInstrumentAdmin <- allocateParty "DirectChargeFeeInstrumentAdmin"
+  payer <- allocateParty "DirectChargePayer"
+  harnessCid <- submit harnessOwner do createCmd DirectFeeChargeHarness with harnessOwner
+  let feeDue = 1000
+      instrumentAdministeredBy admin = InstrumentId with admin, id = "MOCK"
+      validInstrument = instrumentAdministeredBy feeInstrumentAdmin
+      validParties = FeeChargeParties with guardianGovernance, feeRecipient = feeCustody, payer
+      -- Columns: case name | parties | instrument | expected failure ("" = commits)
+      chargeCases =
+        [ ("payer is guardianGovernance", (validParties with payer = guardianGovernance), validInstrument,
+            "fee payer must not be guardianGovernance")
+        , ("fee recipient is guardianGovernance", (validParties with feeRecipient = guardianGovernance), validInstrument,
+            "fee recipient must not be guardianGovernance")
+        , ("fee instrument admin is guardianGovernance", validParties, instrumentAdministeredBy guardianGovernance,
+            "fee instrument admin must not be guardianGovernance")
+        , ("fee instrument admin is feeCustody", validParties, instrumentAdministeredBy feeCustody,
+            "fee instrument admin must not be feeCustody")
+        , ("no privileged party", validParties, validInstrument, "")
+        ]
+  unexpectedOutcomes <- forA chargeCases \(caseName, parties, instrument, expectedFailure) -> do
+    feeAllocation <- mintAndAllocate feeInstrumentAdmin payer feeCustody validInstrument (feeToDecimal feeDue)
+    chargeResult <- trySubmit (actAs harnessOwner <> actAs parties.payer <> actAs parties.feeRecipient) do
+      exerciseCmd harnessCid ChargeFeeDirectly with
+        feeChargeParties = parties, feeInstrument = instrument, feeDue, feeAllocation = Some feeAllocation
+    pure $ case (expectedFailure, chargeResult) of
+      ("", Right _) -> None
+      ("", Left chargeError) -> Some (caseName <> ": rejected: " <> show chargeError)
+      _ -> describeUnexpectedOutcome caseName expectedFailure chargeResult
+  checkNoAttackAccepted "chargeFee privileged parties" (catOptionals unexpectedOutcomes)
+  collectedFees <- mockBalance feeInstrumentAdmin feeCustody validInstrument
+  collectedFees === feeToDecimal feeDue
+
+-- | The 'CoreState' charge choices reject a guardianGovernance payer when a fee is due.
+testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer : Script ()
+testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  let payer = bridge.guardianGovernance
+      expectedFailure = "fee payer must not be guardianGovernance"
+  unexpectedOutcomes <- forA ["ChargeMessageFee", "ChargeFee"] \chargeChoice -> do
+    feeAllocation <- mintAndAllocate bridge.feeRegistryAdmin payer bridge.feeRecipient bridge.feeInstrument
+      (feeToDecimal (feeDueAtChargePoint ChargeOnPublish))
+    coreStateDisclosure <- fromSome <$> queryDisclosure bridge.guardianGovernance bridge.coreStateCid
+    chargeResult <- trySubmit (actAs payer <> disclose coreStateDisclosure) $
+      if chargeChoice == "ChargeMessageFee"
+        then void (exerciseCmd bridge.coreStateCid ChargeMessageFee with payer, feeAllocation = Some feeAllocation)
+        else void (exerciseCmd bridge.coreStateCid ChargeFee with
+          payer, fee = feeDueAtChargePoint ChargeOnPublish, feeAllocation = Some feeAllocation)
+    pure (describeUnexpectedOutcome (chargeChoice <> ": " <> expectedFailure) expectedFailure chargeResult)
+  checkNoAttackAccepted "F1-core CoreState charge choices" (catOptionals unexpectedOutcomes)
+  collectedFees <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
+  collectedFees === 0.0
+
+-- | Every charge point pays the fee recipient, and guardianGovernance holds no fees.
+testFeeCustodyReceivesFeesOnEveryChargePoint : Script ()
+testFeeCustodyReceivesFeesOnEveryChargePoint = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  checkFeeRecipientIsADistinctCustodyParty bridge
+  forA_ allFeeChargePoints \chargePoint -> do
+    feeAllocation <- mintAndAllocate bridge.feeRegistryAdmin bridge.publisher bridge.feeRecipient
+      bridge.feeInstrument (feeToDecimal (feeDueAtChargePoint chargePoint))
+    chargeResult <- submitPaidCharge bridge chargePoint bridge.publisher feeAllocation []
+    case chargeResult of
+      Right () -> pure ()
+      Left chargeError -> abort (show chargePoint <> ": paid charge rejected: " <> show chargeError)
+  feeCustodyBalance <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
+  feeCustodyBalance === feeToDecimal (sum (map feeDueAtChargePoint allFeeChargePoints))
+  guardianGovernanceBalance <- mockBalance bridge.feeRegistryAdmin bridge.guardianGovernance bridge.feeInstrument
+  guardianGovernanceBalance === 0.0

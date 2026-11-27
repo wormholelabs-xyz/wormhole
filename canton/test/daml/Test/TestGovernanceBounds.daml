@@ -1,0 +1,483 @@
+-- | Capacities and eviction rules of the 'CoreState' governance collections:
+-- 'consumedGovernance' with its timestamp floor, and 'guardianSets'.
+module Test.TestGovernanceBounds where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import DA.Time (RelTime, addRelTime, hours, seconds)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Wormhole.Core.VAA (parseVAA)
+import Test.TestCore
+  ( checkCoreStateCreateOutcome, devnetGenesisGuardian, devnetGuardianMember, devnetGuardianSet1Key
+  , govContractUpgradeVAA, govGuardianSetUpgrade7To8VAA, govGuardianSetUpgradeVAA, govSetFeeVAA
+  , govSetFeeVAASignedBySet7, govTransferFeesVAA, nonZeroGenesisGuardianSetIndex, numberCases
+  , devnetGuardianSet1PubKey, set0SetFeeZeroVAA )
+import Test.TestRedTeamCore (checkAttackFailedWith)
+
+----------------------------------------------------------------------
+-- Fixtures
+----------------------------------------------------------------------
+
+timestampOf : EncodedVaa -> Int
+timestampOf encodedVAA = (parseVAA encodedVAA).timestamp
+
+digestOfVAA : EncodedVaa -> VaaDigest
+digestOfVAA encodedVAA = (parseVAA encodedVAA).hash
+
+-- | @position + 1@ as 32 big-endian bytes; distinct from each fixture VAA digest.
+syntheticDigest : Int -> VaaDigest
+syntheticDigest position = parseHexBytesAsOrAbort (intToBytesN (position + 1) 32)
+
+-- | @digestCount@ synthetic digests; entry @position@ has timestamp @firstTimestampSeconds + position * timestampStepSeconds@.
+syntheticConsumedGovernance : Int -> Int -> Int -> Map VaaDigest Int
+syntheticConsumedGovernance digestCount firstTimestampSeconds timestampStepSeconds =
+  Map.fromList
+    [ (syntheticDigest position, firstTimestampSeconds + position * timestampStepSeconds)
+    | position <- [0 .. digestCount - 1] ]
+
+-- | A genesis 'CoreState' value at @genesisIndex@ with fresh parties, for the caller to reshape and create.
+genesisStateWithLabel : Text -> Int -> Script CoreState
+genesisStateWithLabel partyLabel genesisIndex = do
+  guardianGovernance <- allocateParty ("BoundsGovernance" <> partyLabel)
+  feeCustody <- allocateParty ("BoundsFeeCustody" <> partyLabel)
+  placeholderFeeInstrumentAdmin <- allocateParty ("BoundsUnusedFeeInstrumentAdmin" <> partyLabel)
+  pure (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGenesisGuardian]
+          (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") feeCustody)
+
+tryCreateCoreState : CoreState -> Script (Either SubmitError (ContractId CoreState))
+tryCreateCoreState coreState =
+  trySubmit (actAs coreState.guardianGovernance <> actAs coreState.feeRecipient) do createCmd coreState
+
+createCoreState : CoreState -> Script (ContractId CoreState)
+createCoreState coreState =
+  submit (actAs coreState.guardianGovernance <> actAs coreState.feeRecipient) do createCmd coreState
+
+-- | Submits as guardianGovernance with the devnet key hint; each fixture is signed by devnet key 0.
+trySubmitGovernanceVAA : Party -> ContractId CoreState -> EncodedVaa -> Script (Either SubmitError (ContractId CoreState))
+trySubmitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
+  trySubmit guardianGovernance do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with
+      submitter = guardianGovernance
+      encodedVAA
+
+submitGovernanceVAA : Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
+submitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
+  submit guardianGovernance do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with
+      submitter = guardianGovernance
+      encodedVAA
+
+readCoreState : Party -> ContractId CoreState -> Script CoreState
+readCoreState guardianGovernance coreStateCid =
+  fromSome <$> queryContractId guardianGovernance coreStateCid
+
+-- | Any valid timestamp below every fixture VAA timestamp.
+syntheticBaseTimestampSeconds : Int
+syntheticBaseTimestampSeconds = 1600000000
+
+----------------------------------------------------------------------
+-- 1. CoreState precondition
+----------------------------------------------------------------------
+
+data CoreStateShapeCase = CoreStateShapeCase with
+    caseName      : Text
+    reshape       : CoreState -> CoreState
+    isAccepted    : Bool
+
+previousGuardianSetExpiringAt : Time -> GuardianSet
+previousGuardianSetExpiringAt expiry = GuardianSet with
+  members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey]
+  expirationTime = Some expiry
+
+-- | @previousCount@ previous sets directly below @currentIndex@, all expiring at @expiry@, plus the current set.
+guardianSetsWithPrevious : Int -> Int -> Time -> Map Int GuardianSet
+guardianSetsWithPrevious currentIndex previousCount expiry =
+  Map.fromList
+    ( (currentIndex, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
+    :: [ (currentIndex - previousCount + position, previousGuardianSetExpiringAt expiry)
+       | position <- [0 .. previousCount - 1] ] )
+
+maxVAATimestampSeconds : Int
+maxVAATimestampSeconds = 4294967295
+
+-- | The 'CoreState' precondition enforces each capacity and the floor invariant.
+testCoreStatePreconditionBoundsGovernanceCollections : Script ()
+testCoreStatePreconditionBoundsGovernanceCollections = do
+  now <- getTime
+  let withDigests digestCount state =
+        state with consumedGovernance = syntheticConsumedGovernance digestCount syntheticBaseTimestampSeconds 1
+      withFloor floorSeconds state = state with evictedGovernanceMaxTimestampSeconds = floorSeconds
+      withOneDigestAt timestampSeconds state =
+        state with consumedGovernance = Map.fromList [(syntheticDigest 0, timestampSeconds)]
+      withPreviousSets previousCount state =
+        state with guardianSets = guardianSetsWithPrevious state.guardianSetIndex previousCount (addRelTime now (hours 1))
+      cases =
+        [ CoreStateShapeCase "no digests" identity True
+        , CoreStateShapeCase "digests at capacity - 1" (withDigests (maxRetainedGovernanceDigests - 1)) True
+        , CoreStateShapeCase "digests at capacity" (withDigests maxRetainedGovernanceDigests) True
+        , CoreStateShapeCase "digests at capacity + 1" (withDigests (maxRetainedGovernanceDigests + 1)) False
+        , CoreStateShapeCase "floor below each retained timestamp"
+            (withFloor (Some (syntheticBaseTimestampSeconds - 1)) . withDigests 2) True
+        , CoreStateShapeCase "retained timestamp at the floor"
+            (withFloor (Some syntheticBaseTimestampSeconds) . withDigests 2) False
+        , CoreStateShapeCase "floor with no digests" (withFloor (Some syntheticBaseTimestampSeconds)) True
+        , CoreStateShapeCase "floor 0" (withFloor (Some 0) . withOneDigestAt 1) True
+        , CoreStateShapeCase "floor below 0" (withFloor (Some (-1))) False
+        , CoreStateShapeCase "floor at uint32 max" (withFloor (Some maxVAATimestampSeconds)) True
+        , CoreStateShapeCase "floor above uint32" (withFloor (Some (maxVAATimestampSeconds + 1))) False
+        , CoreStateShapeCase "retained timestamp 0" (withOneDigestAt 0) True
+        , CoreStateShapeCase "retained timestamp below 0" (withOneDigestAt (-1)) False
+        , CoreStateShapeCase "retained timestamp at uint32 max" (withOneDigestAt maxVAATimestampSeconds) True
+        , CoreStateShapeCase "retained timestamp above uint32" (withOneDigestAt (maxVAATimestampSeconds + 1)) False
+        , CoreStateShapeCase "guardian sets at capacity" (withPreviousSets (maxStoredGuardianSets - 1)) True
+        , CoreStateShapeCase "guardian sets at capacity + 1" (withPreviousSets maxStoredGuardianSets) False
+        ]
+  forA_ (numberCases cases) \(caseNumber, shapeCase) -> do
+    genesisState <- genesisStateWithLabel ("Shape" <> show caseNumber) nonZeroGenesisGuardianSetIndex
+    tryCreateCoreState (shapeCase.reshape genesisState)
+      >>= checkCoreStateCreateOutcome shapeCase.caseName shapeCase.isAccepted
+
+----------------------------------------------------------------------
+-- 2. Digest capacity boundaries
+----------------------------------------------------------------------
+
+data DigestCapacityCase = DigestCapacityCase with
+    caseName                      : Text
+    prefilledDigestCount          : Int
+    prefilledFirstTimestampSeconds : Int
+    prefilledTimestampStepSeconds : Int
+    expectedDigestCount           : Int
+    expectedFloor                 : Optional Int
+    expectNewDigestRetained       : Bool
+
+-- | 'govSetFeeVAA' on a prefilled map: growth below capacity, eviction at capacity.
+testGovernanceDigestCapacityBoundaries : Script ()
+testGovernanceDigestCapacityBoundaries = do
+  let feeTimestamp = timestampOf govSetFeeVAA
+      cases =
+        [ DigestCapacityCase "capacity - 2 prefilled" (maxRetainedGovernanceDigests - 2) syntheticBaseTimestampSeconds 1
+            (maxRetainedGovernanceDigests - 1) None True
+        , DigestCapacityCase "capacity - 1 prefilled" (maxRetainedGovernanceDigests - 1) syntheticBaseTimestampSeconds 1
+            maxRetainedGovernanceDigests None True
+        , DigestCapacityCase "capacity prefilled, oldest synthetic evicted" maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 1
+            maxRetainedGovernanceDigests (Some syntheticBaseTimestampSeconds) True
+        , DigestCapacityCase "capacity prefilled at one timestamp, each tie evicted" maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 0
+            1 (Some syntheticBaseTimestampSeconds) True
+        , DigestCapacityCase "capacity prefilled, newer than the VAA, the VAA evicted at once" maxRetainedGovernanceDigests (feeTimestamp + 1) 1
+            maxRetainedGovernanceDigests (Some feeTimestamp) False
+        ]
+  forA_ (numberCases cases) \(caseNumber, capacityCase) -> do
+    genesisState <- genesisStateWithLabel ("Capacity" <> show caseNumber) 0
+    let gg = genesisState.guardianGovernance
+    coreStateCid <- createCoreState genesisState with
+      consumedGovernance = syntheticConsumedGovernance capacityCase.prefilledDigestCount
+        capacityCase.prefilledFirstTimestampSeconds capacityCase.prefilledTimestampStepSeconds
+    successorCid <- submitGovernanceVAA gg coreStateCid govSetFeeVAA
+    successor <- readCoreState gg successorCid
+    Map.size successor.consumedGovernance === capacityCase.expectedDigestCount
+    successor.evictedGovernanceMaxTimestampSeconds === capacityCase.expectedFloor
+    Map.member (digestOfVAA govSetFeeVAA) successor.consumedGovernance === capacityCase.expectNewDigestRetained
+    successor.messageFee === 1000
+    replayResult <- trySubmitGovernanceVAA gg successorCid govSetFeeVAA
+    checkAttackFailedWith ("replay after " <> capacityCase.caseName)
+      (if capacityCase.expectNewDigestRetained then "governance: action already consumed" else evictedFloorErrorText)
+      replayResult
+
+evictedFloorErrorText : Text
+evictedFloorErrorText = "governance: VAA timestamp at or below the evicted governance timestamp floor"
+
+----------------------------------------------------------------------
+-- 3. Replay of an evicted digest
+----------------------------------------------------------------------
+
+-- | A later VAA evicts 'govSetFeeVAA'; its replay fails on the floor and changes nothing.
+testEvictedGovernanceDigestReplayRejected : Script ()
+testEvictedGovernanceDigestReplayRejected = do
+  genesisState <- genesisStateWithLabel "EvictedReplay" 0
+  let gg = genesisState.guardianGovernance
+      feeTimestamp = timestampOf govSetFeeVAA
+  assertMsg "fixture order" (feeTimestamp + maxRetainedGovernanceDigests < timestampOf set0SetFeeZeroVAA)
+  coreStateCid <- createCoreState genesisState with
+    consumedGovernance = syntheticConsumedGovernance (maxRetainedGovernanceDigests - 1) (feeTimestamp + 1) 1
+  feeCid <- submitGovernanceVAA gg coreStateCid govSetFeeVAA
+  feeState <- readCoreState gg feeCid
+  Map.size feeState.consumedGovernance === maxRetainedGovernanceDigests
+  feeState.evictedGovernanceMaxTimestampSeconds === None
+  zeroFeeCid <- submitGovernanceVAA gg feeCid set0SetFeeZeroVAA
+  zeroFeeState <- readCoreState gg zeroFeeCid
+  Map.size zeroFeeState.consumedGovernance === maxRetainedGovernanceDigests
+  Map.member (digestOfVAA govSetFeeVAA) zeroFeeState.consumedGovernance === False
+  Map.member (digestOfVAA set0SetFeeZeroVAA) zeroFeeState.consumedGovernance === True
+  zeroFeeState.evictedGovernanceMaxTimestampSeconds === Some feeTimestamp
+  zeroFeeState.messageFee === 0
+  replayResult <- trySubmitGovernanceVAA gg zeroFeeCid govSetFeeVAA
+  checkAttackFailedWith "replay of the evicted digest" evictedFloorErrorText replayResult
+  afterReplay <- readCoreState gg zeroFeeCid
+  afterReplay === zeroFeeState
+
+----------------------------------------------------------------------
+-- 4. Floor boundary
+----------------------------------------------------------------------
+
+-- | A VAA passes only with a timestamp strictly above the floor.
+testGovernanceTimestampFloorBoundary : Script ()
+testGovernanceTimestampFloorBoundary = do
+  let transferTimestamp = timestampOf govTransferFeesVAA
+      cases =
+        [ ("no floor", None, True)
+        , ("floor at timestamp - 1", Some (transferTimestamp - 1), True)
+        , ("floor at timestamp", Some transferTimestamp, False)
+        , ("floor at timestamp + 1", Some (transferTimestamp + 1), False)
+        ]
+  forA_ (numberCases cases) \(caseNumber, (caseName, floorSeconds, isAccepted)) -> do
+    genesisState <- genesisStateWithLabel ("Floor" <> show caseNumber) 0
+    let gg = genesisState.guardianGovernance
+    coreStateCid <- createCoreState genesisState with evictedGovernanceMaxTimestampSeconds = floorSeconds
+    result <- trySubmitGovernanceVAA gg coreStateCid govTransferFeesVAA
+    case (isAccepted, result) of
+      (True, Right successorCid) -> do
+        successor <- readCoreState gg successorCid
+        successor.evictedGovernanceMaxTimestampSeconds === floorSeconds
+        Map.keys successor.consumedGovernance === [digestOfVAA govTransferFeesVAA]
+      (True, Left submitError) -> abort (caseName <> ": rejected: " <> show submitError)
+      (False, _) -> checkAttackFailedWith caseName evictedFloorErrorText result
+
+----------------------------------------------------------------------
+-- 5. Replay after a guardian set upgrade
+----------------------------------------------------------------------
+
+-- | After the 0 to 1 upgrade, each set-0 governance VAA fails on the current-index check.
+-- The upgrade keeps the digests of set 0 and leaves the floor at None.
+testGuardianSetUpgradeReplayRejectedByCurrentIndex : Script ()
+testGuardianSetUpgradeReplayRejectedByCurrentIndex = do
+  genesisState <- genesisStateWithLabel "UpgradeReplay" 0
+  let gg = genesisState.guardianGovernance
+  coreStateCid <- createCoreState genesisState
+  contractUpgradeCid <- submitGovernanceVAA gg coreStateCid govContractUpgradeVAA
+  upgradedCid <- submitGovernanceVAA gg contractUpgradeCid govGuardianSetUpgradeVAA
+  upgraded <- readCoreState gg upgradedCid
+  upgraded.guardianSetIndex === 1
+  Map.keys upgraded.consumedGovernance
+    === Map.keys (Map.fromList [(digestOfVAA govContractUpgradeVAA, ()), (digestOfVAA govGuardianSetUpgradeVAA, ())])
+  upgraded.evictedGovernanceMaxTimestampSeconds === None
+  forA_ [("upgrade VAA", govGuardianSetUpgradeVAA), ("contract upgrade VAA", govContractUpgradeVAA), ("fee VAA", govSetFeeVAA)]
+    \(caseName, encodedVAA) -> do
+      result <- trySubmitGovernanceVAA gg upgradedCid encodedVAA
+      checkAttackFailedWith caseName "governance: not signed by current guardian set" result
+  readCoreState gg upgradedCid >>= (=== upgraded)
+
+----------------------------------------------------------------------
+-- 6. Guardian set pruning
+----------------------------------------------------------------------
+
+data GuardianSetPruneCase = GuardianSetPruneCase with
+    caseName             : Text
+    previousSets         : [(Int, RelTime)]  -- (index, expiry offset from now)
+    encodedVAA           : EncodedVaa
+    expectedStoredIndices : [Int]
+
+-- | From genesis 7: each governance transition drops expired sets; an upgrade beyond capacity drops the lowest index.
+testGovernancePrunesStoredGuardianSets : Script ()
+testGovernancePrunesStoredGuardianSets = do
+  now <- getTime
+  let current = nonZeroGenesisGuardianSetIndex
+      upgraded = current + 1
+      unexpired = hours 1
+      expired = seconds (-1)
+      expiringNow = seconds 0
+      unexpiredPrevious previousCount =
+        [ (current - previousCount + position, unexpired) | position <- [0 .. previousCount - 1] ]
+      indicesOf sets = map fst sets
+      cases =
+        [ GuardianSetPruneCase "upgrade with no previous set" [] govGuardianSetUpgrade7To8VAA [current, upgraded]
+        , GuardianSetPruneCase "upgrade to capacity - 1 sets" (unexpiredPrevious (maxStoredGuardianSets - 3))
+            govGuardianSetUpgrade7To8VAA (indicesOf (unexpiredPrevious (maxStoredGuardianSets - 3)) <> [current, upgraded])
+        , GuardianSetPruneCase "upgrade to capacity sets" (unexpiredPrevious (maxStoredGuardianSets - 2))
+            govGuardianSetUpgrade7To8VAA (indicesOf (unexpiredPrevious (maxStoredGuardianSets - 2)) <> [current, upgraded])
+        , GuardianSetPruneCase "upgrade to capacity + 1 sets drops the lowest index" (unexpiredPrevious (maxStoredGuardianSets - 1))
+            govGuardianSetUpgrade7To8VAA (drop 1 (indicesOf (unexpiredPrevious (maxStoredGuardianSets - 1))) <> [current, upgraded])
+        , GuardianSetPruneCase "upgrade drops expired sets" [(current - 2, expired), (current - 1, expired)]
+            govGuardianSetUpgrade7To8VAA [current, upgraded]
+        , GuardianSetPruneCase "upgrade keeps a set that expires now" [(current - 1, expiringNow)]
+            govGuardianSetUpgrade7To8VAA [current - 1, current, upgraded]
+        , GuardianSetPruneCase "upgrade at capacity with one expired set drops only the expired set"
+            ((current - 3, expired) :: unexpiredPrevious 2) govGuardianSetUpgrade7To8VAA [current - 2, current - 1, current, upgraded]
+        , GuardianSetPruneCase "fee VAA drops expired sets" [(current - 2, expired), (current - 1, unexpired)]
+            govSetFeeVAASignedBySet7 [current - 1, current]
+        , GuardianSetPruneCase "fee VAA at capacity keeps each unexpired set" (unexpiredPrevious (maxStoredGuardianSets - 1))
+            govSetFeeVAASignedBySet7 (indicesOf (unexpiredPrevious (maxStoredGuardianSets - 1)) <> [current])
+        ]
+  forA_ (numberCases cases) \(caseNumber, pruneCase) -> do
+    genesisState <- genesisStateWithLabel ("Prune" <> show caseNumber) current
+    let gg = genesisState.guardianGovernance
+        storedSets = foldl
+          (\sets (index, expiryOffset) -> Map.insert index (previousGuardianSetExpiringAt (addRelTime now expiryOffset)) sets)
+          genesisState.guardianSets pruneCase.previousSets
+    coreStateCid <- createCoreState genesisState with guardianSets = storedSets
+    successorCid <- submitGovernanceVAA gg coreStateCid pruneCase.encodedVAA
+    successor <- readCoreState gg successorCid
+    assertMsg (pruneCase.caseName <> ": stored indices " <> show (Map.keys successor.guardianSets))
+      (Map.keys successor.guardianSets == pruneCase.expectedStoredIndices)
+    assertMsg (pruneCase.caseName <> ": over capacity") (Map.size successor.guardianSets <= maxStoredGuardianSets)
+
+----------------------------------------------------------------------
+-- 6b. GuardianSetUpgrade below the floor
+----------------------------------------------------------------------
+
+data UpgradeBelowFloorCase = UpgradeBelowFloorCase with
+    caseName           : Text
+    floorOffsetSeconds : Int  -- floor = VAA timestamp + offset
+    retainedDigests    : Map VaaDigest Int
+
+-- | A GuardianSetUpgrade at or below the floor applies and adds no digest; its replay fails on the
+-- current-index check. A fee VAA of the same set at the same floor still fails on the floor.
+testGuardianSetUpgradeBelowFloorApplies : Script ()
+testGuardianSetUpgradeBelowFloorApplies = do
+  let upgradeTimestamp = timestampOf govGuardianSetUpgrade7To8VAA
+      retainedAboveFloor = syntheticConsumedGovernance 2 (upgradeTimestamp + 1001) 1
+      cases =
+        [ UpgradeBelowFloorCase "floor at the VAA timestamp, empty map" 0 Map.empty
+        , UpgradeBelowFloorCase "floor above the VAA timestamp, retained digests" 1000 retainedAboveFloor
+        ]
+  forA_ (numberCases cases) \(caseNumber, upgradeCase) -> do
+    genesisState <- genesisStateWithLabel ("UpgradeBelowFloor" <> show caseNumber) nonZeroGenesisGuardianSetIndex
+    let gg = genesisState.guardianGovernance
+        floorSeconds = Some (upgradeTimestamp + upgradeCase.floorOffsetSeconds)
+    coreStateCid <- createCoreState genesisState with
+      evictedGovernanceMaxTimestampSeconds = floorSeconds
+      consumedGovernance = upgradeCase.retainedDigests
+    feeResult <- trySubmitGovernanceVAA gg coreStateCid govSetFeeVAASignedBySet7
+    checkAttackFailedWith (upgradeCase.caseName <> ": fee VAA") evictedFloorErrorText feeResult
+    upgradedCid <- submitGovernanceVAA gg coreStateCid govGuardianSetUpgrade7To8VAA
+    upgraded <- readCoreState gg upgradedCid
+    upgraded.guardianSetIndex === nonZeroGenesisGuardianSetIndex + 1
+    upgraded.consumedGovernance === upgradeCase.retainedDigests
+    upgraded.evictedGovernanceMaxTimestampSeconds === floorSeconds
+    replayResult <- trySubmitGovernanceVAA gg upgradedCid govGuardianSetUpgrade7To8VAA
+    checkAttackFailedWith (upgradeCase.caseName <> ": replay") "governance: not signed by current guardian set" replayResult
+    readCoreState gg upgradedCid >>= (=== upgraded)
+
+----------------------------------------------------------------------
+-- 7. Postcondition checks
+----------------------------------------------------------------------
+
+checkPostconditionOutcome : Text -> Optional Text -> Either Text () -> Script ()
+checkPostconditionOutcome caseName expectedError outcome = case (expectedError, outcome) of
+  (None, Right ()) -> pure ()
+  (Some expectedText, Left message) | message == expectedText -> pure ()
+  _ -> abort (caseName <> ": unexpected outcome " <> show outcome)
+
+-- | Each rule of 'checkGovernanceRecordsDigest'.
+testCheckGovernanceRecordsDigest : Script ()
+testCheckGovernanceRecordsDigest = do
+  before <- genesisStateWithLabel "RecordsDigest" 0
+  let digest = syntheticDigest 100
+      otherDigest = syntheticDigest 101
+      timestampSeconds = syntheticBaseTimestampSeconds + 50
+      withRecord consumed floorSeconds = before with
+        consumedGovernance = Map.fromList consumed
+        evictedGovernanceMaxTimestampSeconds = floorSeconds
+      beforeWithFloor = withRecord [] (Some 10)
+      retainedDigest = syntheticDigest 102
+      retainedTimestampSeconds = timestampSeconds - 10
+      beforeWithRetained = withRecord [(retainedDigest, retainedTimestampSeconds)] None
+      beforeWithRetainedAndFloor = withRecord [(retainedDigest, retainedTimestampSeconds)] (Some timestampSeconds)
+      overCapacity = withRecord
+        ((digest, timestampSeconds) :: Map.toList (syntheticConsumedGovernance maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 1))
+        None
+      cases =
+        [ ("one new digest", before, withRecord [(digest, timestampSeconds)] None, None)
+        , ("no new digest", before, withRecord [] None,
+            Some "governance: consumed digest map must grow by exactly one without an eviction")
+        , ("two new digests", before, withRecord [(digest, timestampSeconds), (otherDigest, timestampSeconds)] None,
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
+        , ("wrong digest", before, withRecord [(otherDigest, timestampSeconds)] None,
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
+        , ("wrong timestamp", before, withRecord [(digest, timestampSeconds + 1)] None,
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
+        , ("evicted at once, covered by the floor", before, withRecord [] (Some timestampSeconds), None)
+        , ("evicted, floor below the timestamp", before, withRecord [] (Some (timestampSeconds - 1)),
+            Some "governance: VAA digest not recorded")
+        , ("floor decreases", beforeWithFloor, withRecord [(digest, timestampSeconds)] (Some 9),
+            Some "governance: evicted governance timestamp floor decreased")
+        , ("floor removed", beforeWithFloor, withRecord [(digest, timestampSeconds)] None,
+            Some "governance: evicted governance timestamp floor decreased")
+        , ("over capacity", before, overCapacity, Some "governance: consumed digest map exceeds its capacity")
+        , ("retained entry kept", beforeWithRetained,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (digest, timestampSeconds)] None, None)
+        , ("retained entry evicted at or below the new floor", beforeWithRetained,
+            withRecord [(digest, timestampSeconds)] (Some retainedTimestampSeconds), None)
+        , ("faulty recorder drops a retained entry above the floor", beforeWithRetained,
+            withRecord [(digest, timestampSeconds)] (Some (retainedTimestampSeconds - 1)),
+            Some "governance: retained digest dropped above the evicted governance timestamp floor")
+        , ("faulty recorder changes a retained timestamp", beforeWithRetained,
+            withRecord [(retainedDigest, retainedTimestampSeconds + 1), (digest, timestampSeconds)] None,
+            Some "governance: retained digest dropped above the evicted governance timestamp floor")
+        , ("faulty recorder adds an entry other than the VAA digest", beforeWithRetainedAndFloor,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (otherDigest, timestampSeconds + 1)] (Some timestampSeconds),
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
+        , ("upgrade at the floor leaves the map unchanged", beforeWithRetainedAndFloor, beforeWithRetainedAndFloor, None)
+        , ("upgrade at the floor inserts its digest", beforeWithRetainedAndFloor,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (digest, timestampSeconds)] (Some timestampSeconds),
+            Some "governance: a VAA at or below the floor must leave the consumed digest map unchanged")
+        ]
+  forA_ cases \(caseName, beforeState, afterState, expectedError) ->
+    checkPostconditionOutcome caseName expectedError
+      (checkGovernanceRecordsDigest beforeState afterState digest timestampSeconds)
+
+-- | Each rule of 'checkGovernanceBoundsGuardianSets'.
+testCheckGovernanceBoundsGuardianSets : Script ()
+testCheckGovernanceBoundsGuardianSets = do
+  now <- getTime
+  genesisState <- genesisStateWithLabel "BoundsGuardianSets" nonZeroGenesisGuardianSetIndex
+  let current = nonZeroGenesisGuardianSetIndex
+      unexpiredSet = previousGuardianSetExpiringAt (addRelTime now (hours 1))
+      expiredSet = previousGuardianSetExpiringAt (addRelTime now (seconds (-1)))
+      before = genesisState with guardianSets = Map.insert (current - 1) unexpiredSet genesisState.guardianSets
+      withSets sets = before with guardianSets = sets
+      appliedWithExpired = withSets (Map.insert (current - 2) expiredSet before.guardianSets)
+      appliedOverCapacity = withSets (guardianSetsWithPrevious current maxStoredGuardianSets (addRelTime now (hours 1)))
+      keptCases =
+        [ ("expired set dropped", appliedWithExpired, before, None)
+        , ("lowest index dropped above capacity", appliedOverCapacity,
+            withSets (guardianSetsWithPrevious current (maxStoredGuardianSets - 1) (addRelTime now (hours 1))), None)
+        , ("active set within capacity dropped", before, withSets (Map.delete (current - 1) before.guardianSets),
+            Some "governance: stored guardian set dropped while active and within capacity")
+        , ("second-lowest index dropped above capacity", appliedOverCapacity,
+            withSets (Map.delete (current - maxStoredGuardianSets + 1) appliedOverCapacity.guardianSets),
+            Some "governance: stored guardian set dropped while active and within capacity")
+        , ("set changed", before, withSets (Map.insert (current - 1) (previousGuardianSetExpiringAt (addRelTime now (hours 2))) before.guardianSets),
+            Some "governance: stored guardian set not in the applied state")
+        ]
+      cases =
+        [ ("unchanged", before, None)
+        , ("expired set kept", withSets (Map.insert (current - 1) expiredSet before.guardianSets),
+            Some "governance: stored guardian set expired")
+        , ("previous set added", withSets (Map.insert (current - 2) unexpiredSet before.guardianSets),
+            Some "governance: stored guardian set not in the applied state")
+        , ("over capacity", withSets (guardianSetsWithPrevious current maxStoredGuardianSets (addRelTime now (hours 1)))
+          , Some "governance: stored guardian sets exceed their capacity")
+        ]
+  forA_ cases \(caseName, afterState, expectedError) ->
+    checkPostconditionOutcome caseName expectedError (checkGovernanceBoundsGuardianSets before afterState now)
+  forA_ keptCases \(caseName, appliedState, afterState, expectedError) ->
+    checkPostconditionOutcome caseName expectedError (checkGovernanceBoundsGuardianSets appliedState afterState now)
+
+----------------------------------------------------------------------
+-- 8. Capacity constants
+----------------------------------------------------------------------
+
+-- | The guardian set capacity holds the current set and one previous set; the digest map holds at least one digest.
+testGovernanceCollectionCapacitiesAreUsable : Script ()
+testGovernanceCollectionCapacitiesAreUsable = do
+  assertMsg "maxStoredGuardianSets must hold the current and the previous set" (maxStoredGuardianSets >= 2)
+  assertMsg "maxRetainedGovernanceDigests must hold one digest" (maxRetainedGovernanceDigests >= 1)

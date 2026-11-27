@@ -1,0 +1,7 @@
+// Print the dynamic synchronizer parameters of the global synchronizer and the pruning schedule of each LocalNet participant.
+participants.remote.foreach { host =>
+  val synchronizer = host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+    .getOrElse(throw new RuntimeException(s"${host.name} is not connected to global"))
+  println(s"PARAMS ${host.name} ${host.topology.synchronizer_parameters.get_dynamic_synchronizer_parameters(synchronizer.synchronizerId)}")
+  println(s"PRUNING ${host.name} schedule=${host.pruning.get_schedule()} participantSchedule=${host.pruning.get_participant_schedule()}")
+}

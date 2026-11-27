@@ -1,0 +1,36 @@
+-- | Integration entrypoint for the A2 watcher test: a forged PublishMessage
+-- that names a real emitter's identity, observed by guardianGovernance.
+module Lookalike.Publish where
+
+import Daml.Script
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+
+data LookalikeTarget = LookalikeTarget with
+    guardianGovernance : Party
+    victimOwner        : Party
+    victimEmitterId    : Int
+    victimSequence     : Int
+  deriving (Eq, Show)
+
+lookalikeNonce : Int
+lookalikeNonce = 77
+
+lookalikePayload : MessagePayload
+lookalikePayload = MessagePayload "f0f0"
+
+integrationLookalikePublish : LookalikeTarget -> Script Party
+integrationLookalikePublish target = do
+  forger <- allocateParty "LookalikeForger"
+  forgedEmitterCid <- submit forger do
+    createCmd Emitter with
+      forger
+      guardianGovernance = target.guardianGovernance
+      registrar = target.guardianGovernance
+      owner = target.victimOwner
+      emitterId = target.victimEmitterId
+      sequence = target.victimSequence
+  _ <- submit forger do
+    exerciseCmd forgedEmitterCid PublishMessage with
+      nonce = lookalikeNonce, payload = lookalikePayload
+  pure forger

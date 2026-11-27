@@ -1,0 +1,119 @@
+-- | Ledger fixtures for the Go watcher integration test of the read-party
+-- stakeholder check
+-- (node/pkg/watchers/canton/watcher_witness_only_integration_test.go).
+--
+-- The real guardianGovernance observes 'WitnessedPublisher', so it witnesses
+-- the nested 'PublishMessage' on an 'Emitter' of a rogue-governance registry,
+-- whose stakeholders are the owner and the rogue party. The watcher
+-- must drop that publish. The forged message has the trusted emitter's
+-- identity and sequence.
+module Test.WatcherWitnessOnly where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Test.TestCore (registerEmitter, publishVia, devnetGenesisGuardian)
+import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
+
+-- | Makes @witness@ an informee of the consuming 'PublishWitnessed' exercise,
+-- and thus a witness of the nested 'PublishMessage'.
+template WitnessedPublisher
+  with
+    owner   : Party
+    witness : Party
+  where
+    signatory owner
+    observer witness
+
+    choice PublishWitnessed : WormholeMessage
+      with
+        emitterCid   : ContractId Emitter
+        coreStateCid : ContractId CoreState
+        nonce        : Int
+        payload      : MessagePayload
+      controller owner
+      do
+        (_, message) <- exercise emitterCid PublishMessage with
+          nonce, payload, consistencyLevel = 0
+          coreStateCid, payer = owner, feeAllocation = None
+        pure message
+
+data WitnessOnlyPublishes = WitnessOnlyPublishes with
+    trustedOwner : Party
+    trustedEmitterId : Int
+    trustedSequence : Int
+    forgedEmitterId : Int
+    forgedSequence : Int
+  deriving (Eq, Show)
+
+trustedWitnessOnlyNonce : Int
+trustedWitnessOnlyNonce = 31
+
+trustedWitnessOnlyPayload : MessagePayload
+trustedWitnessOnlyPayload = parseHexTextOrAbort "a1a1"
+
+forgedWitnessOnlyNonce : Int
+forgedWitnessOnlyNonce = 32
+
+forgedWitnessOnlyPayload : MessagePayload
+forgedWitnessOnlyPayload = parseHexTextOrAbort "f2f2"
+
+-- | In ledger order:
+--   1. The trusted owner publishes through the real registry and 'CoreState'.
+--   2. The same owner, with a rogue governance party, publishes
+--      through a rogue registry and a shadow 'CoreState', inside a
+--      'WitnessedPublisher' exercise that the real guardianGovernance observes.
+integrationWitnessOnlyPublish : RealBridge -> Script WitnessOnlyPublishes
+integrationWitnessOnlyPublish bridge = do
+  let guardianGovernance = bridge.guardianGovernance
+  trustedOwner <- allocateParty "WitnessOnlyTrustedOwner"
+  trustedEmitterCid <- registerEmitter guardianGovernance trustedOwner
+  (_, trustedMessage) <- publishVia guardianGovernance bridge.coreStateCid trustedOwner trustedEmitterCid
+                           trustedWitnessOnlyNonce trustedWitnessOnlyPayload 0
+
+  rogueGovernance <- allocateParty "WitnessOnlyRogueGovernance"
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
+  (_, forgedEmitterCid) <- submit (actAs trustedOwner <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = trustedOwner, payer = trustedOwner, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = rogueGovernance
+  rogueFeeCustody <- allocateParty "WitnessOnlyRogueFeeCustody"
+  rogueFeeInstrumentAdmin <- allocateParty "WitnessOnlyRogueFeeInstrumentAdmin"
+  let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+                 shadowFeeInstrument rogueFeeCustody)
+  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
+  publisherCid <- submit trustedOwner do
+    createCmd WitnessedPublisher with owner = trustedOwner, witness = bridge.guardianGovernance
+  forgedMessage <- submit (actAs trustedOwner <> disclose shadowCoreStateDisclosure) do
+    exerciseCmd publisherCid PublishWitnessed with
+      emitterCid = forgedEmitterCid
+      coreStateCid = shadowCoreStateCid
+      nonce = forgedWitnessOnlyNonce
+      payload = forgedWitnessOnlyPayload
+
+  pure WitnessOnlyPublishes with
+    trustedOwner
+    trustedEmitterId = trustedMessage.emitterId
+    trustedSequence = trustedMessage.sequence
+    forgedEmitterId = forgedMessage.emitterId
+    forgedSequence = forgedMessage.sequence
+
+-- | Runs the fixture in one script so `dpm test` covers it: the forged message
+-- repeats the trusted identity and sequence, and every 'Emitter' visible to
+-- the real guardianGovernance names it.
+testWitnessOnlyFixtures : Script ()
+testWitnessOnlyFixtures = do
+  bridge <- integrationGovernanceReaderSetup
+  publishes <- integrationWitnessOnlyPublish bridge
+  (publishes.forgedEmitterId, publishes.forgedSequence) === (publishes.trustedEmitterId, publishes.trustedSequence)
+  governanceEmitters <- query @Emitter bridge.guardianGovernance
+  map (\(_, emitter) -> emitter.guardianGovernance) governanceEmitters === [bridge.guardianGovernance]

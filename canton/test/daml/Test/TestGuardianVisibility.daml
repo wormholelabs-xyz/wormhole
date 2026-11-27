@@ -1,0 +1,130 @@
+-- | Guardian visibility of the attestation surface through @guardianGovernance@.
+--
+-- Every guardian participant hosts @guardianGovernance@, so it is the party
+-- that makes guardians informees of each 'PublishMessage'. Script-level proxy
+-- for "informee of the consuming exercise": the successor contract is visible
+-- to the party ('query' / 'queryContractId'). The Go integration test covers
+-- the update stream.
+module Test.TestGuardianVisibility where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.List (sort)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import Wormhole.Core.State
+import Wormhole.Core.Setup (RegistryParties(..), mkInitialEmitterRegistry)
+import Wormhole.Core.GuardianSet (guardianAddressesOf)
+import Test.TestCore (setup, registerEmitter, publishVia, submitGovernanceAs, devnetGuardian, govSetFeeVAA)
+import Wormhole.Core.Bytes
+
+-- | Alice owns the emitter; guardianGovernance sees it after a publish.
+testGovernanceSeesThirdPartyPublishedMessage : Script ()
+testGovernanceSeesThirdPartyPublishedMessage = do
+  (guardianGovernance, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter guardianGovernance alice
+  _ <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "deadbeef") 0
+
+  [(_, em)] <- query @Emitter guardianGovernance
+  em.owner === alice
+  em.sequence === 1
+
+-- | guardianGovernance sees the successor CoreState after a governance VAA.
+testGovernanceSeesCoreStateTransitions : Script ()
+testGovernanceSeesCoreStateTransitions = do
+  (guardianGovernance, csId) <- setup
+  relayer <- allocateParty "VisibilityRelayer"
+  Some cs <- queryContractId guardianGovernance csId
+  cs.guardianSetIndex === 0
+  guardianAddressesOf (fromSome (Map.lookup 0 cs.guardianSets)) === [devnetGuardian]
+
+  newCsId <- submitGovernanceAs guardianGovernance relayer csId govSetFeeVAA
+  Some cs' <- queryContractId guardianGovernance newCsId
+  cs'.messageFee === 1000
+
+-- | Emitter stakeholders are the owner and guardianGovernance only.
+testOutsiderSeesNoMessage : Script ()
+testOutsiderSeesNoMessage = do
+  (guardianGovernance, csId) <- setup
+  alice <- allocateParty "Alice"
+  outsider <- allocateParty "Outsider"
+  emitterId <- registerEmitter guardianGovernance alice
+  _ <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "deadbeef") 0
+
+  emitters <- query @Emitter outsider
+  assertMsg "outsider must not see the emitter" (null emitters)
+
+-- | EmitterRegistry stakeholders: guardianGovernance only. The onboarding fee
+-- admin needs a disclosure.
+testGovernanceSeesRegistry : Script ()
+testGovernanceSeesRegistry = do
+  (guardianGovernance, _) <- setup
+  outsider <- allocateParty "RegistryOutsider"
+  [(regId, governanceView)] <- query @EmitterRegistry guardianGovernance
+  stakeholder governanceView === [guardianGovernance]
+  adminView <- queryContractId governanceView.onboardingFeeAdmin regId
+  adminView === None
+  outsiderView <- queryContractId outsider regId
+  outsiderView === None
+
+-- | guardianGovernance signs every registered 'Emitter': the owner alone
+-- cannot archive one.
+testGovernanceSignsEveryEmitter : Script ()
+testGovernanceSignsEveryEmitter = do
+  (guardianGovernance, _) <- setup
+  alice <- allocateParty "Alice"
+  emitterCid <- registerEmitter guardianGovernance alice
+  Some emitter <- queryContractId guardianGovernance emitterCid
+  sort (signatory emitter) === sort [alice, guardianGovernance]
+  submitMustFail alice do archiveCmd emitterCid
+  Some _ <- queryContractId guardianGovernance emitterCid
+  pure ()
+
+-- | Publish and archive of an integrator's emitter require the owner.
+testGovernanceHasNoEmitterAuthority : Script ()
+testGovernanceHasNoEmitterAuthority = do
+  (guardianGovernance, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter guardianGovernance alice
+
+  submitMustFail guardianGovernance do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None
+  -- guardianGovernance as payer: only the owner's authority is missing.
+  submitMustFail guardianGovernance do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+      coreStateCid = csId, payer = guardianGovernance, feeAllocation = None
+  submitMustFail guardianGovernance do archiveCmd emitterId
+
+  (_, msg) <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "dead") 0
+  msg.sequence === 0
+
+-- | An Emitter from a registry under a rogue guardianGovernance is visible to
+-- that rogue party only, and publishing it against the real CoreState aborts
+-- on the guardianGovernance pin.
+testRogueGovernanceEmitterCannotPublishOnRealCoreState : Script ()
+testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
+  (guardianGovernance, csId) <- setup
+  rogueGovernance <- allocateParty "RogueGovernance"
+  alice <- allocateParty "Alice"
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
+  (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = alice, payer = alice, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = rogueGovernance
+
+  Some rogueEmitter <- queryContractId rogueGovernance rogueEmitterCid
+  rogueEmitter.guardianGovernance === rogueGovernance
+  realGovernanceView <- queryContractId guardianGovernance rogueEmitterCid
+  realGovernanceView === None
+
+  csDisclosure <- fromSome <$> queryDisclosure guardianGovernance csId
+  submitMustFail (actAs alice <> disclose csDisclosure) do
+    exerciseCmd rogueEmitterCid PublishMessage with
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None

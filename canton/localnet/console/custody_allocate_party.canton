@@ -1,0 +1,121 @@
+// Allocate a second external party under the guardianGovernance decentralized namespace.
+// The new party copies the hosting, the confirmation threshold and the signing keys of guardianGovernance.
+// Run after owner_signing_prelude.canton.
+// Environment:
+//   GG_PARTY_ID                   guardianGovernance party id. Gives the namespace and the hosting to copy.
+//   CUSTODY_PARTY_NAME            Name of the new party, for example nttCustody.
+//   CUSTODY_OWNER_PUBKEY_1/2/3    DER SPKI Ed25519 public keys of the current namespace owners.
+//   CUSTODY_OWNER_SIGN_ARGV_1/2/3 Signer commands of those owners, each a JSON array of strings. The hash hex
+//                                 is appended as the last argument; stdout is a hex signature.
+//   CUSTODY_ARTIFACTS_FILE        Output JSON: party id, namespace, hosts, thresholds, signing-key fingerprints.
+// A rerun with an existing mapping only writes the artifacts.
+
+val guardianGovernancePartyId = PartyId.tryFromProtoPrimitive(requiredEnvironmentVariable("GG_PARTY_ID"))
+val custodyPartyId = PartyId.tryCreate(requiredEnvironmentVariable("CUSTODY_PARTY_NAME"), guardianGovernancePartyId.namespace)
+val owners = Seq(1, 2, 3).map(slot => loadOwnerKey(s"CUSTODY_OWNER_PUBKEY_$slot", s"CUSTODY_OWNER_SIGN_ARGV_$slot"))
+val ownerFingerprints = owners.map(_.publicKey.fingerprint).toSet
+require(ownerFingerprints.size == 3, "the three owner keys must differ")
+require(custodyPartyId != guardianGovernancePartyId, "the custody party must differ from guardianGovernance")
+
+val participant = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+val synchronizerId = participant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+  .getOrElse(throw new RuntimeException("app-provider is not connected to global")).physicalSynchronizerId
+val synchronizerTopologyStore = TopologyStoreId.Synchronizer(synchronizerId)
+val protocolVersion = synchronizerId.protocolVersion
+println(s"CUSTODY protocol version: $protocolVersion")
+require(protocolVersion == com.digitalasset.canton.version.ProtocolVersion.v37, s"synchronizer protocol version $protocolVersion, expected 37")
+
+def findPartyToParticipant(party: PartyId) =
+  participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore).find(_.item.partyId == party)
+
+// Precondition: the given owner keys are the namespace owners and the guardianGovernance signing keys.
+val decentralizedNamespace = participant.topology.decentralized_namespaces.list(synchronizerTopologyStore)
+  .find(_.item.namespace == guardianGovernancePartyId.namespace)
+  .getOrElse(throw new RuntimeException("decentralized namespace of guardianGovernance not found"))
+require(decentralizedNamespace.item.owners.map(_.fingerprint).toSet == ownerFingerprints,
+  s"given owner keys ${sortedFingerprintText(ownerFingerprints)} are not the namespace owners " +
+    sortedFingerprintText(decentralizedNamespace.item.owners.map(_.fingerprint)))
+val guardianGovernancePartyToParticipant = findPartyToParticipant(guardianGovernancePartyId)
+  .getOrElse(throw new RuntimeException("guardianGovernance PartyToParticipant not found"))
+val guardianGovernanceSigningKeys = guardianGovernancePartyToParticipant.item.partySigningKeysWithThreshold
+  .getOrElse(sys.error("guardianGovernance has no party signing keys"))
+require(guardianGovernanceSigningKeys.keys.map(_.fingerprint).toSet == ownerFingerprints,
+  "guardianGovernance signing keys are not the namespace owner keys")
+checkNamespaceIsGuardianPolicy(decentralizedNamespace.item)
+checkHostingIsGuardianPolicy(guardianGovernancePartyToParticipant.item)
+println(s"CUSTODY DN namespace=${guardianGovernancePartyId.namespace.fingerprint.toProtoPrimitive} serial=${decentralizedNamespace.context.serial} " +
+  s"threshold=${decentralizedNamespace.item.threshold} owners=${sortedFingerprintText(ownerFingerprints)}")
+
+val hostIds = guardianGovernancePartyToParticipant.item.participants.map(_.participantId)
+val hostingParticipants = hostIds.map { hostId =>
+  participants.remote.find(_.id == hostId).getOrElse(throw new RuntimeException(s"host $hostId is not bound in this console"))
+}
+
+findPartyToParticipant(custodyPartyId) match {
+  case Some(existing) => println(s"CUSTODY party exists: ${custodyPartyId.toProtoPrimitive} serial=${existing.context.serial}")
+  case None =>
+    val custodyPartyToParticipant = PartyToParticipant
+      .create(custodyPartyId, guardianGovernancePartyToParticipant.item.threshold, guardianGovernancePartyToParticipant.item.participants,
+        Some(guardianGovernanceSigningKeys))
+      .getOrElse(sys.error("PartyToParticipant"))
+    checkHostingIsGuardianPolicy(custodyPartyToParticipant)
+    // A new mapping takes serial 1. Before any signer call, the console compares the change that app-provider
+    // generates with the intended change.
+    val intendedCustodyChange = IntendedTopologyChange(custodyPartyToParticipant, PositiveInt.one)
+    val generatedTransactions = participant.topology.transactions.generate(
+      Seq(Proposal(custodyPartyToParticipant, synchronizerTopologyStore, TopologyChangeOp.Replace, Some(intendedCustodyChange.serial))))
+    require(generatedTransactions.size == 1, s"app-provider generated ${generatedTransactions.size} transactions, expected 1")
+    val unsigned = checkGeneratedTransactionIsIntended(generatedTransactions.head, intendedCustodyChange, protocolVersion,
+      s"generated PartyToParticipant of ${partyName(custodyPartyId)}")
+    // Namespace authority needs 2 of 3 owners. Each new party signing key also signs: proof of key possession.
+    val ownerSignatures = owners.map(signWithOwnerKey(_, unsigned.hash.hash))
+    val signedByOwners = ownerSignatures.tail.foldLeft(
+      SignedTopologyTransaction.withSignature(unsigned, ownerSignatures.head, isProposal = false, protocolVersion))(_.addSingleSignature(_))
+    // Each host consents with its own identity key. The host returns the same transaction with one more signature.
+    val signedByOwnersAndHosts = hostingParticipants.foldLeft(signedByOwners: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
+      val signedByHost = host.topology.transactions.sign(Seq(signedSoFar), synchronizerTopologyStore,
+        signedBy = Seq(host.id.uid.namespace.fingerprint)).head
+      require(signedByHost.hash == unsigned.hash, s"${host.name} returned another transaction")
+      checkTransactionIsIntendedChange(signedByHost.transaction, intendedCustodyChange, s"PartyToParticipant signed by ${host.name}")
+      signedByHost
+    }
+    participant.topology.transactions.load(Seq(signedByOwnersAndHosts), synchronizerTopologyStore)
+    awaitTopology("custody party to participant mapping") {
+      hostingParticipants.forall(host =>
+        host.topology.party_to_participant_mappings.list(synchronizerTopologyStore).exists(_.item.partyId == custodyPartyId))
+    }
+    println(s"CUSTODY party allocated: ${custodyPartyId.toProtoPrimitive}")
+}
+
+// Postcondition: the mapping read back has the guardian policy and the hosts, thresholds and signing keys of
+// guardianGovernance.
+val custodyPartyToParticipantAfterAllocation = findPartyToParticipant(custodyPartyId)
+  .getOrElse(throw new RuntimeException("custody PartyToParticipant not found"))
+require(custodyPartyToParticipantAfterAllocation.item.partyId.namespace == guardianGovernancePartyId.namespace,
+  "custody party is outside the guardian namespace")
+checkHostingIsGuardianPolicy(custodyPartyToParticipantAfterAllocation.item)
+require(custodyPartyToParticipantAfterAllocation.item.participants.toSet == guardianGovernancePartyToParticipant.item.participants.toSet,
+  "custody hosting differs from guardianGovernance")
+require(custodyPartyToParticipantAfterAllocation.item.threshold == guardianGovernancePartyToParticipant.item.threshold,
+  "custody confirmation threshold differs from guardianGovernance")
+require(custodyPartyToParticipantAfterAllocation.item.partySigningKeysWithThreshold == Some(guardianGovernanceSigningKeys),
+  "custody signing keys differ from guardianGovernance")
+println(s"CUSTODY PTP serial=${custodyPartyToParticipantAfterAllocation.context.serial} " +
+  s"confirmationThreshold=${custodyPartyToParticipantAfterAllocation.item.threshold} " +
+  s"hosts=${custodyPartyToParticipantAfterAllocation.item.participants.size} " +
+  s"signingKeys=${guardianGovernanceSigningKeys.threshold}-of-${guardianGovernanceSigningKeys.keys.size}")
+
+def jsonString(text: String): String = "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+val artifactsJson =
+  s"""{
+     |  "partyId": ${jsonString(custodyPartyId.toProtoPrimitive)},
+     |  "decentralizedNamespace": ${jsonString(custodyPartyId.namespace.fingerprint.toProtoPrimitive)},
+     |  "synchronizerId": ${jsonString(synchronizerId.toProtoPrimitive)},
+     |  "hostingParticipants": [${hostIds.map(id => jsonString(id.toProtoPrimitive)).mkString(", ")}],
+     |  "confirmationThreshold": ${custodyPartyToParticipantAfterAllocation.item.threshold.value},
+     |  "signingKeyThreshold": ${guardianGovernanceSigningKeys.threshold.value},
+     |  "signingKeyFingerprints": [${sortedFingerprintText(ownerFingerprints).split(",").map(jsonString).mkString(", ")}]
+     |}
+     |""".stripMargin
+Files.write(Paths.get(requiredEnvironmentVariable("CUSTODY_ARTIFACTS_FILE")), artifactsJson.getBytes("UTF-8"))
+println("CUSTODY done")

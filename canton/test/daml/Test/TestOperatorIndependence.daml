@@ -1,0 +1,795 @@
+-- | Operator independence of the core: guardianGovernance is the only core
+-- anchor, and each core function needs only the caller's authority.
+module Test.TestOperatorIndependence where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.List (sort)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import DA.Time (addRelTime, seconds)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.Fees (feeToDecimal)
+import Wormhole.Core.Governance (GovernanceAction(..))
+import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Wormhole.Core.VAA (parseVAA)
+import Test.MockToken
+import Test.TestCore
+import Test.TestRedTeamCore (checkAttackFailedWith, rtAppMessageBySet0, rtGuardianSetUpgradeWrongEmitterAddress,
+  rtGuardianSetUpgradeWrongEmitterChain, rtSetMessageFeeBySet1BelowQuorum, upgradeToSet1)
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+
+-- | The core parties of one test bridge, read back from its genesis contracts.
+data CoreBridge = CoreBridge with
+    guardianGovernance : Party
+    feeCustody         : Party
+    onboardingFeeAdmin : Party
+    coreStateCid       : ContractId CoreState
+    emitterRegistryCid : ContractId EmitterRegistry
+    replayRegistryCid  : ContractId ReplayRootRegistry
+
+setupCoreBridge : Text -> Optional InstrumentId -> Script CoreBridge
+setupCoreBridge partyLabel feeInstrument = do
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel partyLabel feeInstrument
+  Some coreState <- queryContractId guardianGovernance coreStateCid
+  [(emitterRegistryCid, emitterRegistry)] <- query @EmitterRegistry guardianGovernance
+  [(replayRegistryCid, _)] <- query @ReplayRootRegistry guardianGovernance
+  pure CoreBridge with
+    guardianGovernance
+    feeCustody = coreState.feeRecipient
+    onboardingFeeAdmin = emitterRegistry.onboardingFeeAdmin
+    coreStateCid
+    emitterRegistryCid
+    replayRegistryCid
+
+discloseAsGuardianGovernance : Template t => CoreBridge -> ContractId t -> Script Disclosure
+discloseAsGuardianGovernance bridge contractId = fromSome <$> queryDisclosure bridge.guardianGovernance contractId
+
+checkFailsOnMissingAuthorization : Text -> Either SubmitError a -> Script ()
+checkFailsOnMissingAuthorization caseName submitResult = case submitResult of
+  Left (AuthorizationError _) -> pure ()
+  Left otherError -> abort (caseName <> ": expected an authorization failure, got: " <> show otherError)
+  Right _ -> abort (caseName <> ": accepted")
+
+checkFailsOnUnknownContract : Text -> Either SubmitError a -> Script ()
+checkFailsOnUnknownContract caseName submitResult = case submitResult of
+  Left (ContractNotFound {}) -> pure ()
+  Left otherError -> abort (caseName <> ": expected an unknown contract, got: " <> show otherError)
+  Right _ -> abort (caseName <> ": accepted")
+
+checkFailsOnPrecondition : Text -> Either SubmitError a -> Script ()
+checkFailsOnPrecondition caseName submitResult = case submitResult of
+  Left createError | "precondition" `T.isInfixOf` show createError -> pure ()
+  Left otherError -> abort (caseName <> ": expected a template precondition failure, got: " <> show otherError)
+  Right _ -> abort (caseName <> ": accepted")
+
+discardResult : Script (Either SubmitError a) -> Script (Either SubmitError ())
+discardResult = fmap (fmap (const ()))
+
+relayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
+relayGovernance bridge relayer coreStateCid encodedVAA = do
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
+  submit (actAs relayer <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
+
+tryRelayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> Script (Either SubmitError ())
+tryRelayGovernance bridge relayer coreStateCid encodedVAA = do
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
+  discardResult $ trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
+
+registerEmitterAs : CoreBridge -> Party -> Script (ContractId Emitter)
+registerEmitterAs bridge requester = do
+  [(registryCid, _)] <- query @EmitterRegistry bridge.guardianGovernance
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
+  (_, emitterCid) <- submit (actAs requester <> disclose registryDisclosure) do
+    exerciseCmd registryCid RegisterEmitter with
+      requester, payer = requester, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = bridge.guardianGovernance
+  pure emitterCid
+
+claimReplayRootAs : CoreBridge -> Party -> Text -> Int -> Script (ContractId ReplayNode)
+claimReplayRootAs bridge consumer namespace splitThreshold = do
+  [(registryCid, _)] <- query @ReplayRootRegistry bridge.guardianGovernance
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering bridge.guardianGovernance consumer namespace
+  submit (actAs consumer <> disclose registryDisclosure <> disclose claimedRootsNodeDisclosure) do
+    exerciseCmd registryCid ClaimReplayRoot with
+      consumer, namespace, splitThreshold, payer = consumer, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = bridge.guardianGovernance, claimedRootsNodeCid
+
+-- | Amount and recipient of 'govTransferFeesVAA'.
+transferFeesRecipient : UniversalAddress
+transferFeesRecipient = parseHexTextOrAbort (mconcat (replicate 32 "d4"))
+
+transferFeesAmount : Int
+transferFeesAmount = 9
+
+----------------------------------------------------------------------
+-- Test 1: signatories and observers
+----------------------------------------------------------------------
+
+data StakeholderCase = StakeholderCase with
+    templateName         : Text
+    actualSignatories    : [Party]
+    actualObservers      : [Party]
+    expectedSignatories  : [Party]
+
+-- | Each core contract made through its production path has exactly the
+-- expected signatories and an empty observer list.
+testCoreTemplateSignatoriesAndObservers : Script ()
+testCoreTemplateSignatoriesAndObservers = do
+  bridge <- setupCoreBridge "Stakeholders" None
+  owner <- allocateParty "StakeholderOwner"
+  consumer <- allocateParty "StakeholderConsumer"
+  relayer <- allocateParty "StakeholderRelayer"
+  let gg = bridge.guardianGovernance
+  Some coreState <- queryContractId gg bridge.coreStateCid
+  Some emitterRegistry <- queryContractId gg bridge.emitterRegistryCid
+  Some replayRegistry <- queryContractId gg bridge.replayRegistryCid
+  emitterCid <- registerEmitterAs bridge owner
+  Some emitter <- queryContractId owner emitterCid
+  rootCid <- claimReplayRootAs bridge consumer "stakeholders" 1
+  Some root <- queryContractId consumer rootCid
+  firstNodeCid <- submit consumer do exerciseCmd rootCid ConsumeDigest with digest = parseHexTextOrAbort (mconcat (replicate 64 "1"))
+  childCid <- submit consumer do exerciseCmd firstNodeCid ConsumeDigest with digest = parseHexTextOrAbort (mconcat (replicate 64 "2"))
+  Some child <- queryContractId consumer childCid
+  nibbleCountOfPrefix child.prefix === 1
+  _ <- relayGovernance bridge relayer bridge.coreStateCid govTransferFeesVAA
+  [(_, feeWithdrawal)] <- query @FeeWithdrawalAuthorization gg
+  let cases =
+        [ StakeholderCase "CoreState" (signatory coreState) (observer coreState) [gg, bridge.feeCustody]
+        , StakeholderCase "EmitterRegistry" (signatory emitterRegistry) (observer emitterRegistry) [gg]
+        , StakeholderCase "ReplayRootRegistry" (signatory replayRegistry) (observer replayRegistry) [gg]
+        , StakeholderCase "Emitter" (signatory emitter) (observer emitter) [owner, gg]
+        , StakeholderCase "ReplayNode root" (signatory root) (observer root) [consumer, gg]
+        , StakeholderCase "ReplayNode child" (signatory child) (observer child) [consumer, gg]
+        , StakeholderCase "FeeWithdrawalAuthorization" (signatory feeWithdrawal) (observer feeWithdrawal) [gg]
+        ]
+  forA_ cases \stakeholderCase -> do
+    assertMsg (stakeholderCase.templateName <> ": signatories " <> show stakeholderCase.actualSignatories)
+      (sort stakeholderCase.actualSignatories == sort stakeholderCase.expectedSignatories)
+    assertMsg (stakeholderCase.templateName <> ": observers " <> show stakeholderCase.actualObservers)
+      (null stakeholderCase.actualObservers)
+
+----------------------------------------------------------------------
+-- Test 2: each core function needs only the caller's authority
+----------------------------------------------------------------------
+
+-- | Each submission acts as the listed caller only, with disclosures from a
+-- guardian participant.
+testEachCoreFunctionNeedsOnlyCallerAuthority : Script ()
+testEachCoreFunctionNeedsOnlyCallerAuthority = do
+  mockAdmin <- allocateParty "CallerOnlyMockAdmin"
+  let feeInstrument = InstrumentId with admin = mockAdmin, id = "MOCK"
+  bridge <- setupCoreBridge "CallerOnly" (Some feeInstrument)
+  partyWithNoRole <- allocateParty "CallerOnlyPartyWithNoRole"
+  requester <- allocateParty "CallerOnlyRequester"
+  consumer <- allocateParty "CallerOnlyConsumer"
+  verifier <- allocateParty "CallerOnlyVerifier"
+  relayer <- allocateParty "CallerOnlyRelayer"
+  let gg = bridge.guardianGovernance
+
+  -- RegisterEmitter: requester only.
+  registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
+  (_, emitterCid) <- submit (actAs requester <> disclose registryDisclosure) do
+    exerciseCmd bridge.emitterRegistryCid RegisterEmitter with
+      requester, payer = requester, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = gg
+  Some emitter <- queryContractId requester emitterCid
+  emitter.emitterAddress === emitterAddressFor gg requester 0
+
+  -- PublishMessage at fee 0: owner only.
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  (emitterAfterFirstPublishCid, firstMessage) <- submit (actAs requester <> disclose coreStateDisclosure) do
+    exerciseCmd emitterCid PublishMessage with
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
+      coreStateCid = bridge.coreStateCid, payer = requester, feeAllocation = None
+  firstMessage.registrar === gg
+  firstMessage.sequence === 0
+
+  -- ClaimReplayRoot: consumer only.
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering gg consumer "caller-only"
+  rootCid <- submit (actAs consumer <> disclose replayRegistryDisclosure <> disclose claimedRootsNodeDisclosure) do
+    exerciseCmd bridge.replayRegistryCid ClaimReplayRoot with
+      consumer, namespace = "caller-only", splitThreshold = defaultSplitThreshold, payer = consumer
+      coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg, claimedRootsNodeCid
+  Some root <- queryContractId consumer rootCid
+  sort (signatory root) === sort [consumer, gg]
+
+  -- VerifyAndConsumeVAA: consumer only.
+  (consumedVAA, consumedNodeCid) <- submit (actAs consumer <> disclose coreStateDisclosure) do
+    exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA, consumer, namespace = "caller-only", replayNodeCid = rootCid
+  Some consumedNode <- queryContractId consumer consumedNodeCid
+  assertMsg "digest not recorded" (Set.member (parseHexTextOrAbort (hexTextOf consumedVAA.hash)) consumedNode.consumed)
+
+  -- ParseAndVerifyVAA: verifier only.
+  verifiedVAA <- submit (actAs verifier <> disclose coreStateDisclosure) do
+    exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with verifier, encodedVAA = govSetFeeVAA
+  verifiedVAA.sequence === 1
+
+  -- SubmitGovernanceVAA: relayer only, for each core governance action.
+  feeCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
+  Some feeCoreState <- queryContractId gg feeCoreStateCid
+  feeCoreState.messageFee === 1000
+  transferCoreStateCid <- relayGovernance bridge relayer feeCoreStateCid govTransferFeesVAA
+  [(_, feeWithdrawal)] <- query @FeeWithdrawalAuthorization gg
+  feeWithdrawal.amount === transferFeesAmount
+  feeWithdrawal.recipient === transferFeesRecipient
+  upgradeCoreStateCid <- relayGovernance bridge relayer transferCoreStateCid govContractUpgradeVAA
+  Some upgradeCoreState <- queryContractId gg upgradeCoreStateCid
+  assertMsg "ContractUpgrade digest not consumed"
+    (Map.member (parseVAA govContractUpgradeVAA).hash upgradeCoreState.consumedGovernance)
+  upgradedAt <- getTime
+  setUpgradeCoreStateCid <- relayGovernance bridge relayer upgradeCoreStateCid govGuardianSetUpgradeVAA
+  Some setUpgradeCoreState <- queryContractId gg setUpgradeCoreStateCid
+  setUpgradeCoreState.guardianSetIndex === 1
+  (fromSome (Map.lookup 0 setUpgradeCoreState.guardianSets)).expirationTime
+    === Some (addRelTime upgradedAt (seconds guardianSetExpirySeconds))
+
+  -- PublishMessage at fee 1000: owner only; the fee lands with feeCustody.
+  feePayment <- mintAndAllocate mockAdmin requester bridge.feeCustody feeInstrument (feeToDecimal 1000)
+  setUpgradeCoreStateDisclosure <- discloseAsGuardianGovernance bridge setUpgradeCoreStateCid
+  (_, paidMessage) <- submit (actAs requester <> disclose setUpgradeCoreStateDisclosure) do
+    exerciseCmd emitterAfterFirstPublishCid PublishMessage with
+      nonce = 2, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
+      coreStateCid = setUpgradeCoreStateCid, payer = requester, feeAllocation = Some feePayment
+  paidMessage.sequence === 1
+  feeCustodyBalance <- mockBalance mockAdmin bridge.feeCustody feeInstrument
+  feeCustodyBalance === feeToDecimal 1000
+
+  -- SetRegistrationFee and SetClaimFee: the onboarding fee admin only.
+  [(currentRegistryCid, currentRegistry)] <- query @EmitterRegistry gg
+  currentRegistryDisclosure <- discloseAsGuardianGovernance bridge currentRegistryCid
+  repricedRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose currentRegistryDisclosure) do
+    exerciseCmd currentRegistryCid SetRegistrationFee with newRegistrationFee = 5
+  Some repricedRegistry <- queryContractId gg repricedRegistryCid
+  repricedRegistry.nextId === currentRegistry.nextId
+  repricedRegistry.registrationFee === 5
+  repricedReplayRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose replayRegistryDisclosure) do
+    exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 7
+  Some repricedReplayRegistry <- queryContractId gg repricedReplayRegistryCid
+  repricedReplayRegistry.claimFee === 7
+
+  partyWithNoRoleCoreStates <- query @CoreState partyWithNoRole
+  partyWithNoRoleEmitters <- query @Emitter partyWithNoRole
+  partyWithNoRoleRegistries <- query @EmitterRegistry partyWithNoRole
+  partyWithNoRoleReplayRegistries <- query @ReplayRootRegistry partyWithNoRole
+  partyWithNoRoleReplayNodes <- query @ReplayNode partyWithNoRole
+  length partyWithNoRoleCoreStates === 0
+  length partyWithNoRoleEmitters === 0
+  length partyWithNoRoleRegistries === 0
+  length partyWithNoRoleReplayRegistries === 0
+  length partyWithNoRoleReplayNodes === 0
+
+----------------------------------------------------------------------
+-- Test 3: attacks by a party with no role fail
+----------------------------------------------------------------------
+
+-- | Each create, archive or change of a core contract by a party with no role fails.
+testPartyWithNoRoleHasNoCorePower : Script ()
+testPartyWithNoRoleHasNoCorePower = do
+  bridge <- setupCoreBridge "NoRole" None
+  partyWithNoRole <- allocateParty "NoRoleParty"
+  alice <- allocateParty "NoRoleAlice"
+  let gg = bridge.guardianGovernance
+  Some coreState <- queryContractId gg bridge.coreStateCid
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  let asPartyWithNoRole = actAs partyWithNoRole
+      allDisclosures = disclose coreStateDisclosure <> disclose registryDisclosure <> disclose replayRegistryDisclosure
+      authorizationAttacks =
+        [ ("create CoreState naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd coreState with consumedGovernance = Map.empty)
+        , ("create EmitterRegistry with nextId 0 naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = partyWithNoRole) 0))
+        , ("create ReplayRootRegistry naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd (mkInitialReplayRootRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = partyWithNoRole) 0))
+        , ("create Emitter for itself under the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd Emitter with
+                guardianGovernance = gg, owner = partyWithNoRole, emitterId = 0
+                emitterAddress = emitterAddressFor gg partyWithNoRole 0, sequence = 0)
+        , ("create ReplayNode for Alice", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd ReplayNode with
+                consumer = alice, guardianGovernance = gg, namespace = "stolen", prefix = parseHexTextOrAbort ""
+                splitThreshold = defaultSplitThreshold, consumed = Set.empty)
+        , ("archive CoreState", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.coreStateCid)
+        , ("archive EmitterRegistry", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.emitterRegistryCid)
+        , ("archive ReplayRootRegistry", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.replayRegistryCid)
+        , ("SetRegistrationFee", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 1)
+        , ("SetClaimFee", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 1)
+        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.emitterRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = partyWithNoRole)
+        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.replayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = partyWithNoRole)
+        , ("SubmitGovernanceVAA with submitter Alice", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.coreStateCid SubmitGovernanceVAA with
+                submitter = alice, encodedVAA = govSetFeeVAA)
+        ]
+  forA_ authorizationAttacks \(attackName, attack) -> attack >>= checkFailsOnMissingAuthorization attackName
+  applicationVAAResult <- tryRelayGovernance bridge partyWithNoRole bridge.coreStateCid rtAppMessageBySet0
+  checkAttackFailedWith "SubmitGovernanceVAA with an application VAA" "governance: wrong emitter" applicationVAAResult
+  Some coreStateAfterAttacks <- queryContractId gg bridge.coreStateCid
+  coreStateAfterAttacks === coreState
+
+----------------------------------------------------------------------
+-- Test 4: relayed governance rejects each invalid VAA
+----------------------------------------------------------------------
+
+data InvalidGovernanceCase = InvalidGovernanceCase with
+    caseName      : Text
+    prepare       : CoreBridge -> Party -> Script (ContractId CoreState)
+    encodedVAA    : EncodedVaa
+    submission    : SubmissionShape
+    expectedText  : Text
+
+data SubmissionShape
+  = SubmittedByRelayerWithDisclosure
+  | SubmittedForAnotherParty
+  | SubmittedWithoutDisclosure
+  deriving (Eq, Show)
+
+-- | Each invalid relayed governance VAA fails with its text, and the
+-- 'CoreState' stays active and unchanged.
+testRelayedGovernanceRejectsInvalidVAA : Script ()
+testRelayedGovernanceRejectsInvalidVAA = do
+  let unchanged bridge _ = pure bridge.coreStateCid
+      afterSetFee bridge relayer = relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
+      afterUpgradeToSet1 bridge _ = upgradeToSet1 bridge.guardianGovernance bridge.coreStateCid
+      afterUnkeyedUpgradeToSet1 bridge relayer = relayGovernance bridge relayer bridge.coreStateCid govGuardianSetUpgradeVAA
+      cases =
+        [ InvalidGovernanceCase "replay" afterSetFee govSetFeeVAA SubmittedByRelayerWithDisclosure
+            "governance: action already consumed"
+        , InvalidGovernanceCase "old guardian set" afterUpgradeToSet1 set0SetFeeZeroVAA SubmittedByRelayerWithDisclosure
+            "governance: not signed by current guardian set"
+        , InvalidGovernanceCase "wrong emitter chain" unchanged rtGuardianSetUpgradeWrongEmitterChain
+            SubmittedByRelayerWithDisclosure "governance: wrong emitter chain"
+        , InvalidGovernanceCase "wrong emitter address" unchanged rtGuardianSetUpgradeWrongEmitterAddress
+            SubmittedByRelayerWithDisclosure "governance: wrong emitter address"
+        , InvalidGovernanceCase "application VAA" unchanged rtAppMessageBySet0 SubmittedByRelayerWithDisclosure
+            "governance: wrong emitter"
+        , InvalidGovernanceCase "signer without an attached key" afterUnkeyedUpgradeToSet1 set1MessageVAA
+            SubmittedByRelayerWithDisclosure "no public key attached for guardian index 0"
+        , InvalidGovernanceCase "below quorum" afterUpgradeToSet1 rtSetMessageFeeBySet1BelowQuorum
+            SubmittedByRelayerWithDisclosure "no quorum"
+        , InvalidGovernanceCase "submitter names another party" unchanged govSetFeeVAA SubmittedForAnotherParty ""
+        , InvalidGovernanceCase "no disclosure" unchanged govSetFeeVAA SubmittedWithoutDisclosure ""
+        ]
+  forA_ (numberCases cases) \(caseNumber, invalidCase) -> do
+    bridge <- setupCoreBridge ("InvalidGovernance" <> show caseNumber) None
+    relayer <- allocateParty ("InvalidGovernanceRelayer" <> show caseNumber)
+    otherParty <- allocateParty ("InvalidGovernanceOther" <> show caseNumber)
+    preparedCid <- invalidCase.prepare bridge relayer
+    Some before <- queryContractId bridge.guardianGovernance preparedCid
+    preparedDisclosure <- discloseAsGuardianGovernance bridge preparedCid
+    let submitGovernanceAs submitter = discardResult $ trySubmit (actAs relayer <> disclose preparedDisclosure) do
+          exerciseCmd preparedCid SubmitGovernanceVAA with
+            submitter, encodedVAA = invalidCase.encodedVAA
+    case invalidCase.submission of
+      SubmittedByRelayerWithDisclosure ->
+        submitGovernanceAs relayer >>= checkAttackFailedWith invalidCase.caseName invalidCase.expectedText
+      SubmittedForAnotherParty ->
+        submitGovernanceAs otherParty >>= checkFailsOnMissingAuthorization invalidCase.caseName
+      SubmittedWithoutDisclosure -> do
+        result <- discardResult $ trySubmit relayer do
+          exerciseCmd preparedCid SubmitGovernanceVAA with
+            submitter = relayer, encodedVAA = invalidCase.encodedVAA
+        checkFailsOnUnknownContract invalidCase.caseName result
+    Some after <- queryContractId bridge.guardianGovernance preparedCid
+    after === before
+
+----------------------------------------------------------------------
+-- Test 5: governance keeps each genesis field
+----------------------------------------------------------------------
+
+testGovernanceGenesisFieldChecksRejectEachChange : Script ()
+testGovernanceGenesisFieldChecksRejectEachChange = do
+  bridge <- setupCoreBridge "GenesisFields" None
+  stranger <- allocateParty "GenesisFieldsStranger"
+  Some before <- queryContractId bridge.guardianGovernance bridge.coreStateCid
+  let cases =
+        [ ("guardianGovernance", (before with guardianGovernance = stranger), Some "governance: guardianGovernance changed")
+        , ("chainId", (before with chainId = 2), Some "governance: chainId changed")
+        , ("governanceChainId", (before with governanceChainId = 2), Some "governance: governanceChainId changed")
+        , ("governanceContract", (before with governanceContract = parseHexTextOrAbort (mconcat (replicate 32 "05"))), Some "governance: governanceContract changed")
+        , ("feeInstrument", (before with feeInstrument = (InstrumentId with admin = stranger, id = "OTHER")), Some "governance: feeInstrument changed")
+        , ("feeRecipient", (before with feeRecipient = stranger), Some "governance: feeRecipient changed")
+        , ("no change", (before with messageFee = 5), None)
+        ]
+  forA_ cases \(caseName, successor, expectedError) ->
+    case (expectedError, checkGovernanceKeepsGenesisFields before successor) of
+      (None, Right ()) -> pure ()
+      (Some expectedText, Left message) | message == expectedText -> pure ()
+      (_, outcome) -> abort (caseName <> ": unexpected outcome " <> show outcome)
+
+----------------------------------------------------------------------
+-- Test 6: shadow anchors under a rogue gg
+----------------------------------------------------------------------
+
+-- | Contracts that a rogue gg signs never pass for the real anchor.
+testShadowAnchorsAreRejected : Script ()
+testShadowAnchorsAreRejected = do
+  mockAdmin <- allocateParty "ShadowMockAdmin"
+  let feeInstrument = InstrumentId with admin = mockAdmin, id = "MOCK"
+  bridge <- setupCoreBridge "Shadow" (Some feeInstrument)
+  rogueGovernance <- allocateParty "ShadowRogueGovernance"
+  rogueFeeCustody <- allocateParty "ShadowRogueFeeCustody"
+  owner <- allocateParty "ShadowOwner"
+  consumer <- allocateParty "ShadowConsumer"
+  let gg = bridge.guardianGovernance
+      rogueParties = RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId defaultGovernanceContract
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+                 feeInstrument rogueFeeCustody)
+  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
+  emitterCid <- registerEmitterAs bridge owner
+
+  -- Paid onboarding on the real registries.
+  [(registryCid, _)] <- query @EmitterRegistry gg
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
+  paidRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose registryDisclosure) do
+    exerciseCmd registryCid SetRegistrationFee with newRegistrationFee = 500
+  paidRegistryDisclosure <- discloseAsGuardianGovernance bridge paidRegistryCid
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  paidReplayRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose replayRegistryDisclosure) do
+    exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 300
+  paidReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge paidReplayRegistryCid
+  registrationPayment <- mintAndAllocate mockAdmin owner rogueFeeCustody feeInstrument (feeToDecimal 500)
+  claimPayment <- mintAndAllocate mockAdmin consumer rogueFeeCustody feeInstrument (feeToDecimal 300)
+
+  -- Rogue-signed registries, node and root.
+  rogueRegistryCid <- submit rogueGovernance do createCmd (mkInitialEmitterRegistry rogueParties 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
+  rogueReplayRegistryCid <- submit rogueGovernance do createCmd (mkInitialReplayRootRegistry rogueParties 0)
+  rogueReplayRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueReplayRegistryCid
+  rogueNodeCid <- submit (actAs consumer <> actAs rogueGovernance) do
+    createCmd ReplayNode with
+      consumer, guardianGovernance = rogueGovernance, namespace = "shadow", prefix = parseHexTextOrAbort ""
+      splitThreshold = defaultSplitThreshold, consumed = Set.empty
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+
+  publishResult <- discardResult $ trySubmit (actAs owner <> disclose shadowCoreStateDisclosure) do
+    exerciseCmd emitterCid PublishMessage with
+      nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
+      coreStateCid = shadowCoreStateCid, payer = owner, feeAllocation = None
+  checkAttackFailedWith "PublishMessage on a shadow CoreState" "core state guardianGovernance mismatch" publishResult
+  registrationResult <- discardResult $ trySubmit (actAs owner <> disclose paidRegistryDisclosure <> disclose shadowCoreStateDisclosure) do
+    exerciseCmd paidRegistryCid RegisterEmitter with
+      requester = owner, payer = owner, coreStateCid = Some shadowCoreStateCid
+      feeAllocation = Some registrationPayment, expectedGuardianGovernance = gg
+  checkAttackFailedWith "RegisterEmitter on a shadow CoreState" "core state guardianGovernance mismatch" registrationResult
+  (shadowClaimNodeCid, shadowClaimNodeDisclosure) <- claimedRootsNodeCovering gg consumer "shadow"
+  claimResult <- discardResult $ trySubmit
+    (actAs consumer <> disclose paidReplayRegistryDisclosure <> disclose shadowCoreStateDisclosure <> disclose shadowClaimNodeDisclosure) do
+    exerciseCmd paidReplayRegistryCid ClaimReplayRoot with
+      consumer, namespace = "shadow", splitThreshold = defaultSplitThreshold, payer = consumer
+      coreStateCid = Some shadowCoreStateCid, feeAllocation = Some claimPayment, expectedGuardianGovernance = gg
+      claimedRootsNodeCid = shadowClaimNodeCid
+  checkAttackFailedWith "ClaimReplayRoot on a shadow CoreState" "core state guardianGovernance mismatch" claimResult
+  consumeResult <- discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
+    exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA, consumer, namespace = "shadow"
+      replayNodeCid = rogueNodeCid
+  checkAttackFailedWith "VerifyAndConsumeVAA on a shadow ReplayNode" "replay node guardianGovernance mismatch" consumeResult
+  rogueRegistrationResult <- discardResult $ trySubmit (actAs owner <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = owner, payer = owner, coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+  checkAttackFailedWith "RegisterEmitter on a shadow EmitterRegistry" "registry guardianGovernance mismatch" rogueRegistrationResult
+  rogueClaimResult <- discardResult $ trySubmit
+    (actAs consumer <> disclose rogueReplayRegistryDisclosure <> disclose shadowClaimNodeDisclosure) do
+    exerciseCmd rogueReplayRegistryCid ClaimReplayRoot with
+      consumer, namespace = "shadow", splitThreshold = defaultSplitThreshold, payer = consumer
+      coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+      claimedRootsNodeCid = shadowClaimNodeCid
+  checkAttackFailedWith "ClaimReplayRoot on a shadow ReplayRootRegistry" "replay root registry guardianGovernance mismatch" rogueClaimResult
+
+----------------------------------------------------------------------
+-- Test 7: fee allocation controllers exclude gg
+----------------------------------------------------------------------
+
+testGuardianGovernanceIsNeverAFeeAllocationController : Script ()
+testGuardianGovernanceIsNeverAFeeAllocationController = do
+  mockAdmin <- allocateParty "NeverControllerMockAdmin"
+  let feeInstrument = InstrumentId with admin = mockAdmin, id = "MOCK"
+  bridge <- setupCoreBridge "NeverController" (Some feeInstrument)
+  relayer <- allocateParty "NeverControllerRelayer"
+  let gg = bridge.guardianGovernance
+  ggEmitterCid <- registerEmitterAs bridge gg
+  freeCoreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  (ggEmitterAfterFreePublishCid, freeMessage) <- submit (actAs gg <> disclose freeCoreStateDisclosure) do
+    exerciseCmd ggEmitterCid PublishMessage with
+      nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
+      coreStateCid = bridge.coreStateCid, payer = gg, feeAllocation = None
+  freeMessage.sequence === 0
+  paidCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
+  paidCoreStateDisclosure <- discloseAsGuardianGovernance bridge paidCoreStateCid
+  ggPayment <- mintAndAllocate mockAdmin gg bridge.feeCustody feeInstrument (feeToDecimal 1000)
+  paidResult <- discardResult $ trySubmit (actAs gg <> disclose paidCoreStateDisclosure) do
+    exerciseCmd ggEmitterAfterFreePublishCid PublishMessage with
+      nonce = 1, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
+      coreStateCid = paidCoreStateCid, payer = gg, feeAllocation = Some ggPayment
+  checkAttackFailedWith "gg pays a fee" "fee payer must not be guardianGovernance" paidResult
+  Some coreState <- queryContractId gg paidCoreStateCid
+  genesisResult <- trySubmit gg do createCmd coreState with feeRecipient = gg
+  checkFailsOnPrecondition "feeRecipient is gg at genesis" genesisResult
+
+----------------------------------------------------------------------
+-- Test 8: gg is the registrar of each emitter address
+----------------------------------------------------------------------
+
+testEmitterAddressUsesGuardianGovernanceAsRegistrar : Script ()
+testEmitterAddressUsesGuardianGovernanceAsRegistrar = do
+  bridge <- setupCoreBridge "Registrar" None
+  let gg = bridge.guardianGovernance
+  owners <- mapA (\ownerNumber -> allocateParty ("RegistrarOwner" <> show ownerNumber)) [0 .. 2]
+  forA_ (numberCases owners) \(expectedEmitterId, owner) -> do
+    emitterCid <- registerEmitterAs bridge owner
+    Some emitter <- queryContractId owner emitterCid
+    emitter.emitterId === expectedEmitterId
+    emitter.emitterAddress === emitterAddressFor gg owner expectedEmitterId
+    (_, message) <- publishVia gg bridge.coreStateCid owner emitterCid 0 (parseHexTextOrAbort "aa") 0
+    message.registrar === gg
+    message.owner === owner
+    message.emitterId === expectedEmitterId
+
+----------------------------------------------------------------------
+-- Test 9: the onboarding fee admin changes only onboarding fees
+----------------------------------------------------------------------
+
+testOnboardingFeeAdminChangesOnlyOnboardingFees : Script ()
+testOnboardingFeeAdminChangesOnlyOnboardingFees = do
+  bridge <- setupCoreBridge "FeeAdmin" None
+  newFeeAdmin <- allocateParty "FeeAdminSuccessor"
+  stranger <- allocateParty "FeeAdminStranger"
+  let gg = bridge.guardianGovernance
+      feeAdmin = bridge.onboardingFeeAdmin
+  Some coreState <- queryContractId gg bridge.coreStateCid
+  Some registry <- queryContractId gg bridge.emitterRegistryCid
+  Some replayRegistry <- queryContractId gg bridge.replayRegistryCid
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  let withRegistries = disclose registryDisclosure <> disclose replayRegistryDisclosure
+
+  -- Rows 1 and 2: each choice changes only its fee.
+  repricedRegistryCid <- submit (actAs feeAdmin <> withRegistries) do
+    exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 5
+  Some repricedRegistry <- queryContractId gg repricedRegistryCid
+  repricedRegistry === registry with registrationFee = 5
+  repricedReplayRegistryCid <- submit (actAs feeAdmin <> disclose replayRegistryDisclosure) do
+    exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 7
+  Some repricedReplayRegistry <- queryContractId gg repricedReplayRegistryCid
+  repricedReplayRegistry === replayRegistry with claimFee = 7
+  repricedRegistryDisclosure <- discloseAsGuardianGovernance bridge repricedRegistryCid
+  repricedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge repricedReplayRegistryCid
+  let withRepricedRegistries = disclose repricedRegistryDisclosure <> disclose repricedReplayRegistryDisclosure
+
+  -- Rows 3 and 4: each fee setter asserts the bounds of its fee.
+  oversizedFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+    exerciseCmd repricedRegistryCid SetRegistrationFee with newRegistrationFee = maxOnboardingFee + 1
+  checkAttackFailedWith "registration fee above maxOnboardingFee" "registration fee exceeds maxOnboardingFee" oversizedFeeResult
+  negativeClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+    exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = -1
+  checkAttackFailedWith "negative claim fee" "claim fee must not be negative" negativeClaimFeeResult
+  oversizedClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+    exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee + 1
+  checkAttackFailedWith "claim fee above maxOnboardingFee" "claim fee exceeds maxOnboardingFee" oversizedClaimFeeResult
+
+  -- Rows 5 to 10 and 13: each attack fails on authorization.
+  let feeAdminAttacks =
+        [ ("archive CoreState", discardResult $ trySubmit (actAs feeAdmin <> disclose coreStateDisclosure) do
+              archiveCmd bridge.coreStateCid)
+        , ("create CoreState with another messageFee", discardResult $ trySubmit (actAs feeAdmin) do
+              createCmd coreState with messageFee = 1)
+        , ("create EmitterRegistry with another nextId", discardResult $ trySubmit (actAs feeAdmin) do
+              createCmd repricedRegistry with nextId = 0)
+        , ("archive EmitterRegistry", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              archiveCmd repricedRegistryCid)
+        , ("archive ReplayRootRegistry", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              archiveCmd repricedReplayRegistryCid)
+        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
+        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              exerciseCmd repricedReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
+        , ("stranger sets the registration fee", discardResult $ trySubmit (actAs stranger <> withRepricedRegistries) do
+              exerciseCmd repricedRegistryCid SetRegistrationFee with newRegistrationFee = 6)
+        ]
+  forA_ feeAdminAttacks \(attackName, attack) -> attack >>= checkFailsOnMissingAuthorization attackName
+
+  -- Row 11: gg replaces the admin on both registries; only the admin field changes.
+  replacedRegistryCid <- submit gg do
+    exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
+  Some replacedRegistry <- queryContractId gg replacedRegistryCid
+  replacedRegistry === repricedRegistry with onboardingFeeAdmin = newFeeAdmin
+  replacedReplayRegistryCid <- submit gg do
+    exerciseCmd repricedReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
+  Some replacedReplayRegistry <- queryContractId gg replacedReplayRegistryCid
+  replacedReplayRegistry === repricedReplayRegistry with onboardingFeeAdmin = newFeeAdmin
+
+  -- Row 12: only the new admin sets each fee; maxOnboardingFee is accepted.
+  replacedRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedRegistryCid
+  replacedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedReplayRegistryCid
+  formerAdminResult <- trySubmit (actAs feeAdmin <> disclose replacedRegistryDisclosure) do
+    exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 6
+  checkFailsOnMissingAuthorization "former admin sets the registration fee" formerAdminResult
+  formerAdminClaimFeeResult <- trySubmit (actAs feeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = 6
+  checkFailsOnMissingAuthorization "former admin sets the claim fee" formerAdminClaimFeeResult
+  newAdminRegistryCid <- submit (actAs newFeeAdmin <> disclose replacedRegistryDisclosure) do
+    exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 6
+  Some newAdminRegistry <- queryContractId gg newAdminRegistryCid
+  newAdminRegistry === replacedRegistry with registrationFee = 6
+  maxClaimFeeReplayRegistryCid <- submit (actAs newFeeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee
+  Some maxClaimFeeReplayRegistry <- queryContractId gg maxClaimFeeReplayRegistryCid
+  maxClaimFeeReplayRegistry === replacedReplayRegistry with claimFee = maxOnboardingFee
+
+----------------------------------------------------------------------
+-- Test 10: a compromised onboarding fee admin stops only onboarding
+----------------------------------------------------------------------
+
+data ExpectedStepOutcome
+  = StepCommits
+  | StepFailsWithText Text
+  | StepFailsOnMissingAuthorization
+  deriving (Eq, Show)
+
+-- | One step after the admin sets both onboarding fees to maxOnboardingFee.
+data CompromisedFeeAdminCase = CompromisedFeeAdminCase with
+    caseName        : Text
+    step            : Script (Either SubmitError ())
+    expectedOutcome : ExpectedStepOutcome
+
+checkStepOutcome : Text -> ExpectedStepOutcome -> Either SubmitError () -> Script ()
+checkStepOutcome caseName expectedOutcome submitResult = case expectedOutcome of
+  StepCommits -> case submitResult of
+    Right () -> pure ()
+    Left submitError -> abort (caseName <> ": expected a commit, got: " <> show submitError)
+  StepFailsWithText expectedText -> checkAttackFailedWith caseName expectedText submitResult
+  StepFailsOnMissingAuthorization -> checkFailsOnMissingAuthorization caseName submitResult
+
+-- | The admin prices out new registrations and claims. Existing emitters,
+-- verification, replay roots and governance continue, and the fee
+-- destination stays feeCustody. A gg ceremony restores onboarding.
+testCompromisedFeeAdminStopsOnlyOnboarding : Script ()
+testCompromisedFeeAdminStopsOnlyOnboarding = do
+  bridge <- setupCoreBridge "CompromisedFeeAdmin" None
+  owner <- allocateParty "CompromisedFeeAdminOwner"
+  consumer <- allocateParty "CompromisedFeeAdminConsumer"
+  newcomer <- allocateParty "CompromisedFeeAdminNewcomer"
+  relayer <- allocateParty "CompromisedFeeAdminRelayer"
+  successorFeeAdmin <- allocateParty "CompromisedFeeAdminSuccessor"
+  let gg = bridge.guardianGovernance
+      feeAdmin = bridge.onboardingFeeAdmin
+  emitterCid <- registerEmitterAs bridge owner
+  rootCid <- claimReplayRootAs bridge consumer "compromised-fee-admin" defaultSplitThreshold
+  Some coreState <- queryContractId gg bridge.coreStateCid
+  [(registryCid, _)] <- query @EmitterRegistry gg
+
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
+  pricedOutRegistryCid <- submit (actAs feeAdmin <> disclose registryDisclosure) do
+    exerciseCmd registryCid SetRegistrationFee with newRegistrationFee = maxOnboardingFee
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  pricedOutReplayRegistryCid <- submit (actAs feeAdmin <> disclose replayRegistryDisclosure) do
+    exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee
+  pricedOutRegistryDisclosure <- discloseAsGuardianGovernance bridge pricedOutRegistryCid
+  pricedOutReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge pricedOutReplayRegistryCid
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  emitterDisclosure <- discloseAsGuardianGovernance bridge emitterCid
+  (newcomerNodeCid, newcomerNodeDisclosure) <- claimedRootsNodeCovering gg newcomer "newcomer"
+
+  let cases =
+        [ CompromisedFeeAdminCase "new registration without a fee"
+            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutRegistryDisclosure) do
+              exerciseCmd pricedOutRegistryCid RegisterEmitter with
+                requester = newcomer, payer = newcomer, coreStateCid = None, feeAllocation = None
+                expectedGuardianGovernance = gg)
+            (StepFailsWithText "registration fee due")
+        , CompromisedFeeAdminCase "new replay root claim without a fee"
+            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutReplayRegistryDisclosure <> disclose newcomerNodeDisclosure) do
+              exerciseCmd pricedOutReplayRegistryCid ClaimReplayRoot with
+                consumer = newcomer, namespace = "newcomer", splitThreshold = defaultSplitThreshold, payer = newcomer
+                coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg
+                claimedRootsNodeCid = newcomerNodeCid)
+            (StepFailsWithText "claim fee due")
+        , CompromisedFeeAdminCase "admin archives an existing emitter"
+            (discardResult $ trySubmit (actAs feeAdmin <> disclose emitterDisclosure) do archiveCmd emitterCid)
+            StepFailsOnMissingAuthorization
+        , CompromisedFeeAdminCase "existing emitter publishes"
+            (discardResult $ trySubmit (actAs owner <> disclose coreStateDisclosure) do
+              exerciseCmd emitterCid PublishMessage with
+                nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
+                coreStateCid = bridge.coreStateCid, payer = owner, feeAllocation = None)
+            StepCommits
+        , CompromisedFeeAdminCase "verifier parses and verifies a VAA"
+            (discardResult $ trySubmit (actAs newcomer <> disclose coreStateDisclosure) do
+              exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with
+                verifier = newcomer, encodedVAA = govSetFeeVAA)
+            StepCommits
+        , CompromisedFeeAdminCase "existing replay root consumes a VAA"
+            (discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
+              exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
+                encodedVAA = govSetFeeVAA, consumer
+                namespace = "compromised-fee-admin", replayNodeCid = rootCid)
+            StepCommits
+        , CompromisedFeeAdminCase "admin creates a CoreState that pays the admin"
+            (discardResult $ trySubmit (actAs feeAdmin) do createCmd coreState with feeRecipient = feeAdmin)
+            StepFailsOnMissingAuthorization
+        , CompromisedFeeAdminCase "relayer applies governance"
+            (tryRelayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA)
+            StepCommits
+        ]
+  forA_ cases \compromisedCase ->
+    compromisedCase.step >>= checkStepOutcome compromisedCase.caseName compromisedCase.expectedOutcome
+  [(_, coreStateAfterGovernance)] <- query @CoreState gg
+  coreStateAfterGovernance.feeRecipient === bridge.feeCustody
+
+  -- The gg ceremony replaces the admin; the successor restores free onboarding.
+  replacedRegistryCid <- submit gg do
+    exerciseCmd pricedOutRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = successorFeeAdmin
+  replacedReplayRegistryCid <- submit gg do
+    exerciseCmd pricedOutReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = successorFeeAdmin
+  replacedRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedRegistryCid
+  replacedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedReplayRegistryCid
+  _ <- submit (actAs successorFeeAdmin <> disclose replacedRegistryDisclosure) do
+    exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 0
+  _ <- submit (actAs successorFeeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = 0
+  newcomerEmitterCid <- registerEmitterAs bridge newcomer
+  Some newcomerEmitter <- queryContractId newcomer newcomerEmitterCid
+  newcomerEmitter.emitterId === 1
+  newcomerRootCid <- claimReplayRootAs bridge newcomer "newcomer" defaultSplitThreshold
+  Some newcomerRoot <- queryContractId newcomer newcomerRootCid
+  sort (signatory newcomerRoot) === sort [newcomer, gg]
+
+----------------------------------------------------------------------
+-- Test 11: target chain rule of each governance action
+----------------------------------------------------------------------
+
+-- | Relay is permissionless, so the target chain rule of 'applyGovernance'
+-- is the full gate on where a governance VAA applies.
+testGovernanceTargetChainRules : Script ()
+testGovernanceTargetChainRules = do
+  bridge <- setupCoreBridge "TargetChain" None
+  Some before <- queryContractId bridge.guardianGovernance bridge.coreStateCid
+  before.chainId === 75
+  now <- getTime
+  let guardianSetUpgradeTo chain = GuardianSetUpgrade with chain, newIndex = 1, newKeys = [devnetGuardianSet1Key]
+      setMessageFeeTo chain = SetMessageFee with chain, fee = 1000
+      transferFeesTo chain = TransferFees with chain, amount = transferFeesAmount, recipient = transferFeesRecipient
+      contractUpgradeTo chain = ContractUpgrade with chain, newContract = parseHexTextOrAbort (mconcat (replicate 32 "c1"))
+      cases =
+        [ ("GuardianSetUpgrade chain 75", guardianSetUpgradeTo 75, None)
+        , ("GuardianSetUpgrade chain 0", guardianSetUpgradeTo 0, None)
+        , ("GuardianSetUpgrade chain 2", guardianSetUpgradeTo 2, Some "guardianSetUpgrade: wrong target chain")
+        , ("SetMessageFee chain 75", setMessageFeeTo 75, None)
+        , ("SetMessageFee chain 0", setMessageFeeTo 0, Some "setMessageFee: wrong target chain")
+        , ("SetMessageFee chain 2", setMessageFeeTo 2, Some "setMessageFee: wrong target chain")
+        , ("TransferFees chain 75", transferFeesTo 75, None)
+        , ("TransferFees chain 0", transferFeesTo 0, None)
+        , ("TransferFees chain 2", transferFeesTo 2, Some "transferFees: wrong target chain")
+        , ("ContractUpgrade chain 75", contractUpgradeTo 75, None)
+        , ("ContractUpgrade chain 0", contractUpgradeTo 0, Some "contractUpgrade: wrong target chain")
+        , ("ContractUpgrade chain 2", contractUpgradeTo 2, Some "contractUpgrade: wrong target chain")
+        ]
+  forA_ cases \(caseName, action, expectedError) ->
+    case (expectedError, applyGovernance before now action) of
+      (None, Right _) -> pure ()
+      (Some expectedText, Left message) | message == expectedText -> pure ()
+      (_, outcome) -> abort (caseName <> ": unexpected outcome " <> show (fmap (const ()) outcome))

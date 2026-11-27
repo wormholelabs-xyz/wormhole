@@ -30,6 +30,17 @@ generate: dirs
 	rm -rf bridge
 	rm -rf node/pkg/proto
 	tools/bin/buf generate
+	$(MAKE) generate-canton-proto
+
+# Generate the Go stubs for the vendored Canton Ledger API v2 protos used by the
+# cantonclient gRPC client. These live in their own buf module (managed mode,
+# genproto status mapping) rather than the root /proto tree. The stubs are
+# committed; CI re-runs this and `git diff --exit-code` to ensure they match.
+.PHONY: generate-canton-proto
+generate-canton-proto: dirs
+	cd tools && ./build.sh
+	rm -rf node/pkg/cantonclient/proto/gen
+	cd node/pkg/cantonclient/proto && PATH="$(CURDIR)/tools/bin:$$PATH" "$(CURDIR)/tools/bin/buf" generate --path com/daml/ledger/api/v2
 
 .PHONY: lint
 lint:
@@ -70,7 +81,7 @@ test-integration-compile:
 ## Run fast tests for node and sdk, skipping tests gated by testing.Short() and fuzz smoke tests
 test-fast:
 	@echo "Running fast tests for node and sdk..."
-	@cd node && go test -short ./...
+	@cd node && go test -count=1 -short ./...
 	@cd sdk && go test -short ./...
 
 .PHONY: check-coverage

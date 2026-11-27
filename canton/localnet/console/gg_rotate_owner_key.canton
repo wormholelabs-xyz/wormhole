@@ -1,0 +1,331 @@
+// Rotate one owner key of the guardian namespace: remove GG_REMOVED_OWNER, add GG_ADDED_OWNER, keep the thresholds.
+// One run changes the PartyToParticipant signing keys of each rotation party and the namespace owners.
+// Run after owner_signing_prelude.canton and owner_key_rotation_lib.canton.
+// Phases:
+//   stop  Safety stop: each console participant shows the same namespace topology, each party has exactly the console
+//         participants as hosts, and each key set is the old or the new set. The console computes each intended change
+//         from this agreed topology, and each intended mapping has the guardian policy.
+//   sign  Generate every change, compare it with the intended change, then sign it. Store the signed changes (mode
+//         0600) in GG_ROTATION_SIGNED_TRANSACTIONS_FILE. A failure here stops the run before the first load:
+//         ROTATION NOT STARTED.
+//   load  Load 1: the root delegation of the added owner, if a participant does not show it. Load 2: one load call
+//         with the PartyToParticipant of each rotation party in GG_ROTATION_PARTY_IDS order, then the namespace
+//         definition. At most 3 attempts; each attempt loads only the changes that a participant does not show.
+//   check The agreed topology after the load: each mapping has the new key set (ROTATION applied), the hosts and the
+//         thresholds did not change, and the removed key is in no key set of the namespace. ROTATION done removes the
+//         stored file.
+// GG_ROTATION_MODE=resume skips the sign phase and loads the stored file. Both modes compare each stored change with
+// the intended change of the agreed topology before the load.
+// Environment:
+//   GG_PARTY_ID                           guardianGovernance party id.
+//   GG_ROTATION_PARTY_IDS                 Comma-separated ids of each party in the namespace, guardianGovernance last.
+//   GG_ROTATION_MODE                      fresh or resume.
+//   GG_ROTATION_SIGNED_TRANSACTIONS_FILE  Signed changes: written in fresh mode, read in resume mode.
+//   GG_KEPT_OWNER_PUBKEY_1/2              DER SPKI Ed25519 public keys of the two owners that stay.
+//   GG_KEPT_OWNER_SIGN_ARGV_1/2           Signer commands of those owners, each a JSON array of strings. The hash
+//                                         hex is appended as the last argument; stdout is a hex signature.
+//   GG_REMOVED_OWNER_PUBKEY               Public key of the owner to remove.
+//   GG_ADDED_OWNER_PUBKEY                 Public key of the new owner.
+//   GG_ADDED_OWNER_SIGN_ARGV              Signer command of the new owner.
+// Rehearsal faults and measurements (owner_key_input_checks.sh lists them):
+//   GG_ROTATION_FAULT_OMIT_PARTY_OF=<party name>          Load 2 omits that PartyToParticipant on each attempt.
+//   GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF=<party name>   Load 2 sends that PartyToParticipant without the
+//                                                         signature of the added owner.
+//   GG_ROTATION_MEASURE_SINGLE_LOAD=true                  The root delegation goes into load 2.
+//   GG_ROTATION_FAULT_PARTY_IDS                           Acts in gg_rotate_owner_key.sh (GG_ROTATION_PARTY_IDS).
+import com.digitalasset.canton.topology.ForceFlags
+import com.digitalasset.canton.config.NonNegativeDuration
+
+val rotationFaultVariableNames = Seq("GG_ROTATION_FAULT_SIGNER_OF", "GG_ROTATION_FAULT_OMIT_PARTY_OF",
+  "GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF", "GG_ROTATION_MEASURE_SINGLE_LOAD", "GG_ROTATION_FAULT_PARTY_IDS")
+rotationFaultVariableNames.foreach(variableName => sys.env.get(variableName).filter(_.nonEmpty)
+  .foreach(variableValue => println(s"ROTATION FAULT INJECTION ACTIVE: $variableName=$variableValue")))
+val omittedPartyName: Option[String] = sys.env.get("GG_ROTATION_FAULT_OMIT_PARTY_OF").filter(_.nonEmpty)
+val partyNameUnsignedByAddedOwner: Option[String] = sys.env.get("GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF").filter(_.nonEmpty)
+val measureSingleLoad: Boolean = sys.env.get("GG_ROTATION_MEASURE_SINGLE_LOAD").filter(_.nonEmpty) match {
+  case None => false
+  case Some("true") => true
+  case Some(other) => throw new IllegalArgumentException(s"GG_ROTATION_MEASURE_SINGLE_LOAD must be true or empty, not $other")
+}
+
+val guardianGovernancePartyId = PartyId.tryFromProtoPrimitive(requiredEnvironmentVariable("GG_PARTY_ID"))
+val rotationPartyIds: Seq[PartyId] =
+  requiredEnvironmentVariable("GG_ROTATION_PARTY_IDS").split(",", -1).toSeq.map(PartyId.tryFromProtoPrimitive)
+checkRotationPartyOrder(rotationPartyIds, guardianGovernancePartyId)
+(omittedPartyName ++ partyNameUnsignedByAddedOwner).foreach(faultPartyName =>
+  require(rotationPartyIds.exists(partyName(_) == faultPartyName), s"no rotation party named $faultPartyName"))
+println(s"ROTATION parties: ${rotationPartyIds.map(partyName).mkString(",")}")
+val rotationMode = requiredEnvironmentVariable("GG_ROTATION_MODE")
+require(rotationMode == "fresh" || rotationMode == "resume", s"GG_ROTATION_MODE must be fresh or resume, not $rotationMode")
+val signedTransactionsFile = requiredEnvironmentVariable("GG_ROTATION_SIGNED_TRANSACTIONS_FILE")
+require(rotationMode == "fresh" || partyNameUnsignedByAddedOwner.isEmpty, "GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF needs fresh mode")
+
+val keptOwners = Seq(loadOwnerKey("GG_KEPT_OWNER_PUBKEY_1", "GG_KEPT_OWNER_SIGN_ARGV_1"),
+  loadOwnerKey("GG_KEPT_OWNER_PUBKEY_2", "GG_KEPT_OWNER_SIGN_ARGV_2"))
+val removedOwnerKey = loadOwnerPublicKey("GG_REMOVED_OWNER_PUBKEY")
+val removedOwnerNamespace = Namespace(removedOwnerKey.fingerprint)
+val addedOwner = loadOwnerKey("GG_ADDED_OWNER_PUBKEY", "GG_ADDED_OWNER_SIGN_ARGV")
+require(keptOwners.map(_.namespace).distinct.size == 2, "kept owners must differ")
+require(!keptOwners.map(_.namespace).contains(removedOwnerNamespace), "removed owner is also a kept owner")
+require(!(keptOwners.map(_.namespace) :+ removedOwnerNamespace).contains(addedOwner.namespace), "added owner is already an owner")
+
+val participant = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+val synchronizerId = participant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+  .getOrElse(throw new RuntimeException("app-provider is not connected to global")).physicalSynchronizerId
+val synchronizerTopologyStore = TopologyStoreId.Synchronizer(synchronizerId)
+val protocolVersion = synchronizerId.protocolVersion
+println(s"ROTATION protocol version: $protocolVersion")
+require(protocolVersion == ProtocolVersion.v37, s"synchronizer protocol version $protocolVersion, expected 37")
+
+// Effective times only (a measurement). Each rotation input and each check reads all console participants.
+def appProviderValidFromOf(party: PartyId): java.time.Instant =
+  participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore).find(_.item.partyId == party)
+    .getOrElse(throw new RuntimeException(s"party to participant mapping of $party not found")).context.validFrom
+def appProviderNamespaceValidFrom(): java.time.Instant =
+  participant.topology.decentralized_namespaces.list(synchronizerTopologyStore).find(_.item.namespace == guardianGovernancePartyId.namespace)
+    .getOrElse(throw new RuntimeException("decentralized namespace not found")).context.validFrom
+def addedOwnerRootDelegationIsEffectiveOnEachParticipant(): Boolean =
+  participants.remote.forall(_.topology.namespace_delegations.list(synchronizerTopologyStore)
+    .exists(delegation => delegation.item.namespace == addedOwner.namespace && delegation.item.target == addedOwner.publicKey))
+
+val oldOwnerSet: Set[Namespace] = (keptOwners.map(_.namespace) :+ removedOwnerNamespace).toSet
+val newOwnerSet: Set[Namespace] = (keptOwners :+ addedOwner).map(_.namespace).toSet
+val oldSigningFingerprints = (keptOwners.map(_.publicKey) :+ removedOwnerKey).map(_.fingerprint).toSet
+val newSigningFingerprints = (keptOwners :+ addedOwner).map(_.publicKey.fingerprint).toSet
+val newSigningKeys = NonEmpty.mk(Set, keptOwners.head.publicKey, keptOwners(1).publicKey, addedOwner.publicKey)
+def fingerprintList(owners: Iterable[Namespace]): String = sortedFingerprintText(owners.map(_.fingerprint))
+def rotationTargetsOf(topology: AgreedNamespaceTopology): Seq[RotationTarget] =
+  rotationPartyIds.map(party => RotationTarget(partyName(party),
+    classifyRotationKeySet(signingFingerprintsOf(topology.partyMapping(party).mapping), oldSigningFingerprints, newSigningFingerprints))) :+
+    RotationTarget(namespaceRotationTargetName, classifyRotationKeySet(
+      topology.namespaceDefinition.mapping.owners.forgetNE.map(_.fingerprint), oldSigningFingerprints, newSigningFingerprints))
+def serialsOf(topology: AgreedNamespaceTopology): Seq[(String, PositiveInt)] =
+  rotationPartyIds.map(party => partyName(party) -> topology.partyMapping(party).serial) :+
+    (namespaceRotationTargetName -> topology.namespaceDefinition.serial)
+
+// Safety stop, before any signer call or change. Each participant bound in this console is a guardian host.
+def readNamespaceTopologyView(host: com.digitalasset.canton.console.RemoteParticipantReference): NamespaceTopologyView = {
+  val hostSynchronizerId = host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+    .getOrElse(throw new RuntimeException(s"SAFETY STOP: ${host.name} is not connected to global")).physicalSynchronizerId
+  require(hostSynchronizerId == synchronizerId, s"SAFETY STOP: ${host.name} is connected to $hostSynchronizerId, expected $synchronizerId")
+  val hostStore = TopologyStoreId.Synchronizer(hostSynchronizerId)
+  val namespaceDefinition = host.topology.decentralized_namespaces.list(hostStore).find(_.item.namespace == guardianGovernancePartyId.namespace)
+    .getOrElse(throw new RuntimeException(s"SAFETY STOP: ${host.name} shows no guardian namespace definition"))
+  NamespaceTopologyView(host.name, EffectiveTopologyMapping(namespaceDefinition.item, namespaceDefinition.context.serial),
+    host.topology.party_to_participant_mappings.list(hostStore).filter(_.item.partyId.namespace == guardianGovernancePartyId.namespace)
+      .map(partyToParticipant => EffectiveTopologyMapping(partyToParticipant.item, partyToParticipant.context.serial)),
+    host.topology.party_to_key_mappings.list(hostStore).map(_.item.party).filter(_.namespace == guardianGovernancePartyId.namespace))
+}
+def readNamespaceTopologyViews(): Seq[NamespaceTopologyView] = participants.remote.map(readNamespaceTopologyView)
+val consoleParticipantIds: Seq[ParticipantId] = participants.remote.map(_.id)
+// A participant can show a change up to a few seconds after another. Read again until the views agree, at most
+// topologyEffectiveMaxAttempts times.
+def readAgreedNamespaceTopology(): AgreedNamespaceTopology = {
+  var views = readNamespaceTopologyViews()
+  var attempt = 1
+  while (attempt < topologyEffectiveMaxAttempts && scala.util.Try(checkParticipantTopologyViewsAgree(views)).isFailure) {
+    Thread.sleep(topologyEffectivePollMillis)
+    attempt += 1
+    views = readNamespaceTopologyViews()
+  }
+  agreedNamespaceTopologyOf(views, consoleParticipantIds)
+}
+val topologyBefore = readAgreedNamespaceTopology()
+println(s"ROTATION participant views agree: ${participants.remote.map(_.name).sorted.mkString(",")}")
+checkRotationSafetyStop(topologyBefore.namespaceDefinition.mapping.owners.forgetNE.map(_.fingerprint),
+  topologyBefore.partyMappings.map(_.mapping), rotationPartyIds, oldSigningFingerprints, newSigningFingerprints)
+println("ROTATION safety stop passed")
+
+checkNamespaceIsGuardianPolicy(topologyBefore.namespaceDefinition.mapping)
+topologyBefore.partyMappings.foreach(partyToParticipant => checkHostingIsGuardianPolicy(partyToParticipant.mapping))
+val intendedChanges = intendedRotationChangesOf(topologyBefore, rotationPartyIds, newSigningKeys, newOwnerSet)
+val serialsBefore = serialsOf(topologyBefore)
+val targetsBefore = rotationTargetsOf(topologyBefore)
+println(s"ROTATION before: DN serial=${topologyBefore.namespaceDefinition.serial} threshold=${topologyBefore.namespaceDefinition.mapping.threshold} " +
+  s"owners=${fingerprintList(topologyBefore.namespaceDefinition.mapping.owners)}")
+println(s"ROTATION before: added owner root delegation=${if (addedOwnerRootDelegationIsEffectiveOnEachParticipant()) "present" else "absent"}")
+println(s"ROTATION before: ${targetsBefore.map(target => s"${target.name}=${target.keySet}").mkString(" ")}")
+
+var rotationSignatureCount = 0
+// generateIntendedTransaction: app-provider generates the change at the intended serial. Without a serial, Canton
+// gives an unchanged mapping its current serial. Before any signer call, the console compares the operation, the
+// serial, the mapping and the hash with the intended change.
+def generateIntendedTransaction(intended: IntendedTopologyChange, description: String): TopologyTransaction[TopologyChangeOp, TopologyMapping] = {
+  val generatedTransactions = participant.topology.transactions.generate(
+    Seq(Proposal(intended.mapping, synchronizerTopologyStore, TopologyChangeOp.Replace, Some(intended.serial))))
+  require(generatedTransactions.size == 1, s"$description: app-provider generated ${generatedTransactions.size} transactions, expected 1")
+  checkGeneratedTransactionIsIntended(generatedTransactions.head, intended, protocolVersion, description)
+}
+def signedBy(unsigned: TopologyTransaction[TopologyChangeOp, TopologyMapping], signers: Seq[OwnerKey]): GenericSignedTopologyTransaction = {
+  require(signers.nonEmpty, "no signers")
+  val signatures = signers.map { signer =>
+    rotationSignatureCount += 1
+    signWithOwnerKey(signer, unsigned.hash.hash)
+  }
+  signatures.tail.foldLeft(SignedTopologyTransaction.withSignature(unsigned, signatures.head, isProposal = false, protocolVersion))(
+    _.addSingleSignature(_))
+}
+def generateRotatedPartyToParticipant(party: PartyId) =
+  generateIntendedTransaction(intendedChanges.partyChanges.collectFirst { case (changedParty, change) if changedParty == party => change }
+    .getOrElse(throw new IllegalStateException(s"no intended change of ${partyName(party)}")), s"generated PartyToParticipant of ${partyName(party)}")
+
+def checkStored(storedTransactions: Seq[GenericSignedTopologyTransaction]): Unit =
+  checkStoredRotationTransactions(storedTransactions, rotationPartyIds, guardianGovernancePartyId.namespace,
+    rotationPartyIds.map(topologyBefore.partyMapping), topologyBefore.namespaceDefinition, newOwnerSet, newSigningKeys, addedOwner.publicKey)
+
+// Sign phase: each change gets its signatures before the first load.
+val signedTransactions: Seq[GenericSignedTopologyTransaction] = rotationMode match {
+  case "fresh" =>
+    require(classifyRotationOutcome(targetsBefore) == RotationOutcome.NotApplied,
+      "the topology is not in the state before this rotation. Use --resume for a half-applied rotation.")
+    require(!Files.exists(Paths.get(signedTransactionsFile)), s"$signedTransactionsFile exists. Use --resume.")
+    val signPhase = scala.util.Try {
+      val rootDelegation =
+        if (addedOwnerRootDelegationIsEffectiveOnEachParticipant()) None
+        else Some(signedBy(generateIntendedTransaction(intendedAddedOwnerRootDelegation(addedOwner.publicKey),
+          "generated root delegation of the added owner"), Seq(addedOwner)))
+      val partyChanges = rotationPartyIds.map(party => signedBy(generateRotatedPartyToParticipant(party), keptOwners :+ addedOwner))
+      val namespaceChange = signedBy(generateIntendedTransaction(intendedChanges.namespaceChange, "generated namespace definition"),
+        keptOwners :+ addedOwner)
+      rootDelegation.toSeq ++ partyChanges :+ namespaceChange
+    }
+    signPhase.failed.foreach { error =>
+      println(s"ROTATION NOT STARTED: ${error.getMessage.linesIterator.take(3).mkString(" ")}. The topology did not change.")
+      throw error
+    }
+    checkStored(signPhase.get)
+    writeSignedRotationTransactions(signedTransactionsFile, signPhase.get, protocolVersion)
+    require(readSignedRotationTransactions(signedTransactionsFile, protocolVersion).map(_.hash) == signPhase.get.map(_.hash),
+      s"$signedTransactionsFile does not read back as the signed transactions")
+    println(s"ROTATION sign phase: ${signPhase.get.size} transactions, $rotationSignatureCount signatures, stored in $signedTransactionsFile")
+    signPhase.get
+  case "resume" =>
+    val storedTransactions = readSignedRotationTransactions(signedTransactionsFile, protocolVersion)
+    checkStored(storedTransactions)
+    println(s"ROTATION sign phase skipped: stored transactions in $signedTransactionsFile")
+    storedTransactions
+}
+// Rehearsal fault: the same change without the signature of the added owner, in place of the stored change.
+val partyChangeUnsignedByAddedOwner: Option[(PartyId, GenericSignedTopologyTransaction)] =
+  partyNameUnsignedByAddedOwner.map { faultPartyName =>
+    val party = rotationPartyIds.find(partyName(_) == faultPartyName).get
+    party -> signedBy(generateRotatedPartyToParticipant(party), keptOwners)
+  }
+
+// Load phase. A change is effective when each console participant shows it.
+def isEffective(transaction: GenericSignedTopologyTransaction): Boolean = transaction.mapping match {
+  case _: NamespaceDelegation => addedOwnerRootDelegationIsEffectiveOnEachParticipant()
+  case mapping: PartyToParticipant => readNamespaceTopologyViews().forall(_.partyMappings.exists(partyToParticipant =>
+    partyToParticipant.mapping.partyId == mapping.partyId && signingFingerprintsOf(partyToParticipant.mapping) == newSigningFingerprints))
+  case _: DecentralizedNamespaceDefinition => readNamespaceTopologyViews().forall(_.namespaceDefinition.mapping.owners.forgetNE == newOwnerSet)
+  case other => throw new IllegalStateException(s"unexpected stored mapping ${other.code}")
+}
+val rotationLoadTimeout = NonNegativeDuration.ofSeconds(60)
+val maxLoadAttempts = 3
+val loadRetryPauseMillis = 5000
+val loadOrder = rotationLoadOrder(signedTransactions, rotationPartyIds)
+val namespaceAndPartyBatch =
+  if (measureSingleLoad) loadOrder.rootDelegation.filterNot(isEffective).toSeq ++ loadOrder.namespaceAndPartyBatch
+  else loadOrder.namespaceAndPartyBatch
+if (!measureSingleLoad) loadOrder.rootDelegation.filterNot(isEffective).foreach { rootDelegation =>
+  participant.topology.transactions.load(Seq(rootDelegation), synchronizerTopologyStore, ForceFlags.none, Some(rotationLoadTimeout))
+  awaitTopology("added owner root delegation")(isEffective(rootDelegation))
+  println("ROTATION load 1: added owner root delegation is effective")
+}
+def partyNameOf(transaction: GenericSignedTopologyTransaction): Option[String] = transaction.mapping match {
+  case mapping: PartyToParticipant => Some(partyName(mapping.partyId))
+  case _ => None
+}
+def transactionForLoadAttempt(transaction: GenericSignedTopologyTransaction): Option[GenericSignedTopologyTransaction] =
+  if (partyNameOf(transaction).exists(omittedPartyName.contains)) None
+  else partyChangeUnsignedByAddedOwner match {
+    case Some((party, unsignedByAddedOwner)) if partyNameOf(transaction).contains(partyName(party)) => Some(unsignedByAddedOwner)
+    case _ => Some(transaction)
+  }
+val transactionsNotEffectiveBeforeLoad = namespaceAndPartyBatch.filterNot(isEffective)
+var loadAttempt = 0
+var loadAttemptsFinished = false
+var completeBatchAcceptedInOneCall = false
+while (!loadAttemptsFinished) {
+  loadAttempt += 1
+  val loadCall = namespaceAndPartyBatch.filterNot(isEffective).flatMap(transactionForLoadAttempt)
+  if (loadCall.isEmpty) {
+    println(s"ROTATION load attempt $loadAttempt: nothing to load")
+    loadAttemptsFinished = true
+  } else {
+    val loadResult = scala.util.Try(
+      participant.topology.transactions.load(loadCall, synchronizerTopologyStore, ForceFlags.none, Some(rotationLoadTimeout)))
+    println(s"ROTATION load attempt $loadAttempt: ${loadCall.size} transactions, " +
+      loadResult.fold(error => s"rejected: ${error.getMessage.linesIterator.take(3).mkString(" ")}", _ => "accepted"))
+    if (loadResult.isSuccess) scala.util.Try(awaitTopology("load 2")(loadCall.forall(isEffective)))
+    if (loadAttempt == 1 && loadResult.isSuccess && loadCall == transactionsNotEffectiveBeforeLoad &&
+        transactionsNotEffectiveBeforeLoad == namespaceAndPartyBatch && namespaceAndPartyBatch.forall(isEffective))
+      completeBatchAcceptedInOneCall = true
+    if (namespaceAndPartyBatch.forall(isEffective) || loadAttempt >= maxLoadAttempts) loadAttemptsFinished = true
+    else Thread.sleep(loadRetryPauseMillis)
+  }
+}
+
+// The views of the console participants after the load. A difference here is not a safety stop: the load ran.
+val topologyAfterLoad = scala.util.Try(readAgreedNamespaceTopology()).fold({ error =>
+  println(s"ROTATION UNKNOWN: the participant views after the load do not agree: ${error.getMessage.linesIterator.take(3).mkString(" ")}")
+  throw error
+}, identity)
+classifyRotationOutcome(rotationTargetsOf(topologyAfterLoad)) match {
+  case RotationOutcome.FullyApplied =>
+    println("ROTATION applied: each participant shows the new key set for each mapping")
+  case RotationOutcome.NotApplied =>
+    val serialsAfter = serialsOf(topologyAfterLoad)
+    println(s"ROTATION NOT APPLIED: no mapping changed. Serials before ${serialsBefore.mkString(" ")}, after ${serialsAfter.mkString(" ")}. " +
+      "The removed key stays valid. The added key is not valid for any party. " +
+      s"The signed changes in $signedTransactionsFile stay loadable until another change takes their serials.")
+    require(serialsAfter == serialsBefore, "a serial changed, but each mapping has the key set from before the rotation")
+    throw new RuntimeException("rotation not applied")
+  case RotationOutcome.HalfApplied(targetsThatAcceptTheRemovedKey) =>
+    println(s"ROTATION HALF-APPLIED: still accept the removed key: ${targetsThatAcceptTheRemovedKey.mkString(",")}. " +
+      "Recover: run gg_rotate_owner_key.sh --resume with the same owner names. It loads the stored signed transactions.")
+    throw new RuntimeException("rotation half-applied")
+}
+
+// Postconditions, from the agreed views after the load.
+val namespaceAfter = topologyAfterLoad.namespaceDefinition
+require(namespaceAfter.mapping.owners.forgetNE == newOwnerSet, "namespace owners are not the new owner set")
+require(namespaceAfter.mapping.threshold == topologyBefore.namespaceDefinition.mapping.threshold, "namespace threshold changed")
+checkNamespaceIsGuardianPolicy(namespaceAfter.mapping)
+println(s"ROTATION after: DN serial=${namespaceAfter.serial} threshold=${namespaceAfter.mapping.threshold} " +
+  s"owners=${fingerprintList(namespaceAfter.mapping.owners)}")
+require(topologyAfterLoad.partyMappings.map(_.mapping.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+  "PartyToParticipant parties of the namespace changed")
+rotationPartyIds.foreach { party =>
+  val partyToParticipantAfter = topologyAfterLoad.partyMapping(party)
+  val mappingAfter = partyToParticipantAfter.mapping
+  val mappingBefore = topologyBefore.partyMapping(party).mapping
+  require(signingFingerprintsOf(mappingAfter) == newSigningFingerprints, s"${partyName(party)} signing keys are not the new set")
+  require(mappingAfter.participants.toSet == mappingBefore.participants.toSet, s"${partyName(party)} hosting changed")
+  require(mappingAfter.threshold == mappingBefore.threshold, s"${partyName(party)} confirmation threshold changed")
+  require(mappingAfter.partySigningKeysWithThreshold.map(_.threshold) == mappingBefore.partySigningKeysWithThreshold.map(_.threshold),
+    s"${partyName(party)} signing key threshold changed")
+  checkHostingIsGuardianPolicy(mappingAfter)
+  println(s"ROTATION after: PTP party=${partyName(party)} serial=${partyToParticipantAfter.serial} " +
+    s"confirmationThreshold=${mappingAfter.threshold} hosts=${mappingAfter.participants.size} " +
+    s"signingKeys=${mappingAfter.partySigningKeysWithThreshold.map(keys => s"${keys.threshold}-of-${keys.keys.size}").getOrElse("none")}")
+}
+// The removed key has no authority: it is no namespace owner and no party signing key on any console participant.
+checkRemovedOwnerKeyIsInNoKeySet(topologyAfterLoad, removedOwnerKey, newOwnerSet)
+println(s"ROTATION removed owner key ${removedOwnerKey.fingerprint.toProtoPrimitive} is in no key set of the namespace")
+val effectiveTimes = rotationPartyIds.map(party => partyName(party) -> appProviderValidFromOf(party)) :+
+  (namespaceRotationTargetName -> appProviderNamespaceValidFrom())
+if (completeBatchAcceptedInOneCall) {
+  println(s"ROTATION effective times (one load call): ${effectiveTimesText(effectiveTimes)}")
+  val effectiveTimeSpread = checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimes)
+  println(s"ROTATION effective times in load order, spread ${spreadSecondsText(effectiveTimeSpread)} s " +
+    s"(bound ${maxRotationEffectiveTimeSpread.getSeconds} s)")
+} else {
+  println(s"ROTATION effective times (loaded in more than one call): ${effectiveTimesText(effectiveTimes)}")
+}
+println(s"ROTATION signatures in this run: $rotationSignatureCount")
+
+// Each change of the stored file is effective. A load of the file again changes nothing.
+Files.delete(Paths.get(signedTransactionsFile))
+println(s"ROTATION stored signed transactions removed: $signedTransactionsFile")
+println("ROTATION done")

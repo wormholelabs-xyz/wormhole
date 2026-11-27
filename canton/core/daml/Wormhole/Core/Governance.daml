@@ -1,0 +1,152 @@
+-- | Governance packet parsing for the core ("Core") module, mirroring
+-- @ethereum/contracts/GovernanceStructs.sol@ and whitepapers 0002 / 0004.
+--
+-- A governance packet is the VAA payload and has the layout:
+--
+-- >  module(32) ‖ action(1) ‖ chain(2) ‖ <action-specific>
+module Wormhole.Core.Governance where
+
+import Wormhole.Core.Bytes
+
+-- | The "Core" module identifier: ASCII "Core" (0x436f7265) left-padded to 32
+-- bytes. All core-bridge governance packets carry this value.
+coreModule : HexBytes
+coreModule = parseHexTextOrAbort "00000000000000000000000000000000000000000000000000000000436f7265"
+
+-- | A parsed governance action. @RecoverChainId@ (EVM action 5) is intentionally
+-- absent — it repairs @block.chainid@ after an EVM fork and has no Canton analog.
+data GovernanceAction
+  = ContractUpgrade
+      with chain : Int; newContract : UniversalAddress
+  | GuardianSetUpgrade
+      with chain : Int; newIndex : Int; newKeys : [GuardianAddress]
+  | SetMessageFee
+      with chain : Int; fee : Int
+  | TransferFees
+      with chain : Int; amount : Int; recipient : UniversalAddress
+  deriving (Eq, Show)
+
+isGuardianSetUpgrade : GovernanceAction -> Bool
+isGuardianSetUpgrade action = case action of
+  GuardianSetUpgrade {} -> True
+  _ -> False
+
+-- | Exact packet lengths in bytes, per the guardian serializers in
+-- @sdk/vaa/payloads.go@: @BodyContractUpgrade@ (386-399),
+-- @BodyGuardianSetUpdate@ (402-418), @BodyCoreBridgeSetMessageFee@ (621-631),
+-- @BodyCoreBridgeTransferFees@ (645-671).
+contractUpgradePacketBytes : Int
+contractUpgradePacketBytes = 67  -- header(35) ‖ newContract(32)
+
+guardianSetUpgradePacketBytes : Int -> Int
+guardianSetUpgradePacketBytes keyCount = 40 + 20 * keyCount  -- header(35) ‖ index(4) ‖ count(1) ‖ keys(20 each)
+
+setMessageFeePacketBytes : Int
+setMessageFeePacketBytes = 67  -- header(35) ‖ fee(32)
+
+transferFeesPacketBytes : Int
+transferFeesPacketBytes = 99  -- header(35) ‖ amount(32) ‖ recipient(32)
+
+-- | Common header: module(32) ‖ action(1) ‖ chain(2).
+governanceHeaderBytes : Int
+governanceHeaderBytes = 35
+
+-- | Header plus GuardianSetUpgrade index(4) ‖ count(1), needed to read the key count.
+guardianSetUpgradeFixedBytes : Int
+guardianSetUpgradeFixedBytes = 40
+
+-- | Width of a uint256 governance word: the SetMessageFee fee and the TransferFees amount.
+uint256WordBytes : Int
+uint256WordBytes = 32
+
+-- | Width of 'maxGovernanceAmount' (0x7fffffffffffffff): 8 bytes, top bit clear.
+intWordBytes : Int
+intWordBytes = 8
+
+-- | Largest uint256 governance amount that parses: Daml Int max, 2^63 - 1.
+maxGovernanceAmount : Int
+maxGovernanceAmount = maxBound
+
+-- | A 32-byte big-endian uint256 word as an 'Int'. Aborts with
+-- "governance: <fieldName> exceeds the Int range" at 2^63 or more: the word
+-- fits only if its leading 24 bytes are zero and byte 24 has its top bit clear.
+-- The if-chain runs each check before 'bytesToInt'; 'intWordOf' slices only on demand.
+parseGovernanceAmountWord : Text -> HexBytes -> Int
+parseGovernanceAmountWord fieldName amountWord =
+  if byteLength amountWord /= uint256WordBytes
+    then error ("governance: " <> fieldName <> " must be " <> show uint256WordBytes <> " bytes")
+  else if sliceBytes 0 leadingByteCount amountWord /= intToBytesN 0 leadingByteCount
+    then error exceedsIntRangeMessage
+  else if highBitSet (intWordOf ())
+    then error exceedsIntRangeMessage
+  else
+    let amount = bytesToInt (intWordOf ())
+    -- Postcondition; unreachable after the top-bit check.
+    in if amount < 0
+         then error ("governance: " <> fieldName <> " parsed below zero")
+         else amount
+  where
+    leadingByteCount = uint256WordBytes - intWordBytes
+    intWordOf () = sliceBytes leadingByteCount intWordBytes amountWord
+    exceedsIntRangeMessage = "governance: " <> fieldName <> " exceeds the Int range (2^63 or more)"
+
+-- | Runs @parseAction@ only if @packet@ is exactly @expectedBytes@ bytes, so
+-- a wrong-length packet aborts with this error before any slice.
+requirePacketByteLength : Text -> Int -> HexBytes -> (() -> GovernanceAction) -> GovernanceAction
+requirePacketByteLength actionName expectedBytes packet parseAction =
+  if byteLength packet == expectedBytes
+    then parseAction ()
+    else error ("governance: " <> actionName <> " packet must be " <> show expectedBytes
+      <> " bytes, got " <> show (byteLength packet) <> " bytes")
+
+-- | Runs @parseAction@ only if @packet@ is at least @minimumBytes@ bytes.
+requireMinimumPacketByteLength : Text -> Int -> HexBytes -> (() -> GovernanceAction) -> GovernanceAction
+requireMinimumPacketByteLength packetName minimumBytes packet parseAction =
+  if byteLength packet >= minimumBytes
+    then parseAction ()
+    else error ("governance: " <> packetName <> " packet must be at least " <> show minimumBytes
+      <> " bytes, got " <> show (byteLength packet) <> " bytes")
+
+-- | Parse a governance packet. Checks the packet length before every slice:
+-- the header first, then the exact length of the action. Verifies the module
+-- is "Core" and dispatches on the action id. Aborts on unknown actions or
+-- malformed input.
+parseGovernance : MessagePayload -> GovernanceAction
+parseGovernance payload =
+  let packet = hexBytesOf payload in
+  requireMinimumPacketByteLength "Core governance" governanceHeaderBytes packet \_ ->
+    let
+      moduleId = sliceBytes 0 32 packet
+      action = bytesToInt (sliceBytes 32 1 packet)
+      chain = bytesToInt (sliceBytes 33 2 packet)
+    in
+      if moduleId /= coreModule
+        then error "governance: not the Core module"
+        else case action of
+          1 -> requirePacketByteLength "ContractUpgrade" contractUpgradePacketBytes packet \_ ->
+                 ContractUpgrade with
+                   chain
+                   newContract = parseHexBytesAsOrAbort (sliceBytes 35 32 packet)
+          2 -> requireMinimumPacketByteLength "GuardianSetUpgrade" guardianSetUpgradeFixedBytes packet \_ ->
+                 let keyCount = bytesToInt (sliceBytes 39 1 packet)
+                 in requirePacketByteLength "GuardianSetUpgrade" (guardianSetUpgradePacketBytes keyCount) packet \_ ->
+                      GuardianSetUpgrade with
+                        chain
+                        newIndex = bytesToInt (sliceBytes 35 4 packet)
+                        newKeys = parseKeys packet 40 keyCount
+          3 -> requirePacketByteLength "SetMessageFee" setMessageFeePacketBytes packet \_ ->
+                 SetMessageFee with
+                   chain
+                   fee = parseGovernanceAmountWord "SetMessageFee fee" (sliceBytes 35 uint256WordBytes packet)
+          4 -> requirePacketByteLength "TransferFees" transferFeesPacketBytes packet \_ ->
+                 TransferFees with
+                   chain
+                   amount = parseGovernanceAmountWord "TransferFees amount" (sliceBytes 35 uint256WordBytes packet)
+                   recipient = parseHexBytesAsOrAbort (sliceBytes 67 32 packet)
+          _ -> error ("governance: unsupported action " <> show action)
+
+-- | Parse @count@ consecutive 20-byte guardian addresses starting at byte
+-- @offset@.
+parseKeys : HexBytes -> Int -> Int -> [GuardianAddress]
+parseKeys packet offset count =
+  map (\keyPosition -> parseHexBytesAsOrAbort (sliceBytes (offset + keyPosition * 20) 20 packet)) [0 .. count - 1]

@@ -1,0 +1,28 @@
+// Vet or unvet packages on LocalNet participants, then print the vetting state of each package on each participant.
+// Environment: VETTING_ACTION (vet | unvet | show), VETTING_PACKAGE_IDS and VETTING_PARTICIPANTS (comma-separated).
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+import com.digitalasset.canton.topology.transaction.VettedPackage
+import com.digitalasset.canton.topology.ForceFlags
+
+def commaSeparated(name: String): Seq[String] = sys.env(name).split(",").toSeq.map(_.trim).filter(_.nonEmpty)
+val packageIds = commaSeparated("VETTING_PACKAGE_IDS")
+val selectedParticipants = commaSeparated("VETTING_PARTICIPANTS").map(name => participants.remote.find(_.name == name).getOrElse(throw new RuntimeException(s"unknown participant $name")))
+require(packageIds.nonEmpty && packageIds.forall(_.matches("^[0-9a-f]{64}$")), "VETTING_PACKAGE_IDS must be 64 lowercase hex package ids")
+def storeOf(host: com.digitalasset.canton.console.RemoteParticipantReference) =
+  TopologyStoreId.Synchronizer(host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+    .getOrElse(throw new RuntimeException(s"${host.name} is not connected to global")).physicalSynchronizerId)
+def vettedPackageIds(host: com.digitalasset.canton.console.RemoteParticipantReference): Set[String] =
+  host.topology.vetted_packages.list(store = Some(storeOf(host)), filterParticipant = host.id.filterString).flatMap(_.item.packages.map(_.packageId)).toSet
+selectedParticipants.foreach { host =>
+  sys.env("VETTING_ACTION") match {
+    case "vet" => host.topology.vetted_packages.propose_delta(host.id, adds = packageIds.map(VettedPackage(_, None, None)), store = storeOf(host))
+    case "unvet" => host.topology.vetted_packages.propose_delta(host.id, removes = packageIds.map(com.digitalasset.daml.lf.data.Ref.PackageId.assertFromString), store = storeOf(host), force = ForceFlags.none)
+    case "show" =>
+    case other => throw new RuntimeException(s"unknown VETTING_ACTION $other")
+  }
+}
+Thread.sleep(3000)
+selectedParticipants.foreach { host =>
+  val vetted = vettedPackageIds(host)
+  packageIds.foreach(packageId => println(s"VETTING ${host.name} ${packageId.take(12)} vetted=${vetted.contains(packageId)}"))
+}
